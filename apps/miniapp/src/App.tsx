@@ -82,6 +82,22 @@ export default function App() {
     let reloading = false;
     const recoverDeviceSession = () => {
       if (reloading) return;
+      // 旧机/存储异常时反复 DEVICE_* 会把页面刷成死循环；短窗口内只提示一次
+      const stampKey = 'nn_device_recover_at';
+      const now = Date.now();
+      try {
+        const last = Number(sessionStorage.getItem(stampKey) || '0');
+        if (last && now - last < 12_000) {
+          setToken(null);
+          setCachedSession(null);
+          setSession(null);
+          setError('设备会话异常，请完全关闭小程序后重新打开');
+          return;
+        }
+        sessionStorage.setItem(stampKey, String(now));
+      } catch {
+        // ignore storage errors
+      }
       reloading = true;
       setToken(null);
       setCachedSession(null);
@@ -108,8 +124,15 @@ export default function App() {
       setError('请从 Telegram 打开小程序');
       return;
     }
+    let deviceId = '';
+    try {
+      deviceId = getDeviceId();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '设备标识初始化失败');
+      return;
+    }
     api
-      .login(initData, getDeviceId(), getBotUsername() ?? undefined)
+      .login(initData, deviceId, getBotUsername() ?? undefined)
       .then((res) => {
         setToken(res.token);
         const s: Session = {
@@ -125,7 +148,12 @@ export default function App() {
         else if (!s.onboarding.deviceBound) navigate('/bind-device', { replace: true });
       })
       .catch((e) => {
-        if (!getCachedSession()) setError(e.message);
+        const code = (e as { code?: string }).code;
+        if (code === 'DEVICE_MISMATCH') {
+          setError('此账号已绑定其他设备，请先在原设备解绑或联系客服');
+          return;
+        }
+        if (!getCachedSession()) setError(e.message || '登录失败');
       });
   }, [navigate]);
 
