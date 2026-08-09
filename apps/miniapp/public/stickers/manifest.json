@@ -1,0 +1,233 @@
+[
+  {
+    "name": "掌声送给你",
+    "file": "applause.gif",
+    "url": "/stickers/applause.gif",
+    "sortOrder": 1,
+    "animated": true
+  },
+  {
+    "name": "胆量很大",
+    "file": "bold.gif",
+    "url": "/stickers/bold.gif",
+    "sortOrder": 2,
+    "animated": true
+  },
+  {
+    "name": "猫猫嫌弃",
+    "file": "cat-dislike.gif",
+    "url": "/stickers/cat-dislike.gif",
+    "sortOrder": 3,
+    "animated": true
+  },
+  {
+    "name": "猫猫路过",
+    "file": "cat-pass.gif",
+    "url": "/stickers/cat-pass.gif",
+    "sortOrder": 4,
+    "animated": true
+  },
+  {
+    "name": "猫猫打拳",
+    "file": "cat-punch.gif",
+    "url": "/stickers/cat-punch.gif",
+    "sortOrder": 5,
+    "animated": true
+  },
+  {
+    "name": "赌气气",
+    "file": "duqi.gif",
+    "url": "/stickers/duqi.gif",
+    "sortOrder": 6,
+    "animated": true
+  },
+  {
+    "name": "医猫了",
+    "file": "emo-cat.gif",
+    "url": "/stickers/emo-cat.gif",
+    "sortOrder": 7,
+    "animated": true
+  },
+  {
+    "name": "眼神回应",
+    "file": "eye-reply.gif",
+    "url": "/stickers/eye-reply.gif",
+    "sortOrder": 8,
+    "animated": true
+  },
+  {
+    "name": "为了部落",
+    "file": "for-horde.gif",
+    "url": "/stickers/for-horde.gif",
+    "sortOrder": 9,
+    "animated": true
+  },
+  {
+    "name": "牛啤",
+    "file": "niupi.gif",
+    "url": "/stickers/niupi.gif",
+    "sortOrder": 10,
+    "animated": true
+  },
+  {
+    "name": "给！",
+    "file": "panda-give.gif",
+    "url": "/stickers/panda-give.gif",
+    "sortOrder": 11,
+    "animated": true
+  },
+  {
+    "name": "下次吵架",
+    "file": "quarrel.gif",
+    "url": "/stickers/quarrel.gif",
+    "sortOrder": 12,
+    "animated": true
+  },
+  {
+    "name": "给你一巴掌",
+    "file": "slap.gif",
+    "url": "/stickers/slap.gif",
+    "sortOrder": 13,
+    "animated": true
+  },
+  {
+    "name": "溜了溜了",
+    "file": "slip-away.gif",
+    "url": "/stickers/slip-away.gif",
+    "sortOrder": 14,
+    "animated": true
+  },
+  {
+    "name": "我在",
+    "file": "wozai.gif",
+    "url": "/stickers/wozai.gif",
+    "sortOrder": 15,
+    "animated": true
+  },
+  {
+    "name": "笨蛋",
+    "file": "bendan.jpg",
+    "url": "/stickers/bendan.jpg",
+    "sortOrder": 16,
+    "animated": false
+  },
+  {
+    "name": "流泪猫咪",
+    "file": "cat-cry.jpg",
+    "url": "/stickers/cat-cry.jpg",
+    "sortOrder": 17,
+    "animated": false
+  },
+  {
+    "name": "猫猫嘲笑",
+    "file": "cat-laugh.jpg",
+    "url": "/stickers/cat-laugh.jpg",
+    "sortOrder": 18,
+    "animated": false
+  },
+  {
+    "name": "串门",
+    "file": "chuanmen.jpg",
+    "url": "/stickers/chuanmen.jpg",
+    "sortOrder": 19,
+    "animated": false
+  },
+  {
+    "name": "问号脸",
+    "file": "emoji-q.jpg",
+    "url": "/stickers/emoji-q.jpg",
+    "sortOrder": 20,
+    "animated": false
+  },
+  {
+    "name": "脑子空空",
+    "file": "empty-brain.jpg",
+    "url": "/stickers/empty-brain.jpg",
+    "sortOrder": 21,
+    "animated": false
+  },
+  {
+    "name": "本群关系网",
+    "file": "group-net.jpg",
+    "url": "/stickers/group-net.jpg",
+    "sortOrder": 22,
+    "animated": false
+  },
+  {
+    "name": "好家伙",
+    "file": "hao-jiahuo.jpg",
+    "url": "/stickers/hao-jiahuo.jpg",
+    "sortOrder": 23,
+    "animated": false
+  },
+  {
+    "name": "已红温",
+    "file": "hongwen.jpg",
+    "url": "/stickers/hongwen.jpg",
+    "sortOrder": 24,
+    "animated": false
+  },
+  {
+    "name": "流泪吗喽",
+    "file": "malou-cry.jpg",
+    "url": "/stickers/malou-cry.jpg",
+    "sortOrder": 25,
+    "animated": false
+  },
+  {
+    "name": "你不准玩微信",
+    "file": "no-wechat.jpg",
+    "url": "/stickers/no-wechat.jpg",
+    "sortOrder": 26,
+    "animated": false
+  },
+  {
+    "name": "又关我事",
+    "file": "none-my-biz.jpg",
+    "url": "/stickers/none-my-biz.jpg",
+    "sortOrder": 27,
+    "animated": false
+  },
+  {
+    "name": "哦哈哟",
+    "file": "ohayo.jpg",
+    "url": "/stickers/ohayo.jpg",
+    "sortOrder": 28,
+    "animated": false
+  },
+  {
+    "name": "熊猫头流泪",
+    "file": "panda-cry.jpg",
+    "url": "/stickers/panda-cry.jpg",
+    "sortOrder": 29,
+    "animated": false
+  },
+  {
+    "name": "等我有钱了",
+    "file": "rich-life.jpg",
+    "url": "/stickers/rich-life.jpg",
+    "sortOrder": 30,
+    "animated": false
+  },
+  {
+    "name": "谢谢您喽",
+    "file": "thanks.jpg",
+    "url": "/stickers/thanks.jpg",
+    "sortOrder": 31,
+    "animated": false
+  },
+  {
+    "name": "大拇指",
+    "file": "thumb.jpg",
+    "url": "/stickers/thumb.jpg",
+    "sortOrder": 32,
+    "animated": false
+  },
+  {
+    "name": "月入百万一定灵",
+    "file": "xiaotailing.jpg",
+    "url": "/stickers/xiaotailing.jpg",
+    "sortOrder": 33,
+    "animated": false
+  }
+]

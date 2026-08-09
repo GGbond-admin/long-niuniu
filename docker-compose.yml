@@ -1,0 +1,24 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: niuniu-postgres
+    environment:
+      POSTGRES_USER: niuniu
+      POSTGRES_PASSWORD: niuniu_dev_pw
+      POSTGRES_DB: niuniu
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    container_name: niuniu-redis
+    ports:
+      - "6380:6379"
+    volumes:
+      - redisdata:/data
+
+volumes:
+  pgdata:
+  redisdata:

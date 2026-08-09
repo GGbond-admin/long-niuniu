@@ -1,0 +1,19 @@
+{
+  "name": "zhizun-niuniu",
+  "private": true,
+  "version": "0.1.0",
+  "description": "至尊牛牛 — Telegram 游戏厅（Bot + Mini App + Admin + API）",
+  "scripts": {
+    "dev:backend": "pnpm --filter backend dev",
+    "dev:miniapp": "pnpm --filter miniapp dev",
+    "dev:admin": "pnpm --filter admin dev",
+    "test": "pnpm --filter backend test",
+    "build": "pnpm -r build"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "playwright": "^1.62.1"
+  }
+}

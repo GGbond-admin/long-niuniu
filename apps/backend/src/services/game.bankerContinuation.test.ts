@@ -1,0 +1,379 @@
+import { RoundPhase } from '@prisma/client';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+const memory = vi.hoisted(() => {
+  const rounds = new Map<string, any>();
+  const bids = new Map<string, any>();
+  const users = new Map<string, any>();
+  const wallets = new Map<string, any>();
+  const events: any[] = [];
+  const room = {
+    id: 'room-1',
+    gameCode: 'SUPREME_NIUNIU',
+    status: 'ACTIVE',
+    minPlayers: 2,
+  };
+  let roundCounter = 1;
+  let bidCounter = 0;
+
+  const baseSettings = {
+    hand: {},
+    betting: {},
+    fees: {
+      bankerSeatFeeRatio: 0.01,
+      serviceFeeCents: 100,
+      packetPerHeadCents: 104,
+      rakeRatio: 0.05,
+    },
+    rebate: {},
+    round: {
+      bidDurationSeconds: 30,
+      betDurationSeconds: 7,
+      claimDurationSeconds: 30,
+      continuationWindowSeconds: 30,
+      bankerBidMinCents: 10_000,
+      bankerBidMaxCents: 1_000_000,
+      trendLength: 10,
+      assistantEnabled: true,
+      autoStart: false,
+      autoTailPacketEnabled: false,
+      autoPublishPacketEnabled: false,
+      tailPackerBankerName: 'banker-tail',
+      tailPackerPlayerName: 'player-tail',
+    },
+    rewards: {},
+  };
+
+  const matchingRounds = (where: any) =>
+    [...rounds.values()].filter((round) => {
+      if (where.roomId && round.roomId !== where.roomId) return false;
+      if (typeof where.phase === 'string' && round.phase !== where.phase) return false;
+      if (where.phase?.in && !where.phase.in.includes(round.phase)) return false;
+      return true;
+    });
+
+  const roundApi = {
+    findUnique: async ({ where, include, select }: any) => {
+      const round = where.id
+        ? rounds.get(where.id)
+        : [...rounds.values()].find(
+            (item) =>
+              item.roomId === where.roomId_seqNo?.roomId
+              && item.seqNo === where.roomId_seqNo?.seqNo,
+          );
+      if (!round) return null;
+      const result: any = { ...round };
+      if (include?.room || select?.room) result.room = room;
+      if (include?.bids) {
+        result.bids = [...bids.values()]
+          .filter((bid) => bid.roundId === round.id)
+          .sort((left, right) => {
+            if (left.amountCents !== right.amountCents) {
+              return left.amountCents > right.amountCents ? -1 : 1;
+            }
+            return left.createdAt.getTime() - right.createdAt.getTime();
+          });
+      }
+      return result;
+    },
+    findFirst: async ({ where, orderBy }: any) => {
+      const matches = matchingRounds(where);
+      if (orderBy?.seqNo === 'desc') matches.sort((left, right) => right.seqNo - left.seqNo);
+      return matches[0] ? { ...matches[0] } : null;
+    },
+    aggregate: async ({ where }: any) => {
+      const seqNos = matchingRounds(where).map((round) => round.seqNo);
+      return { _max: { seqNo: seqNos.length ? Math.max(...seqNos) : null } };
+    },
+    create: async ({ data }: any) => {
+      roundCounter += 1;
+      const round = {
+        id: `round-${roundCounter}`,
+        roomId: data.roomId,
+        seqNo: data.seqNo,
+        phase: data.phase ?? 'WAITING',
+        bankerId: null,
+        potCents: 0n,
+        bankerReservedCents: 0n,
+        isContinued: false,
+        continuationUsed: false,
+        version: 0,
+        configSnapshot: null,
+        bidEndsAt: null,
+        betEndsAt: null,
+        finishedAt: null,
+      };
+      rounds.set(round.id, round);
+      return { ...round };
+    },
+    update: async ({ where, data }: any) => {
+      const round = rounds.get(where.id);
+      if (!round) throw new Error('ROUND_NOT_FOUND');
+      for (const [key, value] of Object.entries(data)) {
+        if (value && typeof value === 'object' && 'increment' in value) {
+          round[key] += (value as { increment: number }).increment;
+        } else {
+          round[key] = value;
+        }
+      }
+      return { ...round };
+    },
+  };
+
+  const bankerBidApi = {
+    upsert: async ({ where, create, update }: any) => {
+      const existing = [...bids.values()].find(
+        (bid) =>
+          bid.roundId === where.roundId_userId.roundId
+          && bid.userId === where.roundId_userId.userId,
+      );
+      if (existing) {
+        Object.assign(existing, update);
+        return { ...existing };
+      }
+      bidCounter += 1;
+      const bid = {
+        id: `bid-${bidCounter}`,
+        won: false,
+        createdAt: new Date(Date.now() + bidCounter),
+        ...create,
+      };
+      bids.set(bid.id, bid);
+      return { ...bid };
+    },
+    updateMany: async ({ where, data }: any) => {
+      for (const bid of bids.values()) {
+        if (bid.roundId === where.roundId) Object.assign(bid, data);
+      }
+      return { count: bids.size };
+    },
+    update: async ({ where, data }: any) => {
+      const bid = bids.get(where.id);
+      if (!bid) throw new Error('BID_NOT_FOUND');
+      Object.assign(bid, data);
+      return { ...bid };
+    },
+  };
+
+  const prisma = {
+    round: roundApi,
+    bankerBid: bankerBidApi,
+    user: {
+      findUnique: async ({ where }: any) => {
+        const user = users.get(where.id);
+        return user ? { ...user } : null;
+      },
+    },
+    wallet: {
+      findUnique: async ({ where }: any) => wallets.get(where.userId) ?? null,
+    },
+    roomMember: {
+      count: async () => 2,
+    },
+    roundEvent: {
+      create: async ({ data }: any) => {
+        events.push(data);
+        return data;
+      },
+    },
+  };
+
+  const reset = () => {
+    rounds.clear();
+    bids.clear();
+    users.clear();
+    wallets.clear();
+    events.length = 0;
+    roundCounter = 1;
+    bidCounter = 0;
+    const snapshot = JSON.parse(JSON.stringify(baseSettings));
+    rounds.set('round-1', {
+      id: 'round-1',
+      roomId: room.id,
+      seqNo: 1,
+      phase: 'BANKER_BID',
+      bankerId: null,
+      potCents: 0n,
+      bankerReservedCents: 0n,
+      isContinued: false,
+      continuationUsed: false,
+      version: 0,
+      configSnapshot: snapshot,
+      bidEndsAt: new Date(Date.now() + 30_000),
+      betEndsAt: null,
+      finishedAt: null,
+    });
+    for (const id of ['banker-a', 'player-b']) {
+      const wallet = { userId: id, availableCents: 5_000_000n };
+      wallets.set(id, wallet);
+      users.set(id, {
+        id,
+        uid: id,
+        nickname: id,
+        status: 'ACTIVE',
+        kind: 'REAL',
+        kyc: { status: 'APPROVED' },
+        wallet,
+        virtualPlayer: null,
+        roomMemberships: [{ roomId: room.id, status: 'ACTIVE' }],
+      });
+    }
+  };
+
+  return {
+    baseSettings,
+    bids,
+    events,
+    prisma,
+    reset,
+    rounds,
+    settings: JSON.parse(JSON.stringify(baseSettings)),
+    users,
+  };
+});
+
+vi.mock('../config.js', () => ({
+  env: { sensitiveDataKey: 'test-key', tngPacketHosts: [] },
+}));
+
+vi.mock('../lib/prisma.js', () => ({ prisma: memory.prisma }));
+
+vi.mock('../lib/transaction.js', () => ({
+  serializable: async (task: (tx: any) => Promise<unknown>) => task(memory.prisma),
+}));
+
+vi.mock('./gameSettings.js', () => ({
+  getGameSettings: async () => memory.settings,
+  parseSettingsSnapshot: (value: unknown) => value,
+  settingsSnapshot: (value: unknown) => JSON.parse(JSON.stringify(value)),
+  setAssistantService: vi.fn(),
+}));
+
+vi.mock('./wallet.js', () => ({
+  freezeBanker: vi.fn(),
+  transfer: vi.fn(),
+  unfreeze: vi.fn(),
+}));
+
+import {
+  closeBidding,
+  continueBanker,
+  GameError,
+  placeBankerBid,
+  startRound,
+} from './game.js';
+
+function finishRound(roundId: string, finishedAt = new Date()) {
+  const round = memory.rounds.get(roundId);
+  round.phase = RoundPhase.FINISHED;
+  round.finishedAt = finishedAt;
+  round.betEndsAt = null;
+  round.bankerReservedCents = 0n;
+}
+
+describe('庄家竞拍与续庄完整循环', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-07T07:00:00.000Z'));
+    memory.reset();
+    memory.settings = JSON.parse(JSON.stringify(memory.baseSettings));
+  });
+
+  it('最高价中标，续一次后强制重拍，原庄可再次中标并重新获得续庄资格', async () => {
+    await placeBankerBid('round-1', 'player-b', 40_000n);
+    await placeBankerBid('round-1', 'banker-a', 50_000n);
+    const first = await closeBidding('round-1');
+    expect(first).toMatchObject({
+      bankerId: 'banker-a',
+      potCents: 50_000n,
+      phase: RoundPhase.BETTING,
+    });
+
+    finishRound('round-1', new Date(Date.now() - 2_000));
+    memory.settings = {
+      ...memory.settings,
+      fees: {
+        ...memory.settings.fees,
+        bankerSeatFeeRatio: 0.2,
+        serviceFeeCents: 5_000,
+      },
+      round: {
+        ...memory.settings.round,
+        betDurationSeconds: 99,
+        continuationWindowSeconds: 1,
+      },
+    };
+
+    const second = await continueBanker('round-1', 'banker-a');
+    expect(second).toMatchObject({
+      seqNo: 2,
+      bankerId: 'banker-a',
+      phase: RoundPhase.BETTING,
+      isContinued: true,
+      continuationUsed: true,
+      bankerReservedCents: 50_600n,
+    });
+    expect(second.betEndsAt?.getTime() - Date.now()).toBe(7_000);
+    expect(second.configSnapshot).toEqual(memory.baseSettings);
+
+    finishRound(second.id);
+    await expect(continueBanker(second.id, 'banker-a')).rejects.toMatchObject<
+      Partial<GameError>
+    >({
+      code: 'CONTINUATION_ALREADY_USED',
+    });
+
+    const thirdWaiting = [...memory.rounds.values()].find((round) => round.seqNo === 3);
+    expect(thirdWaiting?.phase).toBe(RoundPhase.WAITING);
+    await startRound(thirdWaiting.id, true);
+    await placeBankerBid(thirdWaiting.id, 'player-b', 60_000n);
+    await placeBankerBid(thirdWaiting.id, 'banker-a', 70_000n);
+    const third = await closeBidding(thirdWaiting.id);
+    expect(third).toMatchObject({
+      seqNo: 3,
+      bankerId: 'banker-a',
+      potCents: 70_000n,
+      phase: RoundPhase.BETTING,
+      isContinued: false,
+      continuationUsed: false,
+    });
+
+    finishRound(third.id);
+    const fourth = await continueBanker(third.id, 'banker-a');
+    expect(fourth).toMatchObject({
+      seqNo: 4,
+      bankerId: 'banker-a',
+      phase: RoundPhase.BETTING,
+      isContinued: true,
+    });
+  });
+
+  it('截标时跳过已失去资格的最高出价者', async () => {
+    await placeBankerBid('round-1', 'player-b', 40_000n);
+    await placeBankerBid('round-1', 'banker-a', 50_000n);
+    memory.users.get('banker-a').status = 'SUSPENDED';
+
+    const round = await closeBidding('round-1');
+
+    expect(round).toMatchObject({
+      bankerId: 'player-b',
+      potCents: 40_000n,
+      phase: RoundPhase.BETTING,
+    });
+  });
+
+  it('来源局缺失配置快照时禁止续庄，避免使用实时费用和时长', async () => {
+    const first = memory.rounds.get('round-1');
+    first.phase = RoundPhase.FINISHED;
+    first.bankerId = 'banker-a';
+    first.potCents = 50_000n;
+    first.finishedAt = new Date();
+    first.configSnapshot = null;
+
+    await expect(continueBanker(first.id, 'banker-a')).rejects.toMatchObject<
+      Partial<GameError>
+    >({
+      code: 'ROUND_CONFIG_SNAPSHOT_MISSING',
+    });
+  });
+});

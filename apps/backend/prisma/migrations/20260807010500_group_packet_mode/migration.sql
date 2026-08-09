@@ -1,0 +1,3 @@
+-- AlterTable
+ALTER TABLE "group_packets" ADD COLUMN IF NOT EXISTS "mode" TEXT NOT NULL DEFAULT 'RANDOM';
+ALTER TABLE "group_packets" ADD COLUMN IF NOT EXISTS "greeting" TEXT NOT NULL DEFAULT '恭喜发财，大吉大利';
