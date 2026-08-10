@@ -1,4 +1,17 @@
+import { DEFAULT_TNG_PACKET_HOSTS } from './lib/tngPacketUrl.js';
+
 const nodeEnv = process.env.NODE_ENV ?? 'development';
+
+function resolveTngPacketHosts(): string[] {
+  const fromEnv = (process.env.TNG_PACKET_HOSTS ?? '')
+    .split(',')
+    .map((host) => host.trim().toLowerCase())
+    .filter(Boolean);
+  if (fromEnv.length > 0) return fromEnv;
+  // 生产默认放行官方 Money Packet 分享域；开发留空表示不限制域名（便于单测）
+  if (nodeEnv === 'production') return [...DEFAULT_TNG_PACKET_HOSTS];
+  return [];
+}
 
 export const env = {
   port: parseInt(process.env.PORT ?? '8080', 10),
@@ -19,10 +32,7 @@ export const env = {
   trustProxy: process.env.TRUST_PROXY === 'true',
   uploadDir: process.env.UPLOAD_DIR ?? './uploads',
   publicApiUrl: process.env.PUBLIC_API_URL ?? `http://localhost:${process.env.PORT ?? '8080'}`,
-  tngPacketHosts: (process.env.TNG_PACKET_HOSTS ?? '')
-    .split(',')
-    .map((host) => host.trim().toLowerCase())
-    .filter(Boolean),
+  tngPacketHosts: resolveTngPacketHosts(),
   /** 开启后可由系统自动登记发包链接（模板含 {{packetId}}） */
   tngAutoPacketUrlTemplate: process.env.TNG_AUTO_PACKET_URL_TEMPLATE ?? '',
 };
@@ -48,8 +58,5 @@ if (nodeEnv === 'production') {
   }
   if (env.corsOrigins.length === 0 || env.corsOrigins.some((origin) => origin === '*')) {
     throw new Error('CORS_ORIGINS must contain explicit trusted origins in production');
-  }
-  if (env.tngPacketHosts.length === 0) {
-    throw new Error('TNG_PACKET_HOSTS must contain the verified Money Packet host in production');
   }
 }

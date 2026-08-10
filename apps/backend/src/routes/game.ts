@@ -1419,7 +1419,8 @@ export async function adminGameRoutes(app: FastifyInstance) {
     const adminId = (req.user as { sub: string }).sub;
     const body = z
       .object({
-        claimUrl: z.string().url(),
+        // 允许粘贴带前后文案的链接；具体域名/路径由 publishPacket 校验与归一化
+        claimUrl: z.string().min(12).max(2_000),
         packerAccount: idSchema,
       })
       .parse(req.body);

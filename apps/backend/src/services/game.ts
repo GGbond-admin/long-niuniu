@@ -20,6 +20,7 @@ import { settleRound as calculateSettlement } from '../engine/settlement.js';
 import { env } from '../config.js';
 import { blindIndex, decryptSecret, encryptSecret, normalizeIdentity } from '../lib/crypto.js';
 import { prisma } from '../lib/prisma.js';
+import { checkTngPacketUrl } from '../lib/tngPacketUrl.js';
 import { serializable } from '../lib/transaction.js';
 import {
   getGameSettings,
@@ -714,16 +715,14 @@ export async function publishPacket(params: {
   packerAccount: string;
   actorId?: string;
 }) {
-  const parsedUrl = new URL(params.claimUrl);
-  if (parsedUrl.protocol !== 'https:') throw new GameError('INVALID_PACKET_URL');
-  if (
-    env.tngPacketHosts.length > 0 &&
-    !env.tngPacketHosts.includes(parsedUrl.hostname.toLowerCase())
-  ) {
-    throw new GameError('INVALID_PACKET_HOST', {
-      hostname: parsedUrl.hostname.toLowerCase(),
+  const checked = checkTngPacketUrl(params.claimUrl, env.tngPacketHosts);
+  if (!checked.ok) {
+    throw new GameError(checked.code, {
+      hostname: checked.hostname,
+      allowedHosts: env.tngPacketHosts,
     });
   }
+  const claimUrl = checked.claimUrl;
   return serializable(async (tx) => {
     const round = await tx.round.findUnique({
       where: { id: params.roundId },
@@ -784,7 +783,7 @@ export async function publishPacket(params: {
     const packet = await tx.packet.update({
       where: { id: round.packet.id },
       data: {
-        claimUrl: params.claimUrl,
+        claimUrl,
         packerAccount: params.packerAccount,
         status: 'SENT',
         sentAt: now,

@@ -159,32 +159,50 @@ function toCents(value: string) {
 
 const opsErrorMessages: Record<string, string> = {
   VALIDATION: '提交内容格式不正确，请检查 TNG 链接与发包账号',
-  INVALID_PACKET_URL: '请输入完整的 https:// TNG Money Packet 链接',
-  INVALID_PACKET_HOST: '该链接不是系统允许的 TNG Money Packet 域名',
+  INVALID_PACKET_URL:
+    '请粘贴完整的 TNG Money Packet 分享链接（形如 https://links.tngdigital.com.my/moneypacket/…）',
+  INVALID_PACKET_HOST:
+    '该链接域名不被允许。请使用 TNG App 分享的官方链接（links.tngdigital.com.my）',
   INVALID_PHASE: '当前牌局阶段已变化，请刷新后重试',
+  BANKER_DICE_NOT_READY: '庄家尚未完成投骰，请稍后再登记红包链接',
   TNG_ACCOUNT_NOT_FOUND: '所选发包账号不存在，请重新选择',
   TNG_ACCOUNT_INACTIVE: '所选发包账号已停用，请更换账号',
+  TNG_ACCOUNT_UNAVAILABLE: '所选发包账号不可用，请更换账号',
   TNG_ACCOUNT_LIMIT_EXCEEDED: '所选发包账号已达到月度限额，请更换账号',
 };
 
 function explainOpsError(cause: unknown): string {
-  const error = cause as Error & { code?: string };
+  const error = cause as Error & {
+    code?: string;
+    details?: { hostname?: string };
+  };
   const code = error.code || error.message;
+  if (code === 'INVALID_PACKET_HOST' && error.details?.hostname) {
+    return `该链接域名不被允许（${error.details.hostname}）。请使用 links.tngdigital.com.my 的 Money Packet 分享链接`;
+  }
   return opsErrorMessages[code] ?? error.message ?? '操作失败，请稍后重试';
 }
 
 function extractHttpsUrl(value: string): string {
   const match = value.match(/https:\/\/[^\s<>"']+/i);
-  return (match?.[0] ?? value).replace(/[),.;，。；）\]]+$/g, '').trim();
+  return (match?.[0] ?? value).replace(/[),.;，。；）\]\u3002\uFF0C]+$/g, '').trim();
 }
 
 function packetUrlError(value: string): string {
-  const input = value.trim();
+  const input = extractHttpsUrl(value);
   if (!input) return '请粘贴 TNG Money Packet 链接';
   try {
     const url = new URL(input);
     if (url.protocol !== 'https:') return '链接必须以 https:// 开头';
-    if (!url.hostname.includes('.')) return '请输入完整的 TNG Money Packet 链接';
+    const host = url.hostname.toLowerCase();
+    // 官方分享域：links.tngdigital.com.my/moneypacket/<token>
+    if (host === 'links.tngdigital.com.my' || host.endsWith('.tngdigital.com.my')) {
+      if (!/^\/moneypacket\/[A-Za-z0-9_-]+\/?$/i.test(url.pathname)) {
+        return '请粘贴完整的 Money Packet 分享链接（路径需包含 /moneypacket/）';
+      }
+      return '';
+    }
+    if (!host.includes('.')) return '请输入完整的 TNG Money Packet 链接';
     return '';
   } catch {
     return '链接格式无效，请从 TNG eWallet 重新复制分享链接';
@@ -913,13 +931,16 @@ export default function GameOperationsCenter({ admin }: { admin: Admin }) {
   async function submitPacket() {
     setPacketUrlTouched(true);
     if (!detail || !packerAccount || !canOperate) return;
-    if (claimUrlError) {
-      setError(claimUrlError);
+    const normalizedUrl = extractHttpsUrl(claimUrl);
+    if (normalizedUrl !== claimUrl.trim()) setClaimUrl(normalizedUrl);
+    const urlError = packetUrlError(normalizedUrl);
+    if (urlError) {
+      setError(urlError);
       return;
     }
     await run('packet', async () => {
       await post(`/api/admin/rounds/${detail.id}/packet`, {
-        claimUrl: claimUrl.trim(),
+        claimUrl: normalizedUrl,
         packerAccount,
       });
       setClaimUrl('');
@@ -1525,7 +1546,7 @@ export default function GameOperationsCenter({ admin }: { admin: Admin }) {
                           setPacketUrlTouched(true);
                         }
                       }}
-                      placeholder="https://tng…"
+                      placeholder="https://links.tngdigital.com.my/moneypacket/…"
                       autoCapitalize="none"
                       autoCorrect="off"
                       spellCheck={false}

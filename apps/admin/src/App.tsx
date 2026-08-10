@@ -2225,8 +2225,28 @@ function Rounds({ canReconcile }: { canReconcile: boolean }) {
 
   async function submitPacket() {
     if (!detail) return;
-    if (!claimUrl.trim()) {
+    const normalizedUrl = claimUrl
+      .trim()
+      .match(/https:\/\/[^\s<>"']+/i)?.[0]
+      ?.replace(/[),.;，。；）\]\u3002\uFF0C]+$/g, '')
+      .trim() ?? claimUrl.trim();
+    if (!normalizedUrl) {
       setError('请粘贴 TNG Money Packet 链接');
+      return;
+    }
+    try {
+      const parsed = new URL(normalizedUrl);
+      if (parsed.protocol !== 'https:') throw new Error('bad');
+      const host = parsed.hostname.toLowerCase();
+      if (
+        (host === 'links.tngdigital.com.my' || host.endsWith('.tngdigital.com.my')) &&
+        !/^\/moneypacket\/[A-Za-z0-9_-]+\/?$/i.test(parsed.pathname)
+      ) {
+        setError('请粘贴完整的 Money Packet 分享链接（路径需包含 /moneypacket/）');
+        return;
+      }
+    } catch {
+      setError('链接格式无效，请从 TNG eWallet 重新复制分享链接');
       return;
     }
     if (!packerAccount) {
@@ -2235,7 +2255,7 @@ function Rounds({ canReconcile }: { canReconcile: boolean }) {
     }
     await run(async () => {
       await post(`/api/admin/rounds/${detail.id}/packet`, {
-        claimUrl: claimUrl.trim(),
+        claimUrl: normalizedUrl,
         packerAccount,
       });
       setClaimUrl('');
