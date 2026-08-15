@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { api } from '../api';
+import { goBack } from '../lib/nav';
 import {
   IconBank,
   IconChevronRight,
@@ -22,6 +23,7 @@ const kycLabel: Record<string, string> = {
 
 export default function Settings({ session }: { session: Session }) {
   const navigate = useNavigate();
+  const location = useLocation();
   const [security, setSecurity] = useState<Awaited<
     ReturnType<typeof api.securitySettings>
   > | null>(null);
@@ -50,7 +52,7 @@ export default function Settings({ session }: { session: Session }) {
   return (
     <div className="page subpage settings-page">
       <header className="subpage-header">
-        <button type="button" onClick={() => navigate('/')} aria-label="返回">‹</button>
+        <button type="button" onClick={() => goBack(navigate, location)} aria-label="返回">‹</button>
         <div><h1>设置</h1></div>
         <span />
       </header>

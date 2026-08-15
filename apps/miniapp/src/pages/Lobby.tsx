@@ -14,14 +14,21 @@ export default function Lobby({ active = true }: { active?: boolean }) {
   const navigate = useNavigate();
   const [data, setData] = useState<LobbyData | null>(null);
   const [error, setError] = useState('');
+  const [retryKey, setRetryKey] = useState(0);
   const [bannerIndex, setBannerIndex] = useState(0);
 
   useEffect(() => {
     if (!active) return;
-    api.lobby().then(setData).catch((reason) => setError(reason.message));
-    const timer = window.setInterval(() => api.lobby().then(setData).catch(() => undefined), 10_000);
+    const refresh = () =>
+      api.lobby().then((result) => {
+        setData(result);
+        setError('');
+      });
+    refresh().catch((reason) => setError((reason as Error).message || '大厅加载失败'));
+    // 轮询失败静默保留旧数据，成功后自动清除错误提示
+    const timer = window.setInterval(() => void refresh().catch(() => undefined), 10_000);
     return () => window.clearInterval(timer);
-  }, [active]);
+  }, [active, retryKey]);
 
   useEffect(() => {
     if (!active || LOBBY_BANNERS.length <= 1) return;
@@ -85,7 +92,7 @@ export default function Lobby({ active = true }: { active?: boolean }) {
         </div>
       </section>
 
-      {error && <div className="inline-alert error">{error}</div>}
+      {error && !!data && <div className="inline-alert error">{error}</div>}
 
       <section className="arena-section">
         <div className="arena-section-head">
@@ -94,7 +101,23 @@ export default function Lobby({ active = true }: { active?: boolean }) {
         </div>
 
         {!data ? (
-          <div className="skeleton lobby-hero-skeleton" />
+          error ? (
+            <section className="feature-load-error" role="alert">
+              <strong>大厅没有加载成功</strong>
+              <p>{error}</p>
+              <button
+                type="button"
+                onClick={() => {
+                  setError('');
+                  setRetryKey((key) => key + 1);
+                }}
+              >
+                重试
+              </button>
+            </section>
+          ) : (
+            <div className="skeleton lobby-hero-skeleton" />
+          )
         ) : !games.length ? (
           <div className="arena-empty">
             <BrandLogo size={68} />

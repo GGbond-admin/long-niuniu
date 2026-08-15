@@ -1,11 +1,13 @@
-import { useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useCallback, useEffect, useState } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { api } from '../api';
 import { IconSupport } from '../components/Icons';
 import { completeRequest, pendingRequestId } from '../lib/idempotency';
+import { backToTab } from '../lib/nav';
+import { openExternalLink } from '../telegram';
 
 const PRESET_AMOUNTS = ['100', '200', '500', '1000', '2000', '5000'];
-const MIN_AMOUNT = 100;
+const MANUAL_MIN_AMOUNT = 100;
 
 type Payee = {
   id: string;
@@ -15,14 +17,21 @@ type Payee = {
   label?: string | null;
 };
 
-function backToWallet(navigate: ReturnType<typeof useNavigate>) {
-  try {
-    sessionStorage.setItem('miniapp-tab', 'wallet');
-  } catch {
-    // ignore
-  }
-  navigate('/');
-}
+type Channels = {
+  vpay: {
+    available: boolean;
+    minCents: string;
+    maxCents: string;
+    tradeCodes: Array<{ code: string; label: string }>;
+  };
+};
+
+type VpayOrder = {
+  id: string;
+  payUrl: string | null;
+  status: string;
+  rejectReason?: string | null;
+};
 
 function formatMoney(amount: string) {
   const n = Number(amount);
@@ -38,6 +47,7 @@ export default function Deposit({
   ownerUid: string;
 }) {
   const navigate = useNavigate();
+  const location = useLocation();
   const [step, setStep] = useState<1 | 2 | 3>(1);
   const [amount, setAmount] = useState('');
   const [selected, setSelected] = useState<string | null>(null);
@@ -47,6 +57,10 @@ export default function Deposit({
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
   const [copied, setCopied] = useState('');
+  const [channels, setChannels] = useState<Channels | null>(null);
+  const [method, setMethod] = useState<'VPAY' | 'MANUAL'>('MANUAL');
+  const [tradeCode, setTradeCode] = useState('');
+  const [vpayOrder, setVpayOrder] = useState<VpayOrder | null>(null);
 
   useEffect(() => {
     if (kycStatus === 'NONE' || kycStatus === 'REJECTED') {
@@ -58,10 +72,64 @@ export default function Deposit({
     }
   }, [kycStatus, navigate]);
 
+  useEffect(() => {
+    if (kycStatus !== 'APPROVED') return;
+    let cancelled = false;
+    api
+      .depositChannels()
+      .then((result) => {
+        if (cancelled) return;
+        setChannels(result);
+        if (result.vpay.available && result.vpay.tradeCodes.length > 0) {
+          setMethod('VPAY');
+          setTradeCode(result.vpay.tradeCodes[0].code);
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [kycStatus]);
+
+  const vpayAvailable = channels?.vpay.available === true;
+  const useVpay = method === 'VPAY' && vpayAvailable;
+  const minAmount = useVpay
+    ? Number(channels?.vpay.minCents ?? '10000') / 100
+    : MANUAL_MIN_AMOUNT;
+  const maxAmount = useVpay ? Number(channels?.vpay.maxCents ?? '0') / 100 : 0;
+
   const amountValue = Number(amount);
   const amountOk =
-    Number.isFinite(amountValue) && amountValue >= MIN_AMOUNT && /^\d+(\.\d{1,2})?$/.test(amount);
+    Number.isFinite(amountValue) &&
+    amountValue >= minAmount &&
+    (maxAmount <= 0 || amountValue <= maxAmount) &&
+    /^\d+(\.\d{1,2})?$/.test(amount);
   const approved = kycStatus === 'APPROVED';
+
+  const refreshVpayStatus = useCallback(async (orderId: string) => {
+    const result = await api.depositStatus(orderId);
+    setVpayOrder((current) =>
+      current && current.id === orderId
+        ? { ...current, status: result.status, rejectReason: result.rejectReason }
+        : current,
+    );
+    return result.status;
+  }, []);
+
+  // 支付页在外部打开，回到小程序后靠轮询确认到账
+  useEffect(() => {
+    if (!vpayOrder || vpayOrder.status !== 'PENDING') return;
+    const orderId = vpayOrder.id;
+    let cancelled = false;
+    const timer = window.setInterval(() => {
+      if (cancelled) return;
+      void refreshVpayStatus(orderId).catch(() => undefined);
+    }, 4000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [vpayOrder, refreshVpayStatus]);
 
   function pickAmount(value: string) {
     setSelected(value);
@@ -79,7 +147,7 @@ export default function Deposit({
   async function goPayeeStep() {
     if (!approved) return;
     if (!amountOk) {
-      setError(`最低充值 RM${MIN_AMOUNT}`);
+      setError(`最低充值 RM${minAmount}`);
       return;
     }
     setBusy(true);
@@ -95,6 +163,34 @@ export default function Deposit({
           ? '暂无可用收款账户，请联系客服'
           : `加载收款账户失败：${(err as Error).message}`,
       );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function startVpay() {
+    if (!approved || !amountOk || !tradeCode) return;
+    setBusy(true);
+    setError('');
+    setMessage('');
+    try {
+      const requestKey = `deposit-vpay:${tradeCode}:${amount}`;
+      const requestId = pendingRequestId(requestKey, ownerUid);
+      const result = await api.depositVpay(amount, tradeCode, requestId);
+      completeRequest(requestKey, requestId, ownerUid);
+      setVpayOrder({ id: result.orderId, payUrl: result.payUrl, status: result.status });
+      if (result.payUrl) openExternalLink(result.payUrl);
+    } catch (err) {
+      const code = (err as Error & { code?: string }).code;
+      const messages: Record<string, string> = {
+        VPAY_UNAVAILABLE: '快捷充值暂未开放，请改用银行转账或联系客服。',
+        TRADE_CODE_UNAVAILABLE: '该支付方式已关闭，请选择其他方式。',
+        AMOUNT_BELOW_MIN: `低于快捷充值最低金额 RM${minAmount}`,
+        AMOUNT_ABOVE_MAX: `超过快捷充值最高金额 RM${maxAmount}`,
+        VPAY_ORDER_FAILED: '支付通道暂时无法下单，请稍后重试或改用银行转账。',
+        IDEMPOTENCY_CONFLICT: '订单信息已变化，请返回重新选择金额。',
+      };
+      setError(messages[code ?? ''] ?? `下单失败：${(err as Error).message}`);
     } finally {
       setBusy(false);
     }
@@ -135,7 +231,19 @@ export default function Deposit({
     }
   }
 
-  const title = step === 1 ? '充值' : step === 2 ? '转账到此账户' : '上传转账凭证';
+  function resetVpay() {
+    setVpayOrder(null);
+    setError('');
+    setMessage('');
+  }
+
+  const title = vpayOrder
+    ? '完成支付'
+    : step === 1
+      ? '充值'
+      : step === 2
+        ? '转账到此账户'
+        : '上传转账凭证';
 
   return (
     <div className="page subpage deposit-page">
@@ -143,6 +251,10 @@ export default function Deposit({
         <button
           type="button"
           onClick={() => {
+            if (vpayOrder) {
+              resetVpay();
+              return;
+            }
             if (step === 3) {
               setStep(2);
               setMessage('');
@@ -154,7 +266,7 @@ export default function Deposit({
               setError('');
               return;
             }
-            backToWallet(navigate);
+            backToTab(navigate, location, 'wallet');
           }}
           aria-label="返回"
         >
@@ -166,7 +278,77 @@ export default function Deposit({
         <span />
       </header>
 
-      {step === 1 && (
+      {vpayOrder && (
+        <section className="deposit-paying">
+          <div className="deposit-transfer-amount">
+            <small>支付金额</small>
+            <strong>RM {formatMoney(amount)}</strong>
+          </div>
+
+          {vpayOrder.status === 'PENDING' && (
+            <>
+              <div className="deposit-paying-state waiting">
+                <i />
+                <div>
+                  <strong>等待支付结果</strong>
+                  <span>完成支付后请回到本页面，到账会自动更新。</span>
+                </div>
+              </div>
+              {vpayOrder.payUrl && (
+                <button
+                  className="primary-action deposit-cta-blue"
+                  type="button"
+                  onClick={() => openExternalLink(vpayOrder.payUrl!)}
+                >
+                  重新打开支付页
+                </button>
+              )}
+              <button
+                className="deposit-secondary-btn"
+                type="button"
+                disabled={busy}
+                onClick={() => {
+                  setBusy(true);
+                  void refreshVpayStatus(vpayOrder.id)
+                    .catch(() => undefined)
+                    .finally(() => setBusy(false));
+                }}
+              >
+                {busy ? '查询中…' : '我已完成支付，刷新状态'}
+              </button>
+            </>
+          )}
+
+          {vpayOrder.status === 'COMPLETED' && (
+            <div className="deposit-paying-state done">
+              <i>✓</i>
+              <div>
+                <strong>充值已到账</strong>
+                <span>金额已加入可用余额，可直接进入牌局。</span>
+              </div>
+            </div>
+          )}
+
+          {vpayOrder.status === 'REJECTED' && (
+            <div className="deposit-paying-state failed">
+              <i>!</i>
+              <div>
+                <strong>支付未完成</strong>
+                <span>{vpayOrder.rejectReason ?? '本次支付未成功，未扣除任何金额。'}</span>
+              </div>
+            </div>
+          )}
+
+          <button className="deposit-secondary-btn" type="button" onClick={resetVpay}>
+            返回充值
+          </button>
+          <button className="text-link-btn" type="button" onClick={() => navigate('/wallet/orders')}>
+            查看充值工单
+          </button>
+        </section>
+      )}
+
+      {!vpayOrder && step === 1 && (
         <>
           <label className="deposit-label">充值金额</label>
           <label className="deposit-amount-box">
@@ -180,7 +362,10 @@ export default function Deposit({
               aria-label="充值金额"
             />
           </label>
-          <p className="deposit-min-hint">最低充值 RM{MIN_AMOUNT}</p>
+          <p className="deposit-min-hint">
+            最低充值 RM{minAmount}
+            {maxAmount > 0 ? ` · 单笔上限 RM${maxAmount}` : ''}
+          </p>
 
           <div className="amount-grid deposit-amount-grid">
             {PRESET_AMOUNTS.map((value) => (
@@ -196,9 +381,64 @@ export default function Deposit({
             ))}
           </div>
 
+          {vpayAvailable && (
+            <>
+              <label className="deposit-label">充值方式</label>
+              <div className="deposit-method-list">
+                <button
+                  type="button"
+                  className={`deposit-method ${method === 'VPAY' ? 'active' : ''}`}
+                  onClick={() => {
+                    setMethod('VPAY');
+                    setError('');
+                  }}
+                >
+                  <strong>快捷充值</strong>
+                  <span>在线支付，成功后自动到账</span>
+                </button>
+                <button
+                  type="button"
+                  className={`deposit-method ${method === 'MANUAL' ? 'active' : ''}`}
+                  onClick={() => {
+                    setMethod('MANUAL');
+                    setError('');
+                  }}
+                >
+                  <strong>银行转账</strong>
+                  <span>转账后上传凭证，客服核对入账</span>
+                </button>
+              </div>
+            </>
+          )}
+
+          {useVpay && (channels?.vpay.tradeCodes.length ?? 0) > 1 && (
+            <>
+              <label className="deposit-label">支付通道</label>
+              <div className="deposit-method-list">
+                {channels?.vpay.tradeCodes.map((item) => (
+                  <button
+                    key={item.code}
+                    type="button"
+                    className={`deposit-method compact ${tradeCode === item.code ? 'active' : ''}`}
+                    onClick={() => {
+                      setTradeCode(item.code);
+                      setError('');
+                    }}
+                  >
+                    <strong>{item.label}</strong>
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
+
           <div className="deposit-info">
             <i>i</i>
-            <p>系统会根据您输入的金额自动分配对应的收款账户，请按账户信息完成银行转账。</p>
+            <p>
+              {useVpay
+                ? '点击下方按钮将跳转至支付页面，请在有效期内完成支付；支付成功后余额自动到账。'
+                : '系统会根据您输入的金额自动分配对应的收款账户，请按账户信息完成银行转账。'}
+            </p>
           </div>
 
           <button className="deposit-usdt-btn" type="button" onClick={() => navigate('/support')}>
@@ -211,15 +451,15 @@ export default function Deposit({
           <button
             className="primary-action deposit-next"
             type="button"
-            disabled={!approved || !amountOk || busy}
-            onClick={() => void goPayeeStep()}
+            disabled={!approved || !amountOk || busy || (useVpay && !tradeCode)}
+            onClick={() => void (useVpay ? startVpay() : goPayeeStep())}
           >
-            {busy ? '加载中…' : '下一步'}
+            {busy ? '处理中…' : useVpay ? '立即支付' : '下一步'}
           </button>
         </>
       )}
 
-      {step === 2 && payee && (
+      {!vpayOrder && step === 2 && payee && (
         <section className="deposit-transfer">
           <div className="deposit-transfer-amount">
             <small>应转账金额</small>
@@ -272,7 +512,7 @@ export default function Deposit({
         </section>
       )}
 
-      {step === 3 && (
+      {!vpayOrder && step === 3 && (
         <section className="deposit-step2">
           <div className="deposit-summary">
             <small>应转账金额</small>

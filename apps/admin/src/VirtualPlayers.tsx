@@ -48,6 +48,7 @@ type Caps = {
   canContinue: boolean;
   canThrowDice: boolean;
   canGroupPacket: boolean;
+  canClaimGroupPacket: boolean;
   canClaimSim: boolean;
 };
 
@@ -62,6 +63,7 @@ const defaultCaps: Caps = {
   canContinue: false,
   canThrowDice: true,
   canGroupPacket: false,
+  canClaimGroupPacket: true,
   canClaimSim: true,
 };
 
@@ -89,6 +91,7 @@ const capGroups: Array<{ title: string; items: Array<[keyof Caps, string]> }> = 
     title: '红包',
     items: [
       ['canGroupPacket', '可发群红包'],
+      ['canClaimGroupPacket', '可抢群红包'],
       ['canClaimSim', '可自动认尾包'],
     ],
   },
@@ -117,6 +120,7 @@ function draftFromItem(item: Row): EditDraft {
     canContinue: Boolean(item.canContinue),
     canThrowDice: Boolean(item.canThrowDice),
     canGroupPacket: Boolean(item.canGroupPacket),
+    canClaimGroupPacket: Boolean(item.canClaimGroupPacket),
     canClaimSim: Boolean(item.canClaimSim),
     bidWeight: String(item.bidWeight ?? 0.7),
     betRatioMin: String(item.betRatioMin ?? 0.05),
@@ -349,6 +353,21 @@ export default function VirtualPlayers({
     });
   }
 
+  function bulkToggle(enabled: boolean) {
+    const effectiveRoomId = scopedRoomId || filterRoomId;
+    const scopeLabel = effectiveRoomId
+      ? `「${roomLabel(roomMap.get(effectiveRoomId))}」内`
+      : '全部';
+    const verb = enabled ? '启用' : '停用';
+    if (!window.confirm(`将一键${verb}${scopeLabel}虚拟玩家，是否继续？`)) return;
+    void run(enabled ? 'bulk-on' : 'bulk-off', async () => {
+      await post('/api/admin/virtual-players/bulk-enabled', {
+        enabled,
+        ...(effectiveRoomId ? { roomId: effectiveRoomId } : {}),
+      });
+    });
+  }
+
   function dressUp() {
     if (!window.confirm(filterRoomId
       ? '将为当前筛选群内全部虚拟玩家重新匹配英文名与系统头像，是否继续？'
@@ -384,6 +403,7 @@ export default function VirtualPlayers({
         canContinue: draft.canContinue,
         canThrowDice: draft.canThrowDice,
         canGroupPacket: draft.canGroupPacket,
+        canClaimGroupPacket: draft.canClaimGroupPacket,
         canClaimSim: draft.canClaimSim,
         bidWeight: Number(draft.bidWeight),
         betRatioMin: Number(draft.betRatioMin),
@@ -501,6 +521,21 @@ export default function VirtualPlayers({
                   />
                 </label>
               )}
+              <button
+                type="button"
+                className="primary small"
+                disabled={!!busy || !items.length}
+                onClick={() => bulkToggle(true)}
+              >
+                {busy === 'bulk-on' ? '启用中…' : '一键启用'}
+              </button>
+              <button
+                type="button"
+                disabled={!!busy || !items.length}
+                onClick={() => bulkToggle(false)}
+              >
+                {busy === 'bulk-off' ? '停用中…' : '一键停用'}
+              </button>
               <button type="button" disabled={!!busy} onClick={() => void load()}>刷新</button>
             </div>
           </div>

@@ -1,12 +1,15 @@
 import { useEffect, useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { api, rm, type RoomState } from '../api';
+import { goBack } from '../lib/nav';
 
 export default function PacketDetail() {
   const { roomId = '' } = useParams();
   const navigate = useNavigate();
+  const location = useLocation();
   const [state, setState] = useState<RoomState | null>(null);
   const [error, setError] = useState('');
+  const [retryKey, setRetryKey] = useState(0);
 
   useEffect(() => {
     if (!roomId) return;
@@ -15,7 +18,9 @@ export default function PacketDetail() {
       api
         .roomState(roomId)
         .then((next) => {
-          if (!cancelled) setState(next);
+          if (cancelled) return;
+          setState(next);
+          setError('');
         })
         .catch((e) => {
           if (!cancelled) setError((e as Error).message || '加载失败');
@@ -26,14 +31,24 @@ export default function PacketDetail() {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [roomId]);
+  }, [roomId, retryKey]);
 
   const claims = state?.round?.claims ?? [];
   const total = state?.round?.packetTotalCents ?? '0';
   const count = state?.round?.participantCount ?? 0;
   const bankerName = state?.round?.banker?.nickname ?? '庄家';
   const bankerAvatar = state?.round?.banker?.avatarUrl;
-  const inProgress = state?.round?.phase === 'CLAIMING';
+  const phase = state?.round?.phase ?? '';
+  const inProgress = phase === 'CLAIMING';
+  const statusText = inProgress
+    ? '抢包进行中'
+    : phase === 'FINISHED'
+      ? '本局已完成'
+      : phase === 'CANCELLED'
+        ? '本局已取消'
+        : phase === 'SETTLING'
+          ? '结算中'
+          : '认额核对中';
   const luckyKey = claims.length
     ? claims.reduce((best, c) =>
         Number(c.amountCents) > Number(best.amountCents) ? c : best,
@@ -43,7 +58,7 @@ export default function PacketDetail() {
   return (
     <div className="page packet-detail wx-rp-detail-page">
       <header className="game-room-header">
-        <button className="chat-back" type="button" onClick={() => navigate(-1)} aria-label="返回">
+        <button className="chat-back" type="button" onClick={() => goBack(navigate, location, roomId ? `/game/${roomId}/play` : '/')} aria-label="返回">
           ‹
         </button>
         <div className="game-room-title">
@@ -53,7 +68,25 @@ export default function PacketDetail() {
         <span />
       </header>
 
-      {error && <div className="chat-error-bar">{error}</div>}
+      {/* 首屏失败给重试入口；已有数据时仅提示刷新失败，轮询成功后自动消除 */}
+      {error && !state && (
+        <div className="wx-rp-detail-error">
+          <div className="chat-error-bar">{error}</div>
+          <button
+            className="primary-action"
+            type="button"
+            style={{ margin: '12px 16px 0' }}
+            onClick={() => {
+              setError('');
+              setRetryKey((k) => k + 1);
+            }}
+          >
+            重试
+          </button>
+        </div>
+      )}
+      {error && state && <div className="chat-error-bar">刷新失败，正在自动重试…</div>}
+      {!error && !state && <div className="empty-inline">加载中…</div>}
 
       <section className="wx-rp-detail-hero">
         <div className="wx-rp-detail-avatar" aria-hidden>
@@ -65,7 +98,7 @@ export default function PacketDetail() {
           {count || '—'} 个红包 · 共 RM {rm(total)}
         </p>
         <span className={`wx-rp-detail-status ${inProgress ? 'live' : ''}`}>
-          {inProgress ? '抢包进行中' : '认额核对中'}
+          {statusText}
         </span>
       </section>
 

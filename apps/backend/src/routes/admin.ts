@@ -7,6 +7,7 @@ import { setGameConfig } from '../services/gameConfig.js';
 import {
   decryptSecret,
   encryptSecret,
+  maskPlaintext,
   maskSecret,
   safeDecryptSecret,
   safeMaskSecret,
@@ -25,6 +26,15 @@ import {
   isSupportedGameCode,
   SUPREME_NIUNIU_GAME_CODE,
 } from '../services/gameCatalog.js';
+import {
+  getVpayConfig,
+  isVpayReady,
+  resolveCallbackUrl,
+  resolveNotifyUrl,
+  saveVpayConfig,
+  VPAY_TRADE_CODE_CATALOG,
+} from '../services/paymentProviders.js';
+import { queryVpayBalance } from '../services/vpay.js';
 
 export function hashPassword(pw: string): Promise<string> {
   return hash(pw, 12);
@@ -884,5 +894,152 @@ export async function adminRoutes(app: FastifyInstance) {
       data: { adminId, action: 'deposit_payee_delete', target: id },
     });
     return { ok: true };
+  });
+
+  // ── 第三方支付通道（VPay）商户设置 ──
+  const gatewayManagers = [app.authAdmin, app.requireAdminRoles('SUPER', 'FINANCE')];
+
+  const amountPattern = /^\d+(\.\d{1,2})?$/;
+  const vpayConfigSchema = z.object({
+    enabled: z.boolean().optional(),
+    baseUrl: z.string().trim().max(200).optional(),
+    traderId: z.string().trim().max(10).optional(),
+    /** 省略即保留原密钥；掩码原样回传亦视为未修改 */
+    apiToken: z.string().trim().max(256).optional(),
+    tradeCodes: z
+      .array(z.object({ code: z.string().trim().min(1).max(30), enabled: z.boolean() }))
+      .max(20)
+      .optional(),
+    notifyIps: z.array(z.string().trim().max(64)).max(50).optional(),
+    timezoneOffsetMinutes: z.number().int().min(-720).max(840).optional(),
+    notifyUrl: z.string().trim().max(500).optional(),
+    callbackUrl: z.string().trim().max(500).optional(),
+    orderTitle: z.string().trim().max(100).optional(),
+    minAmount: z.string().trim().regex(amountPattern).optional(),
+    maxAmount: z.string().trim().regex(amountPattern).optional(),
+  });
+
+  function parseAmountCents(amount: string): bigint {
+    const [integer, decimal = ''] = amount.split('.');
+    return BigInt(integer) * 100n + BigInt((decimal + '00').slice(0, 2));
+  }
+
+  async function serializeVpayConfig() {
+    const config = await getVpayConfig();
+    return {
+      enabled: config.enabled,
+      baseUrl: config.baseUrl,
+      traderId: config.traderId,
+      apiTokenMasked: config.apiToken ? maskPlaintext(config.apiToken) : '',
+      apiTokenSet: config.apiToken.length > 0,
+      tradeCodes: config.tradeCodes,
+      notifyIps: config.notifyIps,
+      timezoneOffsetMinutes: config.timezoneOffsetMinutes,
+      notifyUrl: config.notifyUrl,
+      callbackUrl: config.callbackUrl,
+      orderTitle: config.orderTitle,
+      minAmount: formatCents(config.minAmountCents),
+      maxAmount: formatCents(config.maxAmountCents),
+      /** 留空时实际生效的地址，直接复制给通道商配置 */
+      effectiveNotifyUrl: resolveNotifyUrl(config),
+      effectiveCallbackUrl: resolveCallbackUrl(config),
+      ready: isVpayReady(config),
+      catalog: VPAY_TRADE_CODE_CATALOG,
+    };
+  }
+
+  app.get('/api/admin/payment-providers/vpay', { preHandler: gatewayManagers }, async () =>
+    serializeVpayConfig(),
+  );
+
+  app.put('/api/admin/payment-providers/vpay', { preHandler: gatewayManagers }, async (req, reply) => {
+    const adminId = (req.user as { sub: string }).sub;
+    const body = vpayConfigSchema.parse(req.body);
+
+    if (body.baseUrl && !/^https?:\/\//i.test(body.baseUrl)) {
+      return reply.code(400).send({ error: 'INVALID_BASE_URL' });
+    }
+    // VPay 要求通知地址可直连且不得带查询参数
+    for (const field of ['notifyUrl', 'callbackUrl'] as const) {
+      const value = body[field];
+      if (value && !/^https?:\/\//i.test(value)) {
+        return reply.code(400).send({ error: 'INVALID_URL', field });
+      }
+    }
+    if (body.notifyUrl && body.notifyUrl.includes('?')) {
+      return reply.code(400).send({ error: 'NOTIFY_URL_HAS_QUERY' });
+    }
+    const minCents = body.minAmount === undefined ? undefined : parseAmountCents(body.minAmount);
+    const maxCents = body.maxAmount === undefined ? undefined : parseAmountCents(body.maxAmount);
+    if (minCents !== undefined && maxCents !== undefined && maxCents > 0n && maxCents < minCents) {
+      return reply.code(400).send({ error: 'AMOUNT_RANGE_INVALID' });
+    }
+
+    const apiToken =
+      body.apiToken === undefined || body.apiToken.includes('*') ? undefined : body.apiToken;
+
+    const saved = await saveVpayConfig(
+      {
+        enabled: body.enabled,
+        baseUrl: body.baseUrl,
+        traderId: body.traderId,
+        apiToken,
+        tradeCodes: body.tradeCodes,
+        notifyIps: body.notifyIps,
+        timezoneOffsetMinutes: body.timezoneOffsetMinutes,
+        notifyUrl: body.notifyUrl,
+        callbackUrl: body.callbackUrl,
+        orderTitle: body.orderTitle,
+        minAmountCents: minCents,
+        maxAmountCents: maxCents,
+      },
+      adminId,
+    );
+
+    if (saved.enabled && !isVpayReady(saved)) {
+      await saveVpayConfig({ enabled: false }, adminId);
+      await prisma.auditLog.create({
+        data: { adminId, action: 'vpay_config_update', target: 'VPAY', after: { enabled: false } },
+      });
+      return reply.code(400).send({ error: 'VPAY_CONFIG_INCOMPLETE' });
+    }
+
+    await prisma.auditLog.create({
+      data: {
+        adminId,
+        action: 'vpay_config_update',
+        target: 'VPAY',
+        after: {
+          enabled: saved.enabled,
+          baseUrl: saved.baseUrl,
+          traderId: saved.traderId,
+          apiToken: apiToken === undefined ? '[UNCHANGED]' : '[REDACTED]',
+          notifyIps: saved.notifyIps,
+          tradeCodes: saved.tradeCodes.filter((item) => item.enabled).map((item) => item.code),
+        },
+      },
+    });
+    return { ok: true, config: await serializeVpayConfig() };
+  });
+
+  /** 用余额查询探活：签名、时区与商户号有任何一项配错都会在这里暴露 */
+  app.post('/api/admin/payment-providers/vpay/test', { preHandler: gatewayManagers }, async (req, reply) => {
+    const adminId = (req.user as { sub: string }).sub;
+    const config = await getVpayConfig();
+    if (!config.baseUrl || !config.traderId || !config.apiToken) {
+      return reply.code(400).send({ error: 'VPAY_CONFIG_INCOMPLETE' });
+    }
+    try {
+      const result = await queryVpayBalance(config);
+      await prisma.auditLog.create({
+        data: { adminId, action: 'vpay_config_test', target: 'VPAY', after: { code: result.code } },
+      });
+      if (result.code !== 0) {
+        return reply.code(502).send({ error: 'VPAY_REJECTED', code: result.code, message: result.msg });
+      }
+      return { ok: true, balance: result.data ?? {} };
+    } catch (error) {
+      return reply.code(502).send({ error: 'VPAY_UNREACHABLE', message: (error as Error).message });
+    }
   });
 }

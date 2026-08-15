@@ -34,6 +34,7 @@ vi.mock('../lib/prisma.js', () => ({
 }));
 
 import {
+  ensureGameRuleDefaults,
   gameRuleDocumentInput,
   getPublishedGameRules,
   saveGameRules,
@@ -92,5 +93,80 @@ describe('游戏规则文档', () => {
       version: 2,
       updatedBy: 'admin-1',
     });
+  });
+
+  it('启动时将旧版系统简略规则升级为唯一的完整至尊牛牛规则', async () => {
+    memory.rows.set('SUPREME_NIUNIU', {
+      id: 'rules-supreme',
+      gameCode: 'SUPREME_NIUNIU',
+      title: '至尊牛牛游戏规则',
+      summary: '旧版摘要',
+      sections: [
+        { id: 'flow', title: '游戏流程', body: '旧版流程' },
+        { id: 'hands', title: '牌型与大小', body: '旧版牌型' },
+        { id: 'betting', title: '下注与梭哈', body: '旧版下注' },
+        { id: 'settlement', title: '结算与费用', body: '旧版结算' },
+        { id: 'fairness', title: '公平与风险提示', body: '旧版提示' },
+      ],
+      status: 'PUBLISHED',
+      version: 1,
+      updatedBy: null,
+      publishedAt: new Date(),
+    });
+
+    await ensureGameRuleDefaults();
+
+    const document = memory.rows.get('SUPREME_NIUNIU');
+    expect(document.title).toBe('至尊牛牛玩法规则');
+    expect(document.summary).toBe('');
+    expect(document.version).toBe(2);
+    expect(document.sections.map((section: any) => section.title)).toEqual(
+      expect.arrayContaining([
+        '游戏简介',
+        '在哪里玩',
+        '游戏流程',
+        '牌型与倍数（由高到低）',
+        '注意事项',
+      ]),
+    );
+    expect(JSON.stringify(document.sections)).toContain('至尊牛牛互动群');
+    expect(JSON.stringify(document.sections)).not.toContain('12牛牛');
+  });
+
+  it('保留管理员章节结构，只替换遗留的 12牛牛 品牌名', async () => {
+    memory.rows.set('SUPREME_NIUNIU', {
+      id: 'rules-supreme',
+      gameCode: 'SUPREME_NIUNIU',
+      title: '12牛牛规则',
+      summary: '欢迎参加12年牛',
+      sections: [
+        {
+          id: 'custom',
+          title: '自定义说明',
+          body: '请进入12牛牛互动群。',
+        },
+      ],
+      status: 'PUBLISHED',
+      version: 7,
+      updatedBy: 'admin-1',
+      publishedAt: new Date(),
+    });
+
+    await ensureGameRuleDefaults();
+
+    const document = memory.rows.get('SUPREME_NIUNIU');
+    expect(document).toMatchObject({
+      title: '至尊牛牛规则',
+      summary: '欢迎参加至尊牛牛',
+      version: 8,
+      updatedBy: 'admin-1',
+    });
+    expect(document.sections).toEqual([
+      {
+        id: 'custom',
+        title: '自定义说明',
+        body: '请进入至尊牛牛互动群。',
+      },
+    ]);
   });
 });

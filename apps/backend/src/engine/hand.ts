@@ -10,10 +10,14 @@ export enum HandType {
   SHUNZI = 'SHUNZI',     // 顺子
   DUIZI = 'DUIZI',       // 对子
   JINNIU = 'JINNIU',     // 金牛
+  MIANSI = 'MIANSI',     // 免死（固定 0.01，判和不赔不赚）
   NORMAL = 'NORMAL',     // 普通
 }
 
-/** 牌型等级，数值越大越强 */
+/** 免死判定金额：RM0.01（分） */
+export const MIANSI_AMOUNT_CENTS = 1;
+
+/** 牌型等级，数值越大越强（免死不参与比牌，等级仅作占位） */
 export const HAND_RANK: Record<HandType, number> = {
   [HandType.BAOZI]: 7,
   [HandType.MANNIU]: 6,
@@ -22,6 +26,7 @@ export const HAND_RANK: Record<HandType, number> = {
   [HandType.DUIZI]: 3,
   [HandType.JINNIU]: 2,
   [HandType.NORMAL]: 1,
+  [HandType.MIANSI]: 0,
 };
 
 export const HAND_LABEL: Record<HandType, string> = {
@@ -31,6 +36,7 @@ export const HAND_LABEL: Record<HandType, string> = {
   [HandType.SHUNZI]: '顺子',
   [HandType.DUIZI]: '对子',
   [HandType.JINNIU]: '金牛',
+  [HandType.MIANSI]: '免死',
   [HandType.NORMAL]: '普通',
 };
 
@@ -62,12 +68,28 @@ export const DEFAULT_HAND_CONFIG: HandConfig = {
     [HandType.SHUNZI]: 13,
     [HandType.DUIZI]: 12,
     [HandType.JINNIU]: 11,
+    [HandType.MIANSI]: 1, // 占位，免死判和不参与赔付
     [HandType.NORMAL]: 1, // 占位，普通用 normalMultipliers
   },
   normalMultipliers: { 1: 1, 2: 1, 3: 1, 4: 1, 5: 1, 6: 1, 7: 1, 8: 2, 9: 3, 10: 4 },
   bustThreshold: 3,
   bustExemptSpecialHands: true,
 };
+
+/**
+ * 本局可能出现的最高赔付倍数。
+ * 风控必须读取局配置快照，而不能假定后台永远保持默认 17 倍。
+ * 免死固定判和、NORMAL 的特殊牌型占位值均不参与；普通牌使用点数倍数表。
+ */
+export function maxPayoutMultiplier(config: HandConfig = DEFAULT_HAND_CONFIG): number {
+  const special = Object.entries(config.multipliers)
+    .filter(([type]) => type !== HandType.MIANSI && type !== HandType.NORMAL)
+    .map(([, multiplier]) => multiplier);
+  const candidates = [...special, ...Object.values(config.normalMultipliers)].filter(
+    (multiplier) => Number.isInteger(multiplier) && multiplier > 0,
+  );
+  return candidates.length > 0 ? Math.max(...candidates) : 1;
+}
 
 /** 金额（分）→ 所有数字之和的点数：个位为 0 记 10 点 */
 export function pointsOf(amountCents: number): number {
@@ -95,6 +117,9 @@ export function keyDigits(amountCents: number): [number, number, number] {
 
 /** 判定牌型（优先级由高到低） */
 export function handTypeOf(amountCents: number): HandType {
+  // 免死：抢到 RM0.01 判和，不再按「仅一位非零」归入金牛
+  if (amountCents === MIANSI_AMOUNT_CENTS) return HandType.MIANSI;
+
   const [a, b, c] = keyDigits(amountCents);
 
   // 豹子：三位非零相同
@@ -122,8 +147,9 @@ export function evaluateHand(amountCents: number): HandResult {
   };
 }
 
-/** 是否自爆：普通牌型且点数 ≤ 阈值（特殊牌型默认豁免） */
+/** 是否自爆：普通牌型且点数 ≤ 阈值（特殊牌型默认豁免；免死永不自爆） */
 export function isBust(hand: HandResult, config: HandConfig = DEFAULT_HAND_CONFIG): boolean {
+  if (hand.type === HandType.MIANSI) return false;
   if (hand.type !== HandType.NORMAL && config.bustExemptSpecialHands) return false;
   return hand.points <= config.bustThreshold;
 }

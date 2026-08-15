@@ -9,7 +9,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { WebSocket } from 'ws';
 import { z } from 'zod';
 import { bankerContinuationError } from '../engine/bankerContinuation.js';
-import { bettingRange, toCents } from '../engine/betting.js';
+import { bettingRange, toCentsBigInt } from '../engine/betting.js';
 import { prisma } from '../lib/prisma.js';
 import {
   canClaimPacket,
@@ -27,6 +27,7 @@ import { announceBidPlaced } from '../services/bidAuction.js';
 import {
   handleRoomChatCommand,
   isChatMuted,
+  privateBetConfirmationFor,
   runBankerDiceCeremony,
 } from '../services/chatCommands.js';
 import {
@@ -38,6 +39,7 @@ import {
 } from '../services/groupPacket.js';
 import { gameBus } from '../services/gameBus.js';
 import { getGameSettings, parseSettingsSnapshot } from '../services/gameSettings.js';
+import { scheduleVirtualGroupPacketClaims } from '../services/virtualPlayerWorker.js';
 import {
   gameDefinition,
   SUPPORTED_GAME_CODES,
@@ -53,11 +55,26 @@ import {
 } from '../services/roomHub.js';
 
 const amountSchema = z.object({
-  amount: z.string().regex(/^\d+(\.\d{1,2})?$/, '金额格式不正确'),
+  amount: z
+    .string()
+    .max(32, '金额过大')
+    .regex(/^\d+(\.\d{1,2})?$/, '金额格式不正确'),
 });
 const tipSchema = amountSchema.extend({
   requestId: z.string().uuid(),
 });
+
+function parseAmountCents(amount: string): bigint {
+  try {
+    return toCentsBigInt(amount);
+  } catch (error) {
+    throw new GameError(
+      error instanceof Error && error.message === 'AMOUNT_TOO_LARGE'
+        ? 'AMOUNT_TOO_LARGE'
+        : 'INVALID_AMOUNT',
+    );
+  }
+}
 
 async function eligiblePlayerCount(roomId: string): Promise<number> {
   return prisma.roomMember.count({
@@ -126,6 +143,8 @@ async function buildRoomState(roomId: string, userId: string) {
   if (round?.packet && round.phase === RoundPhase.CLAIMING) {
     canClaim = await canClaimPacket(round.packet.id, userId);
   }
+  const myClaim = round?.claims.find((claim) => claim.userId === userId) ?? null;
+  if (myClaim) canClaim = false;
 
   let diceThrown = false;
   if (round && round.phase === RoundPhase.SENDING_PACKET) {
@@ -196,9 +215,14 @@ async function buildRoomState(roomId: string, userId: string) {
       isBanker: !!round?.bankerId && round.bankerId === userId,
       bidCents: myBid ? String(myBid.amountCents) : null,
       bet: myBet
-        ? { amountCents: String(myBet.amountCents), isAllIn: myBet.isAllIn }
+        ? {
+            amountCents: String(myBet.amountCents),
+            reservedCents: String(myBet.reservedCents || myBet.amountCents),
+            isAllIn: myBet.isAllIn,
+          }
         : null,
       canClaim,
+      claimedAmountCents: myClaim ? String(myClaim.amountCents) : null,
       playedRounds24h,
     },
     round: round
@@ -223,11 +247,13 @@ async function buildRoomState(roomId: string, userId: string) {
           claimedCount: round.claims.length,
           diceThrown,
           participantCount: round.packet?.participantCount ?? null,
-          /** 仅 TNG 发包完成后才暴露，前端据此弹出可领红包 */
+          /** 发包完成后才暴露，前端据此弹出可领红包：TNG 需有链接，内部红包直接可领 */
           packetId:
-            round.packet?.status === 'SENT' && round.packet.claimUrl
+            round.packet?.status === 'SENT' &&
+            (round.packet.claimUrl || round.packet.channel === 'INTERNAL')
               ? round.packet.id
               : null,
+          packetChannel: round.packet?.channel ?? 'TNG',
           packetTotalCents:
             round.packet?.status === 'SENT'
               ? String(round.packet.totalCents)
@@ -276,6 +302,21 @@ function activity(roomId: string, kind: string, user: { uid: string; nickname: s
   broadcastToRoom(roomId, { type: 'activity', kind, user });
 }
 
+function serializeBetAcceptance(result: Awaited<ReturnType<typeof placeBet>>) {
+  return {
+    requestedAmountCents: String(result.requestedCents),
+    amountCents: String(result.acceptedCents),
+    reservedCents: String(result.reservedCents),
+    liabilityBalanceCents: String(result.liabilityBalanceCents),
+    maxAffordableCents: String(result.maxAffordableCents),
+    roomMaxCents: String(result.roomMaxCents),
+    maxAcceptedCents: String(result.maxAcceptedCents),
+    maxMultiplier: result.maxMultiplier,
+    adjusted: result.adjusted,
+    adjustedBy: result.adjustedBy,
+  };
+}
+
 export async function gameRoomRoutes(app: FastifyInstance) {
   const requireSupportedGameRoom = async (req: FastifyRequest, reply: FastifyReply) => {
     const { id } = req.params as { id?: string };
@@ -315,7 +356,7 @@ export async function gameRoomRoutes(app: FastifyInstance) {
     const { amount } = amountSchema.parse(req.body);
     const round = await currentRoundForRoom(id);
     if (!round || round.phase !== RoundPhase.BANKER_BID) throw new GameError('INVALID_PHASE');
-    const amountCents = BigInt(toCents(amount));
+    const amountCents = parseAmountCents(amount);
     await placeBankerBid(round.id, userId, amountCents);
     const user = await prisma.user.findUniqueOrThrow({
       where: { id: userId },
@@ -337,7 +378,12 @@ export async function gameRoomRoutes(app: FastifyInstance) {
     const body = amountSchema.extend({ allIn: z.boolean().default(false) }).parse(req.body);
     const round = await currentRoundForRoom(id);
     if (!round || round.phase !== RoundPhase.BETTING) throw new GameError('INVALID_PHASE');
-    await placeBet(round.id, userId, BigInt(toCents(body.amount)), body.allIn);
+    const acceptance = await placeBet(
+      round.id,
+      userId,
+      parseAmountCents(body.amount),
+      body.allIn,
+    );
     const user = await prisma.user.findUniqueOrThrow({
       where: { id: userId },
       select: { uid: true, nickname: true },
@@ -346,7 +392,10 @@ export async function gameRoomRoutes(app: FastifyInstance) {
       uid: user.uid,
       nickname: user.nickname ?? user.uid,
     });
-    return buildRoomState(id, userId);
+    return {
+      ...(await buildRoomState(id, userId)),
+      betAcceptance: serializeBetAcceptance(acceptance),
+    };
   });
 
   app.post('/api/game/rooms/:id/withdraw-bet', { preHandler: player }, async (req) => {
@@ -408,7 +457,7 @@ export async function gameRoomRoutes(app: FastifyInstance) {
     const result = await sendGroupPacket({
       roomId: id,
       userId,
-      totalCents: BigInt(toCents(body.amount)),
+      totalCents: parseAmountCents(body.amount),
       count: body.count,
       mode: body.mode,
       greeting: body.greeting,
@@ -425,6 +474,13 @@ export async function gameRoomRoutes(app: FastifyInstance) {
         avatarUrl: user.avatarUrl,
       },
     });
+    if (!result.duplicate) {
+      scheduleVirtualGroupPacketClaims({
+        roomId: id,
+        packetId: packet.id,
+        senderId: userId,
+      });
+    }
     return { ok: true, packetId: packet.id, duplicate: result.duplicate };
   });
 
@@ -494,7 +550,7 @@ export async function gameRoomRoutes(app: FastifyInstance) {
     const { id } = req.params as { id: string };
     const userId = (req.user as { sub: string }).sub;
     const body = tipSchema.parse(req.body);
-    const amountCents = BigInt(toCents(body.amount));
+    const amountCents = parseAmountCents(body.amount);
     const [user, result] = await Promise.all([
       prisma.user.findUnique({
         where: { id: userId },
@@ -740,11 +796,16 @@ export async function gameRoomRoutes(app: FastifyInstance) {
               userId: user.id,
               content,
             });
+            const privateBetConfirmation = privateBetConfirmationFor(result);
             if (result.kind === 'muted') {
               socket.send(JSON.stringify({ type: 'chat_error', message: result.message }));
               return;
             }
             if (result.kind === 'error') {
+              if (privateBetConfirmation) {
+                socket.send(JSON.stringify(privateBetConfirmation));
+                return;
+              }
               socket.send(JSON.stringify({ type: 'chat_error', message: result.message }));
               return;
             }
@@ -761,7 +822,7 @@ export async function gameRoomRoutes(app: FastifyInstance) {
                     roundId: liveRound.id,
                     roomId: id,
                     userId: user.id,
-                    amountCents: BigInt(toCents(result.echo)),
+                    amountCents: parseAmountCents(result.echo),
                   }).catch(() => undefined);
                 }
               }
@@ -774,6 +835,9 @@ export async function gameRoomRoutes(app: FastifyInstance) {
                   avatarUrl: senderProfile.avatarUrl,
                 },
               });
+              if (privateBetConfirmation) {
+                socket.send(JSON.stringify(privateBetConfirmation));
+              }
               return;
             }
           }

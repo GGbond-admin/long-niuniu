@@ -6,7 +6,7 @@ import {
   getToken,
   setToken,
 } from './api';
-import { getBotUsername, getDeviceId, getInitData, getRefUid, tg } from './telegram';
+import { getBotUsername, getDeviceId, getInitData, getRefUid, openTgLink, tg } from './telegram';
 import { getCachedSession, setCachedSession, type Session } from './sessionStore';
 import BindInviter from './pages/BindInviter';
 import BindDevice from './pages/BindDevice';
@@ -74,6 +74,8 @@ function DefaultGameRedirect({
 export default function App() {
   const [session, setSession] = useState<Session | null>(() => getCachedSession());
   const [error, setError] = useState('');
+  // 设备不匹配时被挡在登录外，进不了站内客服，需要给出 Bot 私聊出口
+  const [errorNeedsSupport, setErrorNeedsSupport] = useState(false);
   const navigate = useNavigate();
   const location = useLocation();
   const bootRef = useRef(false);
@@ -147,13 +149,29 @@ export default function App() {
         if (!s.onboarding.inviterBound) navigate('/bind-inviter', { replace: true });
         else if (!s.onboarding.deviceBound) navigate('/bind-device', { replace: true });
       })
-      .catch((e) => {
+      .catch(async (e) => {
         const code = (e as { code?: string }).code;
         if (code === 'DEVICE_MISMATCH') {
-          setError('此账号已绑定其他设备，请先在原设备解绑或联系客服');
+          // 也可能是本机缓存被清导致设备标识变化，此时用户没有任何入口能进客服
+          setError(
+            '此账号已绑定其他设备。若您正在使用原设备，可能是本机缓存被清除，请联系客服核验后重新绑定',
+          );
+          setErrorNeedsSupport(true);
           return;
         }
-        if (!getCachedSession()) setError(e.message || '登录失败');
+        // 登录失败时不能默默沿用本地缓存：token 可能已过期，后续操作会莫名失败。
+        // 先验证旧 token，仍有效则继续；无效则清空会话并给出可重试的错误。
+        if (getCachedSession() && getToken()) {
+          try {
+            await api.me();
+            return;
+          } catch {
+            setToken(null);
+            setCachedSession(null);
+            setSession(null);
+          }
+        }
+        setError((e as Error).message || '登录失败，请重试');
       });
   }, [navigate]);
 
@@ -233,7 +251,33 @@ export default function App() {
     }
   }, [location.pathname, location.search, navigate, session]);
 
-  if (error) return <div className="loading">{error}</div>;
+  if (error) {
+    const botUsername = getBotUsername();
+    return (
+      <div className="loading">
+        <div>
+          <p style={{ marginBottom: 14 }}>{error}</p>
+          <button
+            className="primary-action"
+            type="button"
+            onClick={() => window.location.reload()}
+          >
+            重试
+          </button>
+          {errorNeedsSupport && botUsername && (
+            <button
+              className="primary-action"
+              type="button"
+              style={{ marginTop: 10 }}
+              onClick={() => openTgLink(`https://t.me/${botUsername}`)}
+            >
+              联系客服
+            </button>
+          )}
+        </div>
+      </div>
+    );
+  }
   if (!session) return <div className="loading">加载中…</div>;
 
   return (

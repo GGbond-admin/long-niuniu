@@ -34,6 +34,11 @@ export interface RoundConfig {
   autoTailPacketEnabled: boolean;
   /** 自动发包：封盘后用 TNG_AUTO_PACKET_URL_TEMPLATE 自动登记链接并开抢 */
   autoPublishPacketEnabled: boolean;
+  /**
+   * 发包方式。TNG=运营粘贴 TNG 链接、玩家跳转外部抢包、金额靠后台录入；
+   * INTERNAL=投骰后小助手自动发内部红包，玩家在群内直接抢，金额随机拆分并即时入余额。
+   */
+  packetChannel: 'TNG' | 'INTERNAL';
   /** 代包手展示名（封盘播报用） */
   tailPackerBankerName: string;
   tailPackerPlayerName: string;
@@ -53,6 +58,7 @@ export const DEFAULT_ROUND_CONFIG: RoundConfig = {
   autoStart: false,
   autoTailPacketEnabled: false,
   autoPublishPacketEnabled: false,
+  packetChannel: 'TNG',
   tailPackerBankerName: '代包手·庄家尾包',
   tailPackerPlayerName: '代包手·闲家尾包',
 };
@@ -306,6 +312,21 @@ export async function setAssistantService(
   return next;
 }
 
+/**
+ * 切换发包方式：TNG 链接 / 内部红包（小助手直发）。
+ * 进行中的牌局沿用开局时的配置快照，切换后自下一局生效。
+ */
+export async function setPacketChannel(
+  gameCode: string,
+  channel: 'TNG' | 'INTERNAL',
+  updatedBy?: string,
+) {
+  const current = await getGameConfig(gameCode, 'round', DEFAULT_ROUND_CONFIG);
+  const next = { ...current, packetChannel: channel };
+  await setGameConfig(gameCode, 'round', next, updatedBy);
+  return next;
+}
+
 /** @deprecated 使用 setAssistantService */
 export async function setRoundAutoStart(
   gameCode: string,
@@ -387,6 +408,24 @@ export function settingsSnapshot(settings: GameSettings): Prisma.InputJsonValue 
   return JSON.parse(JSON.stringify(settings)) as Prisma.InputJsonValue;
 }
 
+/**
+ * 历史局快照兼容：拆分玩家/庄家抽水比例之前的快照只有单一 rakeRatio，
+ * 此时两侧均沿用旧值，避免进行中的牌局结算比例与开局播报不一致。
+ */
+function normalizeFeeSnapshot(rawFees: Partial<FeeConfig> | undefined): FeeConfig {
+  const merged = { ...DEFAULT_FEE_CONFIG, ...rawFees };
+  if (
+    rawFees &&
+    typeof rawFees.rakeRatio === 'number' &&
+    rawFees.playerRakeRatio === undefined &&
+    rawFees.bankerRakeRatio === undefined
+  ) {
+    merged.playerRakeRatio = rawFees.rakeRatio;
+    merged.bankerRakeRatio = rawFees.rakeRatio;
+  }
+  return merged;
+}
+
 export function parseSettingsSnapshot(value: Prisma.JsonValue | null): GameSettings {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new Error('ROUND_CONFIG_SNAPSHOT_MISSING');
@@ -403,7 +442,7 @@ export function parseSettingsSnapshot(value: Prisma.JsonValue | null): GameSetti
       },
     },
     betting: { ...DEFAULT_BETTING_CONFIG, ...raw.betting },
-    fees: { ...DEFAULT_FEE_CONFIG, ...raw.fees },
+    fees: normalizeFeeSnapshot(raw.fees),
     rebate: { ...DEFAULT_REBATE_CONFIG, ...raw.rebate },
     round: { ...DEFAULT_ROUND_CONFIG, ...raw.round },
     rewards: { ...DEFAULT_REWARD_RULES, ...raw.rewards },
@@ -442,6 +481,8 @@ const configSchemas = {
       bankerSeatFeeRatio: z.number().min(0).max(1).optional(),
       serviceFeeCents: z.number().int().min(0).max(100_000_000).optional(),
       packetPerHeadCents: z.number().int().min(1).max(1_000_000).optional(),
+      playerRakeRatio: z.number().min(0).max(1).optional(),
+      bankerRakeRatio: z.number().min(0).max(1).optional(),
       rakeRatio: z.number().min(0).max(1).optional(),
     })
     .strict(),
@@ -466,6 +507,7 @@ const configSchemas = {
       autoStart: z.boolean().optional(),
       autoTailPacketEnabled: z.boolean().optional(),
       autoPublishPacketEnabled: z.boolean().optional(),
+      packetChannel: z.enum(['TNG', 'INTERNAL']).optional(),
       tailPackerBankerName: z.string().min(1).max(80).optional(),
       tailPackerPlayerName: z.string().min(1).max(80).optional(),
     })

@@ -1,15 +1,18 @@
 import { useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { api } from '../api';
+import { backToTab } from '../lib/nav';
 
 type NoticeItem = Awaited<ReturnType<typeof api.notices>>['items'][number];
 
 export default function SystemNotices() {
   const navigate = useNavigate();
+  const location = useLocation();
   const [items, setItems] = useState<NoticeItem[]>([]);
   const [unread, setUnread] = useState(0);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
+  const [markingAll, setMarkingAll] = useState(false);
   const [expanded, setExpanded] = useState<string | null>(null);
 
   async function load() {
@@ -40,9 +43,17 @@ export default function SystemNotices() {
   }
 
   async function markAll() {
-    await api.readAllNotices();
-    setItems((list) => list.map((row) => ({ ...row, read: true })));
-    setUnread(0);
+    if (markingAll) return;
+    setMarkingAll(true);
+    try {
+      await api.readAllNotices();
+      setItems((list) => list.map((row) => ({ ...row, read: true })));
+      setUnread(0);
+    } catch {
+      setError('标记已读失败，请稍后重试');
+    } finally {
+      setMarkingAll(false);
+    }
   }
 
   return (
@@ -50,14 +61,7 @@ export default function SystemNotices() {
       <header className="subpage-header">
         <button
           type="button"
-          onClick={() => {
-            try {
-              sessionStorage.setItem('miniapp-tab', 'chat');
-            } catch {
-              // ignore
-            }
-            navigate('/');
-          }}
+          onClick={() => backToTab(navigate, location, 'chat')}
           aria-label="返回"
         >
           ‹
@@ -66,8 +70,13 @@ export default function SystemNotices() {
           <h1>系统通知</h1>
         </div>
         {unread > 0 ? (
-          <button type="button" className="text-action" onClick={() => void markAll()}>
-            全部已读
+          <button
+            type="button"
+            className="text-action"
+            disabled={markingAll}
+            onClick={() => void markAll()}
+          >
+            {markingAll ? '处理中…' : '全部已读'}
           </button>
         ) : (
           <span />

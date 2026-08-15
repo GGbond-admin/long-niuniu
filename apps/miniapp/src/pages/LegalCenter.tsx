@@ -1,6 +1,7 @@
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { IconChevronRight, IconDocument, IconShield } from '../components/Icons';
 import { legalDocs, type LegalDocKey } from '../legal';
+import { goBack } from '../lib/nav';
 
 const items: Array<{
   key: LegalDocKey;
@@ -16,10 +17,11 @@ const items: Array<{
 
 export default function LegalCenter() {
   const navigate = useNavigate();
+  const location = useLocation();
   return (
     <div className="page subpage legal-center-page">
       <header className="subpage-header">
-        <button type="button" onClick={() => navigate('/settings')} aria-label="返回">‹</button>
+        <button type="button" onClick={() => goBack(navigate, location, '/settings')} aria-label="返回">‹</button>
         <div><h1>协议与隐私</h1></div>
         <span />
       </header>

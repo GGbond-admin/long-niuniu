@@ -141,7 +141,7 @@ function HandForm({
   const normal = value.normalMultipliers ?? {};
   return (
     <>
-      <Section title="特殊牌型倍数">
+      <Section title="特殊牌型倍数（0.01免死；全表最高倍数=赔付预留倍数，默认17倍）">
         {HAND_TYPES.map((item) => (
           <Field key={item.key} label={item.label} hint="倍">
             <input
@@ -374,11 +374,19 @@ function FeesForm({
           }
         />
       </Field>
-      <Field label="抽水比例" hint="% ，只抽赢方盈利，例如 5 = 5%">
+      <Field label="玩家赢抽水比例" hint="% ，只抽闲家赢方盈利，例如 3 = 3%">
         <input
-          value={ratioToPercent(value.rakeRatio)}
+          value={ratioToPercent(value.playerRakeRatio)}
           onChange={(event) =>
-            onChange({ ...value, rakeRatio: event.target.value })
+            onChange({ ...value, playerRakeRatio: event.target.value })
+          }
+        />
+      </Field>
+      <Field label="庄家赢抽水比例" hint="% ，只抽庄家赢方盈利，例如 5 = 5%">
+        <input
+          value={ratioToPercent(value.bankerRakeRatio)}
+          onChange={(event) =>
+            onChange({ ...value, bankerRakeRatio: event.target.value })
           }
         />
       </Field>
@@ -470,6 +478,22 @@ function RoundForm({
               onChange({ ...value, trendLength: Number(event.target.value) })
             }
           />
+        </Field>
+      </Section>
+      <Section title="发包方式">
+        <Field
+          label="红包渠道"
+          hint="TNG=运营粘贴链接、玩家跳转外部抢包；内部红包=投骰后小助手自动发包，玩家群内直抢并即时入余额"
+        >
+          <select
+            value={value.packetChannel === 'INTERNAL' ? 'INTERNAL' : 'TNG'}
+            onChange={(event) =>
+              onChange({ ...value, packetChannel: event.target.value })
+            }
+          >
+            <option value="TNG">TNG 链接</option>
+            <option value="INTERNAL">内部红包（小助手直发）</option>
+          </select>
         </Field>
       </Section>
       <Section title="自动化开关">
@@ -844,10 +868,14 @@ function serializeConfig(key: string, draft: Row): Row {
         typeof draft.packetPerHeadCents === 'string'
           ? rmToCents(draft.packetPerHeadCents)
           : intOrThrow(String(draft.packetPerHeadCents ?? ''), '红包人均'),
-      rakeRatio:
-        typeof draft.rakeRatio === 'string'
-          ? percentToRatio(draft.rakeRatio)
-          : numOrThrow(String(draft.rakeRatio ?? ''), '抽水比例'),
+      playerRakeRatio:
+        typeof draft.playerRakeRatio === 'string'
+          ? percentToRatio(draft.playerRakeRatio)
+          : numOrThrow(String(draft.playerRakeRatio ?? ''), '玩家赢抽水比例'),
+      bankerRakeRatio:
+        typeof draft.bankerRakeRatio === 'string'
+          ? percentToRatio(draft.bankerRakeRatio)
+          : numOrThrow(String(draft.bankerRakeRatio ?? ''), '庄家赢抽水比例'),
     };
   }
 
@@ -874,6 +902,7 @@ function serializeConfig(key: string, draft: Row): Row {
         draft.assistantEnabled === false ? false : Boolean(draft.autoStart),
       autoTailPacketEnabled: Boolean(draft.autoTailPacketEnabled),
       autoPublishPacketEnabled: Boolean(draft.autoPublishPacketEnabled),
+      packetChannel: draft.packetChannel === 'INTERNAL' ? 'INTERNAL' : 'TNG',
       tailPackerBankerName: String(draft.tailPackerBankerName ?? '').trim() || '代包手·庄家尾包',
       tailPackerPlayerName: String(draft.tailPackerPlayerName ?? '').trim() || '代包手·闲家尾包',
     };
@@ -962,12 +991,15 @@ function toFormDraft(key: string, raw: Row): Row {
     };
   }
   if (key === 'fees') {
+    // 旧配置只有单一 rakeRatio：作为两侧初始值展示，保存后即写入分侧字段
+    const legacyRake = raw.rakeRatio;
     return {
       ...raw,
       bankerSeatFeeRatio: ratioToPercent(raw.bankerSeatFeeRatio),
       serviceFeeCents: centsToRm(raw.serviceFeeCents),
       packetPerHeadCents: centsToRm(raw.packetPerHeadCents),
-      rakeRatio: ratioToPercent(raw.rakeRatio),
+      playerRakeRatio: ratioToPercent(raw.playerRakeRatio ?? legacyRake ?? 0.03),
+      bankerRakeRatio: ratioToPercent(raw.bankerRakeRatio ?? legacyRake ?? 0.05),
     };
   }
   if (key === 'round') {

@@ -3,6 +3,7 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import { api } from '../api';
 import InstitutionLogo from '../components/InstitutionLogo';
 import { writeSelectedWithdrawAccountId } from '../data/institutions';
+import { goBack } from '../lib/nav';
 
 type Account = Awaited<ReturnType<typeof api.withdrawAccounts>>['items'][number];
 type Institution = { code: string; name: string; type: 'BANK' | 'EWALLET' };
@@ -220,7 +221,7 @@ export default function WithdrawAccounts({
   return (
     <div className="page subpage withdraw-accounts-page">
       <header className="subpage-header">
-        <button type="button" onClick={() => navigate(backTo)} aria-label="返回">
+        <button type="button" onClick={() => goBack(navigate, location, backTo)} aria-label="返回">
           ‹
         </button>
         <div>

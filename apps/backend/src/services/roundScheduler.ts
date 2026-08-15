@@ -10,10 +10,12 @@ import {
   ensureWaitingRound,
   expirePacket,
   GameError,
+  publishInternalPacket,
   publishPacket,
   refreshUnannouncedClaimDeadline,
   startRound,
 } from './game.js';
+import { finalizeInternalRound } from './internalPacket.js';
 import { gameBus } from './gameBus.js';
 import { getGameSettings, parseSettingsSnapshot } from './gameSettings.js';
 import { expireGroupPackets } from './groupPacket.js';
@@ -231,6 +233,40 @@ export class RoundScheduler {
           await scheduleVirtualDiceForRound(round.roomId, round.id);
         }
 
+        // 内部红包：投骰完成后小助手自动发包，无需 TNG 链接与发包账号。
+        for (const round of pendingPackets) {
+          if (!round.packet?.id) continue;
+          const settings = round.configSnapshot
+            ? parseSettingsSnapshot(round.configSnapshot)
+            : await getGameSettings(round.room.gameCode);
+          if (settings.round.packetChannel !== 'INTERNAL') continue;
+          try {
+            const packet = await publishInternalPacket({
+              roundId: round.id,
+              actorId: 'SYSTEM',
+            });
+            await appendGamePacketMessage(round.roomId, {
+              packetId: packet.id,
+              roundId: round.id,
+            });
+            await refreshUnannouncedClaimDeadline(round.id);
+            await ensureRoundAnnouncement({
+              roundId: round.id,
+              roomId: round.roomId,
+              to: RoundPhase.CLAIMING,
+            });
+            gameBus.transition({
+              roundId: round.id,
+              roomId: round.roomId,
+              from: RoundPhase.SENDING_PACKET,
+              to: RoundPhase.CLAIMING,
+            });
+            await cacheRound(round.id);
+          } catch {
+            // 骰子未投完（BANKER_DICE_NOT_READY）时等待下一轮
+          }
+        }
+
         if (env.tngAutoPacketUrlTemplate.includes('{{packetId}}')) {
           const account = await prisma.tngAccount.findFirst({
             where: { status: 'ACTIVE' },
@@ -242,6 +278,7 @@ export class RoundScheduler {
               const settings = round.configSnapshot
                 ? parseSettingsSnapshot(round.configSnapshot)
                 : await getGameSettings(round.room.gameCode);
+              if (settings.round.packetChannel === 'INTERNAL') continue;
               if (!settings.round.autoPublishPacketEnabled) continue;
               const claimUrl = env.tngAutoPacketUrlTemplate.replaceAll(
                 '{{packetId}}',
@@ -320,6 +357,10 @@ export class RoundScheduler {
               });
             }
           }
+          // 内部红包：补录齐后立即自动结算并公布成绩单。
+          await finalizeInternalRound(round.id).catch((error) => {
+            console.error('[scheduler] finalize internal round failed', round.id, error);
+          });
         }
 
         await expireGroupPackets().catch(() => undefined);

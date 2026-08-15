@@ -62,7 +62,7 @@ async function upload<T>(path: string, file: File): Promise<T> {
     if (token && DEVICE_SESSION_ERRORS.has(body.error)) {
       invalidateDeviceSession(body.error);
     }
-    throw Object.assign(new Error(body.error ?? `HTTP ${res.status}`), {
+    throw Object.assign(new Error(body.message ?? body.error ?? `HTTP ${res.status}`), {
       code: body.error,
       status: res.status,
     });
@@ -280,6 +280,38 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ amount, proofUrl, requestId, payeeAccountId }),
     }),
+  depositChannels: () =>
+    request<{
+      manual: { available: boolean };
+      vpay: {
+        available: boolean;
+        minCents: string;
+        maxCents: string;
+        tradeCodes: Array<{ code: string; label: string }>;
+      };
+    }>('/api/wallet/deposit/channels'),
+  depositVpay: (amount: string, tradeCode: string, requestId: string) =>
+    request<{
+      ok: boolean;
+      orderId: string;
+      status: string;
+      payUrl: string | null;
+      expiredAt: string | null;
+      duplicate: boolean;
+    }>('/api/wallet/deposit/vpay', {
+      method: 'POST',
+      body: JSON.stringify({ amount, tradeCode, requestId }),
+    }),
+  depositStatus: (orderId: string) =>
+    request<{
+      id: string;
+      status: string;
+      channel: string;
+      amountCents: string;
+      payUrl: string | null;
+      expiredAt: string | null;
+      rejectReason?: string | null;
+    }>(`/api/wallet/deposit/${orderId}/status`),
   paymentInstitutions: () =>
     request<{
       banks: Array<{ code: string; name: string; type: 'BANK' | 'EWALLET' }>;
@@ -405,7 +437,34 @@ export const api = {
       body: JSON.stringify({ previousRoundId }),
     }),
   claimPacket: (packetId: string) =>
-    request<{ url: string }>(`/api/game/packets/${packetId}/claim`, { method: 'POST', body: '{}' }),
+    request<{
+      /** TNG 红包：外部领取链接 */
+      url?: string;
+      /** 内部红包：金额已拆分入余额 */
+      channel?: 'INTERNAL';
+      amountCents?: string;
+      handType?: string | null;
+      points?: number | null;
+    }>(`/api/game/packets/${packetId}/claim`, { method: 'POST', body: '{}' }),
+  /** 牌局红包详情：结束后仍可查看抢包/认额名单 */
+  gamePacket: (packetId: string) =>
+    request<{
+      id: string;
+      channel: 'TNG' | 'INTERNAL';
+      status: string;
+      phase: string;
+      totalCents: string;
+      participantCount: number;
+      claims: Array<{
+        uid: string;
+        nickname: string | null;
+        avatarUrl: string | null;
+        amountCents: string;
+        isBanker: boolean;
+        isTail: boolean;
+        at: string;
+      }>;
+    }>(`/api/game/packets/${packetId}`),
 
   sendGroupPacket: (
     roomId: string,
@@ -501,7 +560,10 @@ export const api = {
         bankerSeatFeeRatio: number;
         serviceFeeCents: number;
         packetPerHeadCents: number;
-        rakeRatio: number;
+        playerRakeRatio: number;
+        bankerRakeRatio: number;
+        /** @deprecated 旧版单一抽水比例，仅历史配置存在 */
+        rakeRatio?: number;
       };
       round: {
         bidDurationSeconds: number;
@@ -665,8 +727,10 @@ export type RoomState = {
     joined: boolean;
     isBanker: boolean;
     bidCents: string | null;
-    bet: { amountCents: string; isAllIn: boolean } | null;
+    bet: { amountCents: string; reservedCents?: string; isAllIn: boolean } | null;
     canClaim: boolean;
+    /** 本局我已认领/抢到的红包金额（内部红包抢包后即有值） */
+    claimedAmountCents?: string | null;
     playedRounds24h?: number;
   };
   round: {
@@ -696,6 +760,8 @@ export type RoomState = {
     diceThrown?: boolean;
     participantCount: number | null;
     packetId: string | null;
+    /** TNG=跳转外部链接抢包；INTERNAL=小助手直发、群内直接抢 */
+    packetChannel?: 'TNG' | 'INTERNAL';
     packetTotalCents?: string | null;
     claims?: Array<{
       uid: string;
@@ -728,6 +794,19 @@ export type RoomState = {
     bankerBidMinCents: number;
     bankerBidMaxCents: number;
     autoTailPacketEnabled?: boolean;
+  };
+  /** 仅 POST /bet 响应携带；房间状态轮询可不含此字段。 */
+  betAcceptance?: {
+    requestedAmountCents: string;
+    amountCents: string;
+    reservedCents: string;
+    liabilityBalanceCents: string;
+    maxAffordableCents: string;
+    roomMaxCents: string;
+    maxAcceptedCents: string;
+    maxMultiplier: number;
+    adjusted: boolean;
+    adjustedBy: string[];
   };
 };
 

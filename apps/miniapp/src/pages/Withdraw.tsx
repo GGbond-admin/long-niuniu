@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { api, rm } from '../api';
 import InstitutionLogo from '../components/InstitutionLogo';
 import PaymentPinSheet from '../components/PaymentPinSheet';
@@ -8,21 +8,13 @@ import {
   writeSelectedWithdrawAccountId,
 } from '../data/institutions';
 import { completeRequest, pendingRequestId } from '../lib/idempotency';
+import { backToTab } from '../lib/nav';
 import { paymentPinErrorMessage } from '../lib/paymentPin';
 
 const PRESET_AMOUNTS = ['100', '200', '500', '1000', '2000', '5000'];
 
 type Account = Awaited<ReturnType<typeof api.withdrawAccounts>>['items'][number];
 type WithdrawInfo = Awaited<ReturnType<typeof api.withdrawInfo>>;
-
-function backToWallet(navigate: ReturnType<typeof useNavigate>) {
-  try {
-    sessionStorage.setItem('miniapp-tab', 'wallet');
-  } catch {
-    // ignore
-  }
-  navigate('/');
-}
 
 function parseAmountCents(value: string): bigint | null {
   if (!/^(?!0+(?:\.0{1,2})?$)\d+(\.\d{1,2})?$/.test(value)) return null;
@@ -40,6 +32,7 @@ export default function Withdraw({
   ownerUid: string;
 }) {
   const navigate = useNavigate();
+  const location = useLocation();
   const [available, setAvailable] = useState('0');
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [selectedAccountId, setSelectedAccountId] = useState('');
@@ -209,7 +202,7 @@ export default function Withdraw({
   return (
     <div className="page subpage wd-page">
       <header className="subpage-header">
-        <button type="button" onClick={() => backToWallet(navigate)} aria-label="返回">
+        <button type="button" onClick={() => backToTab(navigate, location, 'wallet')} aria-label="返回">
           ‹
         </button>
         <div>

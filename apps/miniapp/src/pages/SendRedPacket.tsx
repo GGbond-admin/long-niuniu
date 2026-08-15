@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { api } from '../api';
+import { goBack } from '../lib/nav';
 import { BackIcon, ShuffleIcon } from '../components/MoneyIcons';
 import PaymentPinSheet from '../components/PaymentPinSheet';
 import { completeRequest, pendingRequestId } from '../lib/idempotency';
@@ -31,6 +32,7 @@ export default function SendRedPacket({
 }) {
   const { roomId = '' } = useParams();
   const navigate = useNavigate();
+  const location = useLocation();
   const [mode, setMode] = useState<'RANDOM' | 'EQUAL'>('RANDOM');
   const [count, setCount] = useState('');
   const [amount, setAmount] = useState('');
@@ -131,7 +133,7 @@ export default function SendRedPacket({
   return (
     <div className="cash-page cash-packet">
       <header className="cash-nav">
-        <button type="button" className="cash-back" onClick={() => navigate(-1)} aria-label="返回">
+        <button type="button" className="cash-back" onClick={() => goBack(navigate, location, roomId ? `/game/${roomId}/play` : '/')} aria-label="返回">
           <BackIcon />
         </button>
         <h1>发红包</h1>

@@ -403,6 +403,8 @@ export default function GameOperationsCenter({ admin }: { admin: Admin }) {
   const roundsTotalPages = Math.max(1, Math.ceil(roundsTotal / ROUND_PAGE_SIZE));
 
   const selectedRoom = rooms.find((room) => room.id === selectedRoomId) ?? null;
+  /** 内部红包模式：小助手自动发包、玩家群内直抢并即时入余额，无需登记链接与认额 */
+  const internalPacketMode = selectedRoom?.packetChannel === 'INTERNAL';
   const frozenBets = detail?.bets?.filter((bet: Row) => bet.status === 'FROZEN') ?? [];
   const expectedClaims = (detail?.bankerId ? 1 : 0) + frozenBets.length;
   const claimReview = !!detail && ['CLAIMING', 'CLAIM_EXPIRED'].includes(detail.phase);
@@ -507,6 +509,7 @@ export default function GameOperationsCenter({ admin }: { admin: Admin }) {
         status: game.room.status as string,
         minPlayers: game.room.minPlayers as number,
         botService: game.botService,
+        packetChannel: (game.packetChannel as string) === 'INTERNAL' ? 'INTERNAL' : 'TNG',
         game: {
           code: game.code,
           title: game.title,
@@ -1261,12 +1264,51 @@ export default function GameOperationsCenter({ admin }: { admin: Admin }) {
               >
                 强制开局
               </button>
+              <p className="ops-control-layer">④ 发包方式（切换后下一局生效）</p>
+              <div className="ops-packet-channel-switch">
+                <button
+                  type="button"
+                  className={!internalPacketMode ? 'primary-action' : ''}
+                  disabled={!!busy || !internalPacketMode}
+                  onClick={() => {
+                    void run('packet-channel', async () => {
+                      await post(`/api/admin/rooms/${selectedRoom.id}/packet-channel`, {
+                        channel: 'TNG',
+                      });
+                    });
+                  }}
+                >
+                  {!internalPacketMode ? '✓ TNG 链接发包' : '切换为 TNG 链接发包'}
+                </button>
+                <button
+                  type="button"
+                  className={internalPacketMode ? 'primary-action' : ''}
+                  disabled={!!busy || internalPacketMode}
+                  onClick={() => {
+                    if (
+                      window.confirm(
+                        '切换为「小助手直发」后，庄家投骰完成即自动发包，玩家群内直抢、金额即时入余额，无需 TNG 链接与认额录入。下一局生效，确认切换？',
+                      )
+                    ) {
+                      void run('packet-channel', async () => {
+                        await post(`/api/admin/rooms/${selectedRoom.id}/packet-channel`, {
+                          channel: 'INTERNAL',
+                        });
+                      });
+                    }
+                  }}
+                >
+                  {internalPacketMode ? '✓ 小助手直发' : '切换为小助手直发'}
+                </button>
+              </div>
               <p className="ops-bot-hint">
                 入口 {selectedRoom.status === 'ACTIVE' ? '开' : '关'}
                 {' · '}
                 小助手 {assistantEnabled ? '播报中' : '已暂停（不发消息）'}
                 {' · '}
                 自动开局 {botAutoStart && assistantEnabled ? '开' : '关'}
+                {' · '}
+                发包 {internalPacketMode ? '小助手直发' : 'TNG 链接'}
               </p>
               <details className="ops-room-editor">
                 <summary>运行设置</summary>
@@ -1513,7 +1555,23 @@ export default function GameOperationsCenter({ admin }: { admin: Admin }) {
                 </div>
               )}
 
-              {detail.phase === 'SENDING_PACKET' && canMutateRound && (
+              {detail.phase === 'SENDING_PACKET' && canMutateRound && internalPacketMode && (
+                <section className="ops-action-block highlight">
+                  <header>
+                    <small>内部红包模式</small>
+                    <strong>小助手自动发包</strong>
+                  </header>
+                  <div className="ops-packet-brief">
+                    <div><span>红包总额</span><strong>RM {rm(detail.packet?.totalCents ?? 0)}</strong></div>
+                    <div><span>领取人数</span><strong>{detail.packet?.participantCount ?? '—'} 个</strong></div>
+                  </div>
+                  <p className="ops-packet-guide">
+                    当前为「内部红包」发包方式：庄家投骰完成后，小助手会自动发出红包，玩家在互动群内直接抢，金额即时入余额并作为牌型依据。全员抢完或超时补录后自动结算，无需登记 TNG 链接与认额。
+                  </p>
+                </section>
+              )}
+
+              {detail.phase === 'SENDING_PACKET' && canMutateRound && !internalPacketMode && (
                 <section className="ops-action-block highlight">
                   <header>
                     <small>步骤 1 · 待外部发包</small>
@@ -1572,6 +1630,24 @@ export default function GameOperationsCenter({ admin }: { admin: Admin }) {
                     {busy === 'packet' ? '正在校验并推送…' : '校验链接并推送到互动群'}
                   </button>
                   <p className="ops-packet-auto-note">成功后系统自动：切换抢包阶段 → 群内发卡 → 启动领取倒计时</p>
+                  <div className="ops-packet-or" aria-hidden="true">或</div>
+                  <button
+                    type="button"
+                    disabled={!!busy}
+                    onClick={() => {
+                      if (
+                        window.confirm(
+                          '本局改用小助手直发红包？无需 TNG 链接，玩家群内直接抢，金额随机拆分并即时入余额，抢完自动结算。仅影响本局。',
+                        )
+                      ) {
+                        void run('packet-internal', async () => {
+                          await post(`/api/admin/rounds/${detail.id}/packet/internal`, {});
+                        });
+                      }
+                    }}
+                  >
+                    {busy === 'packet-internal' ? '小助手正在发包…' : '本局改用小助手直发（免 TNG 链接）'}
+                  </button>
                 </section>
               )}
 
@@ -1581,9 +1657,16 @@ export default function GameOperationsCenter({ admin }: { admin: Admin }) {
                   <strong>
                     {isTerminalRound || detail.phase === 'WAITING'
                       ? '庄家与红包领取'
-                      : '参与者与 TNG 认额'}
+                      : internalPacketMode
+                        ? '参与者与抢包明细'
+                        : '参与者与 TNG 认额'}
                   </strong>
                 </header>
+                {internalPacketMode && claimReview && (
+                  <p className="ops-muted">
+                    内部红包由系统实时记账，抢包金额自动作为认额，无需人工录入；全员齐备后自动结算。
+                  </p>
+                )}
                 {detail.bankerId && (
                   <ClaimRow
                     role="庄"
@@ -1598,7 +1681,7 @@ export default function GameOperationsCenter({ admin }: { admin: Admin }) {
                     }
                     claim={detail.claims?.find((entry: Row) => entry.userId === detail.bankerId)}
                     draft={claimDrafts[detail.bankerId]}
-                    editable={claimReview && canMutateRound}
+                    editable={claimReview && canMutateRound && !internalPacketMode}
                     busy={!!busy}
                     onDraft={setDraft}
                     onSubmit={submitClaim}
@@ -1623,7 +1706,7 @@ export default function GameOperationsCenter({ admin }: { admin: Admin }) {
                     }`}
                     claim={detail.claims?.find((entry: Row) => entry.userId === bet.userId)}
                     draft={claimDrafts[bet.userId]}
-                    editable={claimReview && canMutateRound}
+                    editable={claimReview && canMutateRound && !internalPacketMode}
                     busy={!!busy}
                     onDraft={setDraft}
                     onSubmit={submitClaim}

@@ -1067,6 +1067,11 @@ body:has(.ui-shell) #root {
 .rules-page {
   padding-top: 12px !important;
   padding-bottom: calc(96px + env(safe-area-inset-bottom)) !important;
+  /* 旧安卓 WebView：网页字体 swap + backdrop-filter 会让正文反复闪 */
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
+    'Noto Sans SC', 'Microsoft YaHei', sans-serif;
+  font-synthesis: weight style;
+  -webkit-font-smoothing: antialiased;
 }
 
 .rules-top {
@@ -1112,7 +1117,7 @@ body:has(.ui-shell) #root {
 
 .rules-brand h1 {
   margin: 0;
-  font-family: var(--font-display);
+  font-family: inherit;
   font-size: 26px;
   font-weight: 700;
   line-height: 1.15;
@@ -1157,7 +1162,7 @@ body:has(.ui-shell) #root {
   padding-left: 10px;
   border-left: 2px solid var(--gold-deep);
   color: var(--ink);
-  font-family: var(--font-display);
+  font-family: inherit;
   font-size: 14px;
   font-weight: 700;
   letter-spacing: 0;
@@ -1167,13 +1172,16 @@ body:has(.ui-shell) #root {
   padding: 14px 14px 12px;
   border: 1px solid var(--line);
   border-radius: 16px;
-  background: rgba(20, 20, 22, 0.92);
+  background: #161618;
   box-shadow: none;
   color: var(--ink-soft);
   font-size: 13px;
   line-height: 1.65;
-  backdrop-filter: none;
-  -webkit-backdrop-filter: none;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  filter: none;
+  transform: none;
+  animation: none !important;
 }
 
 .rules-page .rules-card p + p {
@@ -1183,7 +1191,7 @@ body:has(.ui-shell) #root {
 .rules-page .rules-card strong,
 .rules-page .rules-card b {
   color: var(--ink);
-  font-weight: 650;
+  font-weight: 700;
 }
 
 .rules-steps {

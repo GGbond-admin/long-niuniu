@@ -260,9 +260,14 @@ export async function adminOperationsRoutes(app: FastifyInstance) {
       .object({
         q: z.string().trim().max(100).optional(),
         status: z.enum(['ACTIVE', 'BANNED']).optional(),
-        limit: z.coerce.number().int().min(1).max(200).default(50),
+        /** @deprecated 兼容旧客户端；优先使用 page/pageSize */
+        limit: z.coerce.number().int().min(1).max(200).optional(),
+        page: z.coerce.number().int().min(1).default(1),
+        pageSize: z.coerce.number().int().min(1).max(100).default(20),
       })
       .parse(req.query);
+    const pageSize = query.limit ?? query.pageSize;
+    const page = query.limit ? 1 : query.page;
     const search = query.q;
     const tgIdCandidate = search && /^\d{1,19}$/.test(search) ? BigInt(search) : undefined;
     const tgId =
@@ -270,44 +275,47 @@ export async function adminOperationsRoutes(app: FastifyInstance) {
         ? tgIdCandidate
         : undefined;
     const last4 = search && /^\d{4}$/.test(search) ? search : undefined;
-    const items = await prisma.user.findMany({
-      where: {
-        status: query.status,
-        ...(search
-          ? {
-              OR: [
-                { uid: { contains: search } },
-                { nickname: { contains: search, mode: 'insensitive' } },
-                { tgUsername: { contains: search.replace(/^@/, ''), mode: 'insensitive' } },
-                { tgDisplayName: { contains: search, mode: 'insensitive' } },
-                ...(tgId ? [{ tgId }] : []),
-                { kyc: { is: { realNameHash: blindIndex(search) } } },
-                { kyc: { is: { duitnowHash: blindIndex(search) } } },
-                { kyc: { is: { bankAccountHash: blindIndex(search.replace(/\s+/g, '')) } } },
-                ...(last4
-                  ? [{ kyc: { is: { bankAccountLast4Hash: blindIndex(last4) } } }]
-                  : []),
-              ],
-            }
-          : {}),
-      },
-      include: {
-        wallet: true,
-        kyc: true,
-        device: true,
-        paymentPin: {
-          select: {
-            isSet: true,
-            lockedUntil: true,
-            setAt: true,
+    const where: Prisma.UserWhereInput = {
+      status: query.status,
+      ...(search
+        ? {
+            OR: [
+              { uid: { contains: search } },
+              { nickname: { contains: search, mode: 'insensitive' } },
+              { tgUsername: { contains: search.replace(/^@/, ''), mode: 'insensitive' } },
+              { tgDisplayName: { contains: search, mode: 'insensitive' } },
+              ...(tgId ? [{ tgId }] : []),
+              { kyc: { is: { realNameHash: blindIndex(search) } } },
+              { kyc: { is: { duitnowHash: blindIndex(search) } } },
+              { kyc: { is: { bankAccountHash: blindIndex(search.replace(/\s+/g, '')) } } },
+              ...(last4 ? [{ kyc: { is: { bankAccountLast4Hash: blindIndex(last4) } } }] : []),
+            ],
+          }
+        : {}),
+    };
+    const [total, items] = await Promise.all([
+      prisma.user.count({ where }),
+      prisma.user.findMany({
+        where,
+        include: {
+          wallet: true,
+          kyc: true,
+          device: true,
+          paymentPin: {
+            select: {
+              isSet: true,
+              lockedUntil: true,
+              setAt: true,
+            },
           },
+          inviter: { select: { uid: true, nickname: true } },
+          _count: { select: { invitees: true } },
         },
-        inviter: { select: { uid: true, nickname: true } },
-        _count: { select: { invitees: true } },
-      },
-      orderBy: { createdAt: 'desc' },
-      take: query.limit,
-    });
+        orderBy: { createdAt: 'desc' },
+        skip: (page - 1) * pageSize,
+        take: pageSize,
+      }),
+    ]);
     return {
       items: items.map((user) => ({
         id: user.id,
@@ -338,6 +346,9 @@ export async function adminOperationsRoutes(app: FastifyInstance) {
         wallet: user.wallet,
         createdAt: user.createdAt,
       })),
+      total,
+      page,
+      pageSize,
     };
   });
 

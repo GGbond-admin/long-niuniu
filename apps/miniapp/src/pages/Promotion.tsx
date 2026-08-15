@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { api, rm } from '../api';
+import { goBack } from '../lib/nav';
 import BrandLogo from '../components/BrandLogo';
 
 function shiftDate(date: string, days: number): string {
@@ -14,6 +15,7 @@ export default function Promotion() {
   const [data, setData] = useState<Awaited<ReturnType<typeof api.promotion>> | null>(null);
   const [error, setError] = useState('');
   const navigate = useNavigate();
+  const location = useLocation();
 
   useEffect(() => {
     setError('');
@@ -28,7 +30,7 @@ export default function Promotion() {
     return (
       <div className="page subpage pm-page">
         <header className="subpage-header">
-          <button type="button" onClick={() => navigate(-1)} aria-label="返回">
+          <button type="button" onClick={() => goBack(navigate, location)} aria-label="返回">
             ‹
           </button>
           <div>
@@ -47,7 +49,7 @@ export default function Promotion() {
   return (
     <div className="page subpage pm-page">
       <header className="subpage-header">
-        <button type="button" onClick={() => navigate(-1)} aria-label="返回">
+        <button type="button" onClick={() => goBack(navigate, location)} aria-label="返回">
           ‹
         </button>
         <div>

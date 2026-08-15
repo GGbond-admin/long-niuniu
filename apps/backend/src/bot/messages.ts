@@ -36,11 +36,12 @@ export function formatScoreboard(scoreboard: RoundScoreboard): string[] {
   ];
 
   for (const player of players) {
+    const multiplier = Number(player.multiplier ?? 0);
     const outcome =
       player.outcome === 'PLAYER_WIN'
         ? `赢 ${signedMoney(String(player.netCents))}`
         : player.outcome === 'BANKER_WIN'
-          ? `输 ${signedMoney(String(player.netCents))}`
+          ? `输 ${signedMoney(String(player.netCents))}${multiplier > 1 ? `（庄家牌型 ×${multiplier}）` : ''}`
           : '平';
     lines.push(
       `${player.isBust ? '💥 ' : ''}<b>${mention(player)}</b> · RM ${fromCents(String(player.claimCents))} · ${player.isAllIn ? '梭哈' : '下注'} RM ${fromCents(String(player.betCents))}`,
@@ -52,15 +53,20 @@ export function formatScoreboard(scoreboard: RoundScoreboard): string[] {
 
   const bankerMention = mention(banker);
   const bankerNet = BigInt(String(banker.netCents));
+  const bankerGross = BigInt(String(banker.grossCents ?? banker.netCents));
+  const balanceBefore = BigInt(String(banker.balanceBeforeCents ?? 0));
+  const balanceAfter = BigInt(String(banker.balanceAfterCents ?? balanceBefore + bankerNet));
   const trend = Array.isArray(banker.trend) ? banker.trend.map(String).join(' → ') : '—';
   lines.push(
     '━━━━━━━━━━━━━━━━━━',
     `🎲 <b>庄家 ${bankerMention}</b> · RM ${fromCents(String(banker.claimCents))}`,
     `${banker.isBust ? '💥 ' : ''}${handLabel(banker.handType, banker.points)}`,
     `闲家统计：赢 ${stats?.playerWin ?? 0} / 输 ${stats?.playerLose ?? 0} / 平 ${stats?.tie ?? 0}`,
+    `庄家盈利 ${signedMoney(bankerGross)}（已扣抽水）`,
     `上庄费 -RM ${fromCents(fees?.seatFeeCents ?? 0)} · 服务费 -RM ${fromCents(fees?.serviceFeeCents ?? 0)} · 代包费 -RM ${fromCents(fees?.packetFeeCents ?? 0)}`,
-    `${bankerNet >= 0n ? '庄盈利' : '庄亏损'} ${signedMoney(bankerNet)}`,
-    `庄总积分：${signedMoney(String(banker.totalProfitCents))}`,
+    `庄家实际盈利 ${signedMoney(bankerNet)}`,
+    `上庄积分 RM ${fromCents(balanceBefore)} · 盈利 ${signedMoney(bankerNet)} · 庄总积分 RM ${fromCents(balanceAfter)}`,
+    `累计做庄盈亏：${signedMoney(String(banker.totalProfitCents))}`,
     `走势：${escapeHtml(trend)}`,
   );
 

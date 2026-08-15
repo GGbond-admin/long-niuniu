@@ -2,10 +2,13 @@
  * 单局结算引擎 — 对应《06-公式与数值配置总表》第 6 节
  *
  * 规则（已与产品确认）：
+ * - 免死：抢到 0.01 的一方本对判和，退回本金、不赔不赚、不抽水
  * - 自爆：普通牌型点数 ≤3 直接判输；庄闲双自爆 → 庄赢
  * - 同级比金额，金额相同平局（该对退回，不抽水）
- * - 抽水 5% 只抽赢方盈利；与庄家三费并存
+ * - 输方按赢方牌型倍数赔付（金牛 11 倍、对子 12 倍……普通按点数倍数）
+ * - 抽水只抽赢方盈利：玩家赢默认 3%、庄家赢默认 5%（可配置）；与庄家三费并存
  * - 闲赢从庄池支付，庄池不足按上限赔付（免赔部分记 shortfall）
+ * - 庄赢从下注时冻结的最大赔付预留金收取；旧单预留不足时才防御性记 shortfall
  */
 
 import {
@@ -13,6 +16,7 @@ import {
   DEFAULT_HAND_CONFIG,
   HandConfig,
   HandResult,
+  HandType,
   compareHands,
   evaluateHand,
   isBust,
@@ -24,6 +28,8 @@ export interface PlayerInput {
   userId: string;
   betCents: number;
   claimCents: number; // 抢到的红包金额（分）
+  /** 下注时已冻结的最大赔付预留金（分）；旧单缺省时按本金处理 */
+  reservedCents?: number;
 }
 
 export interface PairSettlement {
@@ -35,9 +41,9 @@ export interface PairSettlement {
   isBustPlayer: boolean;
   isBustBanker: boolean;
   multiplier: number;
-  /** 闲赢：理论应付 */
+  /** 输方理论应付（赢方倍数 × 注额） */
   payableCents: number;
-  /** 闲赢：实付（庄池上限内） */
+  /** 实际支付（闲赢受庄池上限、庄赢受预留金上限） */
   paidCents: number;
   /** 免赔 */
   shortfallCents: number;
@@ -92,7 +98,9 @@ export function settleRound(params: {
     const playerBust = isBust(playerHand, handConfig);
 
     let outcome: PairSettlement['outcome'];
-    if (playerBust && bankerBust) {
+    if (bankerHand.type === HandType.MIANSI || playerHand.type === HandType.MIANSI) {
+      outcome = 'TIE'; // 免死（0.01）：本对判和，退回本金不赔付
+    } else if (playerBust && bankerBust) {
       outcome = 'BANKER_WIN'; // 双自爆 → 庄赢（已确认）
     } else if (playerBust) {
       outcome = 'BANKER_WIN';
@@ -138,7 +146,7 @@ export function settleRound(params: {
       const payable = multiplier * p.betCents;
       const paid = Math.min(payable, potRemaining);
       const shortfall = payable - paid;
-      const rake = rakeOf(paid, feeConfig);
+      const rake = rakeOf(paid, 'PLAYER', feeConfig);
       potRemaining -= paid;
       bankerGross -= paid;
       totalRake += rake;
@@ -156,21 +164,26 @@ export function settleRound(params: {
       continue;
     }
 
-    // BANKER_WIN
+    // BANKER_WIN：按庄家（赢方）牌型倍数从下注时冻结的最大赔付预留金收取
     stats.playerLose++;
-    const rake = rakeOf(p.betCents, feeConfig);
-    bankerGross += p.betCents - rake;
+    const multiplier = multiplierOf(bankerHand, handConfig);
+    const payable = multiplier * p.betCents;
+    const capacity = Math.max(p.betCents, p.reservedCents ?? p.betCents);
+    const paid = Math.min(payable, capacity);
+    const shortfall = payable - paid;
+    const rake = rakeOf(paid, 'BANKER', feeConfig);
+    bankerGross += paid - rake;
     totalRake += rake;
     pairs.push({
       ...base,
       outcome,
-      multiplier: 0,
-      payableCents: 0,
-      paidCents: 0,
-      shortfallCents: 0,
+      multiplier,
+      payableCents: payable,
+      paidCents: paid,
+      shortfallCents: shortfall,
       rakeCents: rake,
-      playerNetCents: -p.betCents,
-      bankerNetCents: p.betCents - rake,
+      playerNetCents: -paid,
+      bankerNetCents: paid - rake,
     });
   }
 

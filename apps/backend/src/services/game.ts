@@ -1,17 +1,24 @@
 import {
   AccountType,
+  type Bet,
   BetStatus,
   ClaimSource,
   KycStatus,
+  PacketChannel,
   Prisma,
   RoundPhase,
   UserKind,
   UserStatus,
 } from '@prisma/client';
 import { bankerContinuationError } from '../engine/bankerContinuation.js';
-import { bettingRange, validateBet } from '../engine/betting.js';
+import {
+  acceptBetAmount,
+  bettingRange,
+  MAX_MONEY_CENTS,
+  type BetAdjustmentReason,
+} from '../engine/betting.js';
 import { bankerSeatFee, packetTotal } from '../engine/fees.js';
-import { evaluateHand, HAND_LABEL } from '../engine/hand.js';
+import { evaluateHand, HAND_LABEL, maxPayoutMultiplier } from '../engine/hand.js';
 import {
   effectiveTurnoverForBanker,
   effectiveTurnoverForPlayer,
@@ -41,6 +48,7 @@ export type VirtualCapability =
   | 'continue'
   | 'dice'
   | 'groupPacket'
+  | 'claimGroupPacket'
   | 'claimSim';
 
 type Tx = Prisma.TransactionClient;
@@ -97,6 +105,11 @@ function totalBalance(wallet: {
   );
 }
 
+/** 部署前旧下注没有 reservedCents，只实际冻结了本金；按本金安全回退。 */
+function reservedCentsOf(bet: { amountCents: bigint; reservedCents?: bigint | null }): bigint {
+  return bet.reservedCents && bet.reservedCents > 0n ? bet.reservedCents : bet.amountCents;
+}
+
 async function requireGameUser(
   tx: Tx,
   userId: string,
@@ -132,6 +145,7 @@ async function requireGameUser(
         continue: profile.canContinue,
         dice: profile.canThrowDice,
         groupPacket: profile.canGroupPacket,
+        claimGroupPacket: profile.canClaimGroupPacket,
         claimSim: profile.canClaimSim,
       };
       if (!map[capability]) {
@@ -411,20 +425,35 @@ async function activePlayerCount(tx: Tx, roomId: string): Promise<number> {
   });
 }
 
+export interface PlaceBetResult {
+  bet: Bet;
+  requestedCents: bigint;
+  acceptedCents: bigint;
+  reservedCents: bigint;
+  liabilityBalanceCents: bigint;
+  maxAffordableCents: bigint;
+  roomMaxCents: bigint;
+  maxAcceptedCents: bigint;
+  maxMultiplier: number;
+  adjusted: boolean;
+  adjustedBy: BetAdjustmentReason[];
+}
+
 export async function placeBet(
   roundId: string,
   userId: string,
-  amountCents: bigint,
+  requestedCents: bigint,
   isAllIn: boolean,
-) {
-  if (amountCents <= 0n) throw new GameError('INVALID_AMOUNT');
+): Promise<PlaceBetResult> {
+  if (requestedCents <= 0n) throw new GameError('INVALID_AMOUNT');
+  if (requestedCents > MAX_MONEY_CENTS) throw new GameError('AMOUNT_TOO_LARGE');
   return serializable(async (tx) => {
     const round = await tx.round.findUnique({ where: { id: roundId } });
     if (!round) throw new GameError('ROUND_NOT_FOUND');
     if (round.phase !== RoundPhase.BETTING) throw new GameError('INVALID_PHASE');
     if (!round.betEndsAt || round.betEndsAt <= new Date()) throw new GameError('PHASE_ENDED');
     if (round.bankerId === userId) throw new GameError('BANKER_CANNOT_BET');
-    await requireGameUser(tx, userId, round.roomId, isAllIn ? 'allIn' : 'bet');
+    const user = await requireGameUser(tx, userId, round.roomId, isAllIn ? 'allIn' : 'bet');
     const settings = parseSettingsSnapshot(round.configSnapshot);
     const players = await activePlayerCount(tx, round.roomId);
     const range = bettingRange(
@@ -432,10 +461,6 @@ export async function placeBet(
       Math.max(1, players),
       settings.betting,
     );
-    const validation = validateBet(safeNumber(amountCents, 'bet'), isAllIn, range);
-    if (!validation.ok) {
-      throw new GameError(validation.reason ?? 'BET_OUT_OF_RANGE', { ...range });
-    }
 
     const existing = await tx.bet.findUnique({
       where: { roundId_userId: { roundId, userId } },
@@ -447,41 +472,90 @@ export async function placeBet(
     ) {
       throw new GameError('BET_NOT_EDITABLE');
     }
+
+    const existingReservedCents =
+      existing?.status === BetStatus.FROZEN ? reservedCentsOf(existing) : 0n;
+    const liabilityBalanceCents = user.wallet.availableCents + existingReservedCents;
+    const maxMultiplier = maxPayoutMultiplier(settings.hand);
+    const acceptance = acceptBetAmount({
+      requestedCents,
+      liabilityBalanceCents,
+      maxMultiplier,
+      isAllIn,
+      range,
+    });
+    if (!acceptance.ok) {
+      throw new GameError(acceptance.reason, {
+        ...range,
+        liabilityBalanceCents: String(liabilityBalanceCents),
+        maxAffordableCents: String(acceptance.maxAffordableCents),
+        maxAcceptedCents: String(acceptance.maxAcceptedCents),
+        maxMultiplier,
+      });
+    }
+
+    const amountCents = acceptance.acceptedCents;
+    const reservedCents = acceptance.reservedCents;
     const revision = (existing?.revision ?? -1) + 1;
     if (!existing || existing.status === BetStatus.WITHDRAWN) {
       const bet = existing
         ? await tx.bet.update({
             where: { id: existing.id },
-            data: { amountCents, isAllIn, status: BetStatus.FROZEN, revision },
+            data: {
+              amountCents,
+              reservedCents,
+              isAllIn,
+              status: BetStatus.FROZEN,
+              revision,
+            },
           })
         : await tx.bet.create({
-            data: { roundId, userId, amountCents, isAllIn, revision },
+            data: { roundId, userId, amountCents, reservedCents, isAllIn, revision },
           });
       await transfer(tx, {
-        amountCents,
+        amountCents: reservedCents,
         from: { userId, accountType: AccountType.USER_AVAILABLE },
         to: { userId, accountType: AccountType.USER_FREEZE_BET },
-        refType: 'bet',
+        refType: 'bet_liability_reserve',
         refId: bet.id,
         roundId,
         idempotencyKey: `bet:${roundId}:${userId}:v${revision}`,
       });
       await event(tx, roundId, 'BET_PLACED', {
         userId,
+        requestedCents: String(requestedCents),
         amountCents: String(amountCents),
+        reservedCents: String(reservedCents),
+        liabilityBalanceCents: String(liabilityBalanceCents),
+        maxAffordableCents: String(acceptance.maxAffordableCents),
+        maxAcceptedCents: String(acceptance.maxAcceptedCents),
+        maxMultiplier,
+        adjustedBy: acceptance.adjustedBy,
         isAllIn,
         revision,
       });
-      return bet;
+      return {
+        bet,
+        requestedCents,
+        acceptedCents: amountCents,
+        reservedCents,
+        liabilityBalanceCents,
+        maxAffordableCents: acceptance.maxAffordableCents,
+        roomMaxCents: acceptance.roomMaxCents,
+        maxAcceptedCents: acceptance.maxAcceptedCents,
+        maxMultiplier,
+        adjusted: acceptance.adjusted,
+        adjustedBy: acceptance.adjustedBy,
+      };
     }
 
-    const difference = amountCents - existing.amountCents;
+    const difference = reservedCents - existingReservedCents;
     if (difference > 0n) {
       await transfer(tx, {
         amountCents: difference,
         from: { userId, accountType: AccountType.USER_AVAILABLE },
         to: { userId, accountType: AccountType.USER_FREEZE_BET },
-        refType: 'bet_adjust',
+        refType: 'bet_liability_adjust',
         refId: existing.id,
         roundId,
         idempotencyKey: `bet-adjust:${roundId}:${userId}:v${revision}`,
@@ -491,7 +565,7 @@ export async function placeBet(
         amountCents: -difference,
         from: { userId, accountType: AccountType.USER_FREEZE_BET },
         to: { userId, accountType: AccountType.USER_AVAILABLE },
-        refType: 'bet_adjust',
+        refType: 'bet_liability_adjust',
         refId: existing.id,
         roundId,
         idempotencyKey: `bet-adjust:${roundId}:${userId}:v${revision}`,
@@ -499,15 +573,34 @@ export async function placeBet(
     }
     const bet = await tx.bet.update({
       where: { id: existing.id },
-      data: { amountCents, isAllIn, revision },
+      data: { amountCents, reservedCents, isAllIn, revision },
     });
     await event(tx, roundId, 'BET_UPDATED', {
       userId,
+      requestedCents: String(requestedCents),
       amountCents: String(amountCents),
+      reservedCents: String(reservedCents),
+      liabilityBalanceCents: String(liabilityBalanceCents),
+      maxAffordableCents: String(acceptance.maxAffordableCents),
+      maxAcceptedCents: String(acceptance.maxAcceptedCents),
+      maxMultiplier,
+      adjustedBy: acceptance.adjustedBy,
       isAllIn,
       revision,
     });
-    return bet;
+    return {
+      bet,
+      requestedCents,
+      acceptedCents: amountCents,
+      reservedCents,
+      liabilityBalanceCents,
+      maxAffordableCents: acceptance.maxAffordableCents,
+      roomMaxCents: acceptance.roomMaxCents,
+      maxAcceptedCents: acceptance.maxAcceptedCents,
+      maxMultiplier,
+      adjusted: acceptance.adjusted,
+      adjustedBy: acceptance.adjustedBy,
+    };
   });
 }
 
@@ -526,7 +619,7 @@ export async function withdrawBet(roundId: string, userId: string) {
       tx,
       userId,
       AccountType.USER_FREEZE_BET,
-      bet.amountCents,
+      reservedCentsOf(bet),
       roundId,
       'bet_withdraw',
       `${bet.id}:v${revision}`,
@@ -555,7 +648,7 @@ async function cancelRoundTx(tx: Tx, roundId: string, reason: string, actorId?: 
       tx,
       bet.userId,
       AccountType.USER_FREEZE_BET,
-      bet.amountCents,
+      reservedCentsOf(bet),
       round.id,
       'round_cancel_refund',
       `cancel:${bet.id}`,
@@ -810,6 +903,63 @@ export async function publishPacket(params: {
 }
 
 /**
+ * 内部红包发包：投骰完成后由小助手直发，无 TNG 链接、无发包账号。
+ * 资金留在平台备付金，抢包时逐笔转入玩家余额（见 claimInternalPacket）。
+ */
+export async function publishInternalPacket(params: {
+  roundId: string;
+  actorId?: string;
+}) {
+  return serializable(async (tx) => {
+    const round = await tx.round.findUnique({
+      where: { id: params.roundId },
+      include: { packet: true },
+    });
+    if (!round?.packet) throw new GameError('PACKET_NOT_FOUND');
+    if (round.phase !== RoundPhase.SENDING_PACKET) {
+      if (round.phase === RoundPhase.CLAIMING) return round.packet;
+      throw new GameError('INVALID_PHASE');
+    }
+    const diceReady = await tx.roundEvent.findFirst({
+      where: {
+        roundId: round.id,
+        type: 'BANKER_DICE_READY_FOR_PACKET',
+      },
+      select: { id: true },
+    });
+    if (!diceReady) throw new GameError('BANKER_DICE_NOT_READY');
+    const settings = parseSettingsSnapshot(round.configSnapshot);
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + settings.round.claimDurationSeconds * 1000);
+    const packet = await tx.packet.update({
+      where: { id: round.packet.id },
+      data: {
+        channel: PacketChannel.INTERNAL,
+        status: 'SENT',
+        sentAt: now,
+        expiresAt,
+      },
+    });
+    await tx.round.update({
+      where: { id: round.id },
+      data: {
+        phase: RoundPhase.CLAIMING,
+        claimEndsAt: expiresAt,
+        version: { increment: 1 },
+      },
+    });
+    await event(
+      tx,
+      round.id,
+      'PACKET_SENT',
+      { packetId: packet.id, channel: 'INTERNAL', expiresAt: expiresAt.toISOString() },
+      params.actorId,
+    );
+    return packet;
+  });
+}
+
+/**
  * 「开始抢包」尚未完整播报时重置领取窗口，避免发包副作用重试吞掉玩家时间。
  * 播报完成标记存在后保持原截止时间，防止重复调用无限续时。
  */
@@ -905,16 +1055,23 @@ function splitRemainingCents(total: bigint, count: number): bigint[] {
 
 /**
  * 抢包超时后：若开启自动认尾包，为未认额的庄/闲补录金额（source=AUTO_TAIL）。
+ * 内部红包强制补录（否则牌局无法凑齐结算），且补录金额同步转入玩家余额。
  * 返回补录的 userId 列表，供上层广播。
  */
 export async function applyAutoTailClaims(roundId: string): Promise<string[]> {
   const identity = await prisma.round.findUnique({
     where: { id: roundId },
-    select: { room: { select: { gameCode: true } } },
+    select: {
+      room: { select: { gameCode: true } },
+      packet: { select: { channel: true } },
+    },
   });
   if (!identity) throw new GameError('ROUND_NOT_FOUND');
-  const settings = await getGameSettings(identity.room.gameCode);
-  if (!settings.round.autoTailPacketEnabled) return [];
+  const internalChannel = identity.packet?.channel === PacketChannel.INTERNAL;
+  if (!internalChannel) {
+    const settings = await getGameSettings(identity.room.gameCode);
+    if (!settings.round.autoTailPacketEnabled) return [];
+  }
 
   return serializable(async (tx) => {
     const round = await tx.round.findUnique({
@@ -943,7 +1100,8 @@ export async function applyAutoTailClaims(roundId: string): Promise<string[]> {
         include: { virtualPlayer: true },
       });
       if (!user) continue;
-      if (user.kind === UserKind.VIRTUAL) {
+      // 内部红包必须为所有参与者补齐认额，否则结算会因缺认额而卡死。
+      if (!internalChannel && user.kind === UserKind.VIRTUAL) {
         if (!user.virtualPlayer?.enabled || !user.virtualPlayer.canClaimSim) continue;
       }
       missing.push(userId);
@@ -965,7 +1123,7 @@ export async function applyAutoTailClaims(roundId: string): Promise<string[]> {
       });
       if (!user) continue;
       const hand = evaluateHand(safeNumber(amountCents, 'claim'));
-      await tx.claim.create({
+      const claim = await tx.claim.create({
         data: {
           packetId: round.packet.id,
           roundId: round.id,
@@ -979,6 +1137,17 @@ export async function applyAutoTailClaims(roundId: string): Promise<string[]> {
           confirmedAt: new Date(),
         },
       });
+      if (round.packet.channel === PacketChannel.INTERNAL) {
+        await transfer(tx, {
+          amountCents,
+          from: { accountType: AccountType.PLATFORM_RESERVE },
+          to: { userId, accountType: AccountType.USER_AVAILABLE },
+          refType: 'packet_internal_claim',
+          refId: claim.id,
+          roundId: round.id,
+          idempotencyKey: `pkt-internal-tail:${round.packet.id}:${userId}`,
+        });
+      }
       await event(tx, round.id, 'CLAIM_AUTO_TAIL', {
         userId,
         amountCents: String(amountCents),
@@ -1151,6 +1320,90 @@ export async function claimUrlForParticipant(packetId: string, userId: string): 
   const packet = await prisma.packet.findUniqueOrThrow({ where: { id: packetId } });
   if (!packet.claimUrl) throw new GameError('PACKET_URL_MISSING');
   return packet.claimUrl;
+}
+
+/** 微信式拼手气：剩 1 份给全部，否则在 [1, 2×人均] 内随机并保证后续每份 ≥1 分 */
+function internalRandomShare(remainingCents: bigint, remainingCount: number): bigint {
+  if (remainingCount <= 1) return remainingCents;
+  const remaining = safeNumber(remainingCents, 'packetRemaining');
+  const cap = Math.max(1, Math.floor((remaining / remainingCount) * 2));
+  const roll = 1 + Math.floor(Math.random() * cap);
+  return BigInt(Math.min(remaining - (remainingCount - 1), Math.max(1, roll)));
+}
+
+/**
+ * 内部红包抢包：金额随机拆分并即时转入玩家余额，同一笔金额即为本局牌型依据。
+ * Claim 表 (roundId, userId) 唯一约束天然防重复抢；转账幂等键兜底。
+ */
+export async function claimInternalPacket(packetId: string, userId: string) {
+  return serializable(async (tx) => {
+    const packet = await tx.packet.findUnique({
+      where: { id: packetId },
+      include: { round: { include: { claims: true } } },
+    });
+    if (!packet) throw new GameError('PACKET_NOT_FOUND');
+    if (packet.channel !== PacketChannel.INTERNAL) throw new GameError('PACKET_NOT_INTERNAL');
+    const round = packet.round;
+    const existing = round.claims.find((claim) => claim.userId === userId);
+    if (existing) {
+      throw new GameError('ALREADY_CLAIMED', { amountCents: String(existing.amountCents) });
+    }
+    if (
+      round.phase !== RoundPhase.CLAIMING ||
+      packet.status !== 'SENT' ||
+      !packet.expiresAt ||
+      packet.expiresAt <= new Date()
+    ) {
+      throw new GameError('PACKET_EXPIRED');
+    }
+    let eligible = round.bankerId === userId;
+    if (!eligible) {
+      const bet = await tx.bet.findUnique({
+        where: { roundId_userId: { roundId: round.id, userId } },
+      });
+      eligible = bet?.status === BetStatus.FROZEN;
+    }
+    if (!eligible) throw new GameError('NOT_ELIGIBLE_TO_CLAIM');
+
+    const claimedTotal = round.claims.reduce((sum, claim) => sum + claim.amountCents, 0n);
+    const remainingCents = packet.totalCents - claimedTotal;
+    const remainingCount = packet.participantCount - round.claims.length;
+    if (remainingCount <= 0 || remainingCents <= 0n) throw new GameError('PACKET_EMPTY');
+
+    const amountCents = internalRandomShare(remainingCents, remainingCount);
+    const hand = evaluateHand(safeNumber(amountCents, 'claim'));
+    const claim = await tx.claim.create({
+      data: {
+        packetId: packet.id,
+        roundId: round.id,
+        userId,
+        amountCents,
+        handType: hand.type,
+        points: hand.points,
+        source: ClaimSource.INTERNAL,
+        enteredBy: 'SYSTEM',
+        confirmedAt: new Date(),
+      },
+    });
+    await transfer(tx, {
+      amountCents,
+      from: { accountType: AccountType.PLATFORM_RESERVE },
+      to: { userId, accountType: AccountType.USER_AVAILABLE },
+      refType: 'packet_internal_claim',
+      refId: claim.id,
+      roundId: round.id,
+      idempotencyKey: `pkt-internal-claim:${packet.id}:${userId}`,
+    });
+    await event(tx, round.id, 'CLAIM_INTERNAL', {
+      userId,
+      amountCents: String(amountCents),
+    });
+    return {
+      claim,
+      hand,
+      complete: round.claims.length + 1 >= packet.participantCount,
+    };
+  });
 }
 
 export async function claimCandidates(tngName: string) {
@@ -1344,7 +1597,7 @@ export async function forfeitMissingPlayer(roundId: string, userId: string, acto
       tx,
       userId,
       AccountType.USER_FREEZE_BET,
-      bet.amountCents,
+      reservedCentsOf(bet),
       round.id,
       'claim_forfeit_refund',
       `forfeit:${bet.id}`,
@@ -1465,6 +1718,7 @@ export async function settleGameRound(roundId: string, actorId?: string) {
         userId: bet.userId,
         betCents: safeNumber(bet.amountCents, 'bet'),
         claimCents: safeNumber(claims.get(bet.userId)!.amountCents, 'claim'),
+        reservedCents: safeNumber(reservedCentsOf(bet), 'betReserve'),
       })),
       participantCount: round.bets.length + 1,
       handConfig: settings.hand,
@@ -1479,12 +1733,13 @@ export async function settleGameRound(roundId: string, actorId?: string) {
     for (const pair of calculation.pairs) {
       const bet = round.bets.find((item) => item.userId === pair.userId)!;
       const claim = claims.get(pair.userId)!;
+      const reservedCents = reservedCentsOf(bet);
       if (pair.outcome === 'PLAYER_WIN') {
         await unfreeze(
           tx,
           pair.userId,
           AccountType.USER_FREEZE_BET,
-          bet.amountCents,
+          reservedCents,
           round.id,
           'settle_bet_return',
           `settle:return:${bet.id}`,
@@ -1513,6 +1768,7 @@ export async function settleGameRound(roundId: string, actorId?: string) {
           });
         }
       } else if (pair.outcome === 'BANKER_WIN') {
+        // 最大赔付已在下注时完整预留；结算只从冻结科目扣实赔并退回剩余。
         const bankerNet = BigInt(pair.bankerNetCents);
         if (bankerNet > 0n) {
           await transfer(tx, {
@@ -1536,12 +1792,24 @@ export async function settleGameRound(roundId: string, actorId?: string) {
             idempotencyKey: `settle:banker-rake:${round.id}:${pair.userId}`,
           });
         }
+        const reserveReturn = reservedCents - BigInt(pair.paidCents);
+        if (reserveReturn > 0n) {
+          await unfreeze(
+            tx,
+            pair.userId,
+            AccountType.USER_FREEZE_BET,
+            reserveReturn,
+            round.id,
+            'settle_liability_return',
+            `settle:liability-return:${bet.id}`,
+          );
+        }
       } else {
         await unfreeze(
           tx,
           pair.userId,
           AccountType.USER_FREEZE_BET,
-          bet.amountCents,
+          reservedCents,
           round.id,
           'settle_tie_return',
           `settle:tie:${bet.id}`,
@@ -1619,25 +1887,37 @@ export async function settleGameRound(roundId: string, actorId?: string) {
     }
 
     const claimsTotal = round.claims.reduce((sum, claim) => sum + claim.amountCents, 0n);
-    if (claimsTotal > 0n) {
-      await transfer(tx, {
-        amountCents: claimsTotal,
-        from: { accountType: AccountType.TNG_TRANSIT },
-        to: { accountType: AccountType.ADJUST_CLEARING },
-        refType: 'packet_claim',
-        refId: round.packet.id,
-        roundId: round.id,
-        idempotencyKey: `packet-reconcile:${round.packet.id}`,
-        operatorId: actorId,
+    if (round.packet.channel === PacketChannel.INTERNAL) {
+      // 内部红包：抢包金额已实时入玩家余额，未派发部分从未离开平台备付金，无需 TNG 清分。
+      await tx.packet.update({
+        where: { id: round.packet.id },
+        data: {
+          reconciledCents: claimsTotal,
+          returnedCents: round.packet.totalCents - claimsTotal,
+          status: 'RECONCILED',
+        },
+      });
+    } else {
+      if (claimsTotal > 0n) {
+        await transfer(tx, {
+          amountCents: claimsTotal,
+          from: { accountType: AccountType.TNG_TRANSIT },
+          to: { accountType: AccountType.ADJUST_CLEARING },
+          refType: 'packet_claim',
+          refId: round.packet.id,
+          roundId: round.id,
+          idempotencyKey: `packet-reconcile:${round.packet.id}`,
+          operatorId: actorId,
+        });
+      }
+      await tx.packet.update({
+        where: { id: round.packet.id },
+        data: {
+          reconciledCents: claimsTotal,
+          status: claimsTotal === round.packet.totalCents ? 'RECONCILED' : 'EXPIRED',
+        },
       });
     }
-    await tx.packet.update({
-      where: { id: round.packet.id },
-      data: {
-        reconciledCents: claimsTotal,
-        status: claimsTotal === round.packet.totalCents ? 'RECONCILED' : 'EXPIRED',
-      },
-    });
 
     const day = malaysiaDay();
     const gameCode = round.room.gameCode;

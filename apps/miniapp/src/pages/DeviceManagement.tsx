@@ -1,12 +1,14 @@
 import { useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { api } from '../api';
 import { IconDevice, IconShield, IconSupport } from '../components/Icons';
+import { goBack } from '../lib/nav';
 
 type DeviceResult = Awaited<ReturnType<typeof api.deviceSettings>>;
 
 export default function DeviceManagement() {
   const navigate = useNavigate();
+  const location = useLocation();
   const [result, setResult] = useState<DeviceResult | null>(null);
   const [error, setError] = useState('');
 
@@ -21,7 +23,7 @@ export default function DeviceManagement() {
   return (
     <div className="page subpage device-page">
       <header className="subpage-header">
-        <button type="button" onClick={() => navigate('/settings')} aria-label="返回">‹</button>
+        <button type="button" onClick={() => goBack(navigate, location, '/settings')} aria-label="返回">‹</button>
         <div><h1>设备管理</h1></div>
         <span />
       </header>

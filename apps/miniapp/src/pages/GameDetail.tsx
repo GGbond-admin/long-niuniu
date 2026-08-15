@@ -1,10 +1,13 @@
 import { useEffect, useState, type ReactNode } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { api } from '../api';
+import { goBack } from '../lib/nav';
 import BrandLogo from '../components/BrandLogo';
 
 type Lobby = Awaited<ReturnType<typeof api.lobby>>;
 type GameRules = Awaited<ReturnType<typeof api.gameRules>>;
+
+const rulesCache = new Map<string, GameRules>();
 
 function RuleBlock({ title, children }: { title: string; children: ReactNode }) {
   return (
@@ -15,30 +18,79 @@ function RuleBlock({ title, children }: { title: string; children: ReactNode }) 
   );
 }
 
+function RuleParagraph({ text }: { text: string }) {
+  if (/^\d+\.\s/.test(text)) {
+    return <p><strong>{text}</strong></p>;
+  }
+  const labeled = /^([^：]{1,20}：)(.*)$/.exec(text);
+  if (labeled) {
+    return (
+      <p>
+        <strong>{labeled[1]}</strong>
+        {labeled[2]}
+      </p>
+    );
+  }
+  return <p>{text}</p>;
+}
+
 export default function GameDetail({ kycStatus }: { kycStatus: string }) {
   const { roomId = '' } = useParams();
   const navigate = useNavigate();
+  const location = useLocation();
   const [lobby, setLobby] = useState<Lobby | null>(null);
+  const [lobbyError, setLobbyError] = useState('');
+  const [lobbyRetryKey, setLobbyRetryKey] = useState(0);
   const [rules, setRules] = useState<GameRules | null>(null);
+  const [rulesFailed, setRulesFailed] = useState(false);
   const room = roomId
     ? lobby?.games.find((game) => game.id === roomId)
     : lobby?.games[0];
+  const roomMissing = !!lobby && !!roomId && !room;
 
   useEffect(() => {
-    api.lobby().then(setLobby).catch(() => undefined);
-  }, []);
-
-  useEffect(() => {
-    if (!room?.gameCode) return;
     let alive = true;
-    setRules(null);
     api
-      .gameRules(room.gameCode)
+      .lobby()
       .then((result) => {
-        if (alive) setRules(result);
+        if (!alive) return;
+        setLobby(result);
+        setLobbyError('');
       })
       .catch(() => {
-        // 至尊牛牛保留内置只读规则作为离线兜底。
+        if (!alive) return;
+        setLobbyError('房间信息加载失败，请检查网络后重试。');
+        // 拿不到 gameCode 时先展示内置兜底规则，避免永久停在加载中
+        setRulesFailed(true);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [lobbyRetryKey]);
+
+  useEffect(() => {
+    const gameCode = room?.gameCode;
+    if (!gameCode) return;
+    const cached = rulesCache.get(gameCode);
+    if (cached) {
+      setRules(cached);
+      setRulesFailed(false);
+      return;
+    }
+    let alive = true;
+    setRules(null);
+    setRulesFailed(false);
+    api
+      .gameRules(gameCode)
+      .then((result) => {
+        rulesCache.set(gameCode, result);
+        if (alive) {
+          setRules(result);
+          setRulesFailed(false);
+        }
+      })
+      .catch(() => {
+        if (alive) setRulesFailed(true);
       });
     return () => {
       alive = false;
@@ -59,7 +111,7 @@ export default function GameDetail({ kycStatus }: { kycStatus: string }) {
   return (
     <div className="page detail-page rules-page">
       <header className="rules-top">
-        <button className="rules-back" type="button" onClick={() => navigate(-1)} aria-label="返回">
+        <button className="rules-back" type="button" onClick={() => goBack(navigate, location)} aria-label="返回">
           ‹
         </button>
         <div className="rules-brand">
@@ -69,49 +121,56 @@ export default function GameDetail({ kycStatus }: { kycStatus: string }) {
         </div>
       </header>
 
+      {lobbyError && (
+        <section className="feature-load-error" role="alert">
+          <strong>房间信息没有加载成功</strong>
+          <p>{lobbyError}</p>
+          <button
+            type="button"
+            onClick={() => {
+              setLobbyError('');
+              setLobbyRetryKey((key) => key + 1);
+            }}
+          >
+            重试
+          </button>
+        </section>
+      )}
+
+      {roomMissing && (
+        <RuleBlock title="房间不存在">
+          <p>该房间可能已下线或链接有误，请返回大厅重新选择游戏。</p>
+        </RuleBlock>
+      )}
+
       {rules && (
         <>
-          <RuleBlock title={rules.document.title}>
-            <p>{rules.document.summary}</p>
-            <small className="rules-version">
-              规则版本 v{rules.document.version}
-              {rules.document.publishedAt
-                ? ` · ${new Date(rules.document.publishedAt).toLocaleDateString('zh-MY')}`
-                : ''}
-            </small>
-          </RuleBlock>
           {rules.document.sections.map((section) => (
             <RuleBlock title={section.title} key={section.id}>
               {section.body.split(/\n+/).map((paragraph, index) => (
-                <p key={`${section.id}-${index}`}>{paragraph}</p>
+                <RuleParagraph
+                  key={`${section.id}-${index}`}
+                  text={paragraph}
+                />
               ))}
             </RuleBlock>
           ))}
-          <RuleBlock title="当前游戏配置摘要">
-            <ul className="rules-list">
-              <li>
-                <b>竞标时间</b>
-                <span>{rules.config.round.bidDurationSeconds} 秒</span>
-              </li>
-              <li>
-                <b>下注时间</b>
-                <span>{rules.config.round.betDurationSeconds} 秒</span>
-              </li>
-              <li>
-                <b>抢包时间</b>
-                <span>{rules.config.round.claimDurationSeconds} 秒</span>
-              </li>
-              <li>
-                <b>闲家盈利抽水</b>
-                <span>{Number(rules.config.fees.rakeRatio ?? 0) * 100}%</span>
-              </li>
-            </ul>
-            <p>配置修改仅对下一局生效；进行中牌局继续使用开局快照。</p>
-          </RuleBlock>
+          <small className="rules-version">
+            规则版本 v{rules.document.version}
+            {rules.document.publishedAt
+              ? ` · ${new Date(rules.document.publishedAt).toLocaleDateString('zh-MY')}`
+              : ''}
+          </small>
         </>
       )}
 
-      {!rules && (!room || room.gameCode === 'SUPREME_NIUNIU') && (
+      {!rules && !rulesFailed && !roomMissing && (
+        <RuleBlock title="正在加载规则">
+          <p>正在读取至尊牛牛玩法规则…</p>
+        </RuleBlock>
+      )}
+
+      {!rules && rulesFailed && !roomMissing && (!room || room.gameCode === 'SUPREME_NIUNIU') && (
         <>
       <RuleBlock title="游戏简介">
         <p>
@@ -151,7 +210,7 @@ export default function GameDetail({ kycStatus }: { kycStatus: string }) {
               所有玩家可在倒计时内输入金额竞标庄钱，最高出价者成为本局庄家，相应金额从余额中冻结作「庄池」。
             </p>
             <p>
-              续庄：竞标中标局结束后，庄家可沿用上一局庄钱再坐一局，无需再次竞标；连续坐庄最多两局。第三局恢复公开竞标，原庄仍可参与并再次中标。
+              续庄：上一局做庄的玩家如果选择续庄，将沿用上一局的庄钱继续做庄，无需再次竞标；同一玩家每桌仅可续庄一次。
             </p>
             <p>无人竞标庄钱：本局取消，不进入下注阶段。</p>
             <p>余额不足：系统会拒绝竞标并退回出价。</p>
@@ -159,8 +218,11 @@ export default function GameDetail({ kycStatus }: { kycStatus: string }) {
           <li>
             <strong>下注阶段</strong>
             <p>除庄家外的玩家可在「下注范围」内下注，倒计时结束即停止。</p>
+            <p>
+              最高可下注按当前余额与本局最高牌型倍数计算（默认 17 倍）；输入过高时系统自动降低并告知实际接受金额。
+            </p>
             <p>未下注：视为本局弃权，不参与结算（不赢不输）。</p>
-            <p>下注成功：金额从余额中冻结，等待结算。</p>
+            <p>下注成功：冻结「实际下注 × 本局最高倍数」作为最大赔付预留金。</p>
           </li>
           <li>
             <strong>系统发包</strong>
@@ -177,8 +239,8 @@ export default function GameDetail({ kycStatus }: { kycStatus: string }) {
           <li>
             <strong>结算</strong>
             <p>系统逐个比对庄家与闲家的牌型 / 点数，按倍数结算并扣除抽水：</p>
-            <p>闲家赢：庄家从庄池支付倍数 × 下注，平台抽取闲赢抽水（默认 5%）。</p>
-            <p>闲家输：闲家下注全数归庄家，平台抽取庄家盈利的抽水（默认 5%）。</p>
+            <p>闲家赢：庄家从庄池支付倍数 × 下注，平台抽取闲赢抽水（默认 3%）。</p>
+            <p>闲家输：按庄家牌型倍数从最大赔付预留金扣除，剩余预留金自动退回。</p>
             <p>牌型 / 点数相同：庄赢闲输。</p>
             <p>庄池不足赔付：以庄池余额为上限，不足部分免赔。</p>
           </li>
@@ -238,7 +300,7 @@ export default function GameDetail({ kycStatus }: { kycStatus: string }) {
         <p>本局所有已下注的闲家与您对赌。</p>
         <p>赔付总额以「庄池」（您的中标金额）为上限，不会超过庄池亏损。</p>
         <p>庄家盈利时，平台从盈利中抽取庄家抽水（默认 5%）。</p>
-        <p>竞标中标局结束后可选择「续庄」，沿用相同庄钱再坐一局；连续最多两局。第三局须公开竞标，您仍可参拍并再次中标。</p>
+        <p>本局结束后可选择「续庄」，沿用相同的庄钱继续坐庄；同一玩家每桌仅可续庄一次。</p>
       </RuleBlock>
 
       <RuleBlock title="如果您是闲家">
@@ -287,7 +349,7 @@ export default function GameDetail({ kycStatus }: { kycStatus: string }) {
         </>
       )}
 
-      {!rules && room && room.gameCode !== 'SUPREME_NIUNIU' && (
+      {!rules && rulesFailed && room && room.gameCode !== 'SUPREME_NIUNIU' && (
         <RuleBlock title="规则暂不可用">
           <p>当前游戏规则尚未发布，请稍后重试或联系客服。</p>
         </RuleBlock>

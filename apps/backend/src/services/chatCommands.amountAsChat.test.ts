@@ -34,9 +34,11 @@ vi.mock('./game.js', () => ({
   withdrawBet: memory.withdrawBet,
   GameError: class GameError extends Error {
     code: string;
-    constructor(code: string) {
+    details?: Record<string, unknown>;
+    constructor(code: string, details?: Record<string, unknown>) {
       super(code);
       this.code = code;
+      this.details = details;
     }
   },
 }));
@@ -52,7 +54,11 @@ vi.mock('./roomHub.js', () => ({
   appendSystemChatOnce: vi.fn(),
 }));
 
-import { handleRoomChatCommand } from './chatCommands.js';
+import { GameError } from './game.js';
+import {
+  handleRoomChatCommand,
+  privateBetConfirmationFor,
+} from './chatCommands.js';
 
 describe('非竞标/下注阶段纯数字当普通聊天', () => {
   beforeEach(() => {
@@ -121,8 +127,180 @@ describe('非竞标/下注阶段纯数字当普通聊天', () => {
       userId: 'user-1',
       content: '100',
     });
-    expect(result).toMatchObject({ kind: 'ok', action: 'bet', echo: '100' });
+    expect(result).toMatchObject({
+      kind: 'ok',
+      action: 'bet',
+      echo: '100',
+      amountCents: '10000',
+    });
+    expect(privateBetConfirmationFor(result)).toEqual({
+      type: 'bet_confirmation',
+      status: 'success',
+      action: 'bet',
+      amountCents: '10000',
+    });
     expect(memory.placeBet).toHaveBeenCalledOnce();
+  });
+
+  it('自动降额后公共回显与个人确认都使用实际接受金额', async () => {
+    memory.phase = 'BETTING';
+    memory.placeBet.mockResolvedValue({
+      bet: {},
+      requestedCents: 5_000n,
+      acceptedCents: 1_100n,
+      reservedCents: 18_700n,
+      liabilityBalanceCents: 20_000n,
+      maxAffordableCents: 1_100n,
+      roomMaxCents: 5_000n,
+      maxAcceptedCents: 1_100n,
+      maxMultiplier: 17,
+      adjusted: true,
+      adjustedBy: ['LIABILITY_LIMIT'],
+    });
+
+    const result = await handleRoomChatCommand({
+      roomId: 'room-1',
+      userId: 'user-1',
+      content: '50',
+    });
+
+    expect(result).toMatchObject({
+      kind: 'ok',
+      action: 'bet',
+      echo: '11',
+      amountCents: '1100',
+      acceptance: {
+        requestedAmountCents: '5000',
+        liabilityBalanceCents: '20000',
+        maxAffordableCents: '1100',
+        maxAcceptedCents: '1100',
+        maxMultiplier: 17,
+        reservedCents: '18700',
+        adjusted: true,
+        adjustedBy: ['LIABILITY_LIMIT'],
+      },
+    });
+    expect(privateBetConfirmationFor(result)).toMatchObject({
+      type: 'bet_confirmation',
+      status: 'success',
+      action: 'bet',
+      amountCents: '1100',
+      acceptance: {
+        requestedAmountCents: '5000',
+        maxAffordableCents: '1100',
+        adjusted: true,
+      },
+    });
+  });
+
+  it('下注失败时保留操作类型和金额，供发送个人确认消息', async () => {
+    memory.phase = 'BETTING';
+    memory.placeBet.mockRejectedValue(new Error('database failure'));
+
+    const result = await handleRoomChatCommand({
+      roomId: 'room-1',
+      userId: 'user-1',
+      content: '500',
+    });
+
+    expect(result).toEqual({
+      kind: 'error',
+      action: 'bet',
+      amountCents: '50000',
+      message: '下注失败',
+    });
+  });
+
+  it('下注低于最低额时，失败确认带上可读原因', async () => {
+    memory.phase = 'BETTING';
+    memory.placeBet.mockRejectedValue(
+      new GameError('BELOW_BET_MIN', { betMinCents: 1000 }),
+    );
+
+    const result = await handleRoomChatCommand({
+      roomId: 'room-1',
+      userId: 'user-1',
+      content: '5',
+    });
+
+    expect(result).toEqual({
+      kind: 'error',
+      action: 'bet',
+      amountCents: '500',
+      message: '低于最低下注金额 RM 10.00',
+    });
+    expect(privateBetConfirmationFor(result)).toEqual({
+      type: 'bet_confirmation',
+      status: 'failed',
+      action: 'bet',
+      amountCents: '500',
+      reason: '低于最低下注金额 RM 10.00',
+    });
+  });
+
+  it('超过数据库金额上限时精确拒绝，不先经过 Number 舍入', async () => {
+    memory.phase = 'BETTING';
+    const result = await handleRoomChatCommand({
+      roomId: 'room-1',
+      userId: 'user-1',
+      content: '92233720368547758.08',
+    });
+
+    expect(result).toEqual({
+      kind: 'error',
+      action: 'bet',
+      message: '金额过大，请重新输入',
+    });
+    expect(memory.placeBet).not.toHaveBeenCalled();
+  });
+
+  it('梭哈成功时返回标准分金额，供个人确认消息展示', async () => {
+    memory.phase = 'BETTING';
+    memory.placeBet.mockResolvedValue({});
+
+    const result = await handleRoomChatCommand({
+      roomId: 'room-1',
+      userId: 'user-1',
+      content: 'sh300',
+    });
+
+    expect(result).toMatchObject({
+      kind: 'ok',
+      action: 'all_in',
+      echo: 'sh300',
+      amountCents: '30000',
+    });
+    expect(privateBetConfirmationFor(result)).toEqual({
+      type: 'bet_confirmation',
+      status: 'success',
+      action: 'all_in',
+      amountCents: '30000',
+    });
+  });
+
+  it('下注失败转换为仅发给当前连接的失败确认', () => {
+    expect(
+      privateBetConfirmationFor({
+        kind: 'error',
+        action: 'bet',
+        amountCents: '50000',
+        message: '可用余额不足',
+      }),
+    ).toEqual({
+      type: 'bet_confirmation',
+      status: 'failed',
+      action: 'bet',
+      amountCents: '50000',
+      reason: '可用余额不足',
+    });
+    expect(
+      privateBetConfirmationFor({
+        kind: 'error',
+        action: 'bid',
+        amountCents: '50000',
+        message: '竞标失败',
+      }),
+    ).toBeNull();
   });
 
   it('竞标阶段纯数字仍走竞标', async () => {

@@ -1,1 +1,1 @@
-{"root":["./src/app.tsx","./src/gameconfigeditor.tsx","./src/gameoperationscenter.tsx","./src/gamescopedoperations.tsx","./src/rewardconditionsform.tsx","./src/virtualplayers.tsx","./src/api.ts","./src/main.tsx"],"version":"5.9.3"}
+{"root":["./src/app.tsx","./src/gameconfigeditor.tsx","./src/gameoperationscenter.tsx","./src/gamescopedoperations.tsx","./src/profitpoolcenter.tsx","./src/rewardconditionsform.tsx","./src/virtualplayers.tsx","./src/api.ts","./src/main.tsx"],"version":"5.9.3"}

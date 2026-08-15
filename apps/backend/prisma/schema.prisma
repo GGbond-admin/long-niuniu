@@ -13,19 +13,23 @@ datasource db {
 // ─────────────────────────── 用户与准入 ───────────────────────────
 
 model User {
-  id         String     @id @default(cuid())
-  /** HUMAN 必填；VIRTUAL 为空（无 Telegram） */
-  tgId       BigInt?    @unique @map("tg_id")
-  uid        String     @unique // 展示用数字 UID
+  id            String     @id @default(cuid())
+  /**
+   * HUMAN 必填；VIRTUAL 为空（无 Telegram）
+   */
+  tgId          BigInt?    @unique @map("tg_id")
+  uid           String     @unique // 展示用数字 UID
   nickname      String?
   tgUsername    String?    @map("tg_username")
   tgDisplayName String?    @map("tg_display_name")
   avatarUrl     String?    @map("avatar_url")
   kind          UserKind   @default(HUMAN)
   status        UserStatus @default(ACTIVE)
-  lastBotId  String?    @map("last_bot_id")
-  /** 后台客服/运营内部备注，不对玩家展示 */
-  adminNote  String?    @map("admin_note") @db.Text
+  lastBotId     String?    @map("last_bot_id")
+  /**
+   * 后台客服/运营内部备注，不对玩家展示
+   */
+  adminNote     String?    @map("admin_note") @db.Text
 
   // 邀请关系（两级冗余，加速返水计算）
   inviterId      String?   @map("inviter_id")
@@ -35,13 +39,13 @@ model User {
   inviter  User?  @relation("Referral", fields: [inviterId], references: [id])
   invitees User[] @relation("Referral")
 
-  device    Device?
-  kyc       Kyc?
-  wallet    Wallet?
-  paymentPin PaymentPin?
+  device        Device?
+  kyc           Kyc?
+  wallet        Wallet?
+  paymentPin    PaymentPin?
   virtualPlayer VirtualPlayer?
-  createdAt DateTime @default(now()) @map("created_at")
-  updatedAt DateTime @updatedAt @map("updated_at")
+  createdAt     DateTime       @default(now()) @map("created_at")
+  updatedAt     DateTime       @updatedAt @map("updated_at")
 
   bids              BankerBid[]
   bets              Bet[]
@@ -58,6 +62,8 @@ model User {
   noticeReads       SystemNoticeRead[]
   groupPacketsSent  GroupPacket[]      @relation("GroupPacketSender")
   groupPacketClaims GroupPacketClaim[]
+  agentProfile      Agent?
+  agentBinding      AgentPlayer?
 
   @@index([inviterId])
   @@index([grandInviterId])
@@ -77,34 +83,46 @@ enum UserStatus {
 
 /// 互动群虚拟玩家（假人）：后台配置能力，调度器可自动参与竞标/下注等
 model VirtualPlayer {
-  id                 String   @id @default(cuid())
-  userId             String   @unique @map("user_id")
-  roomId             String   @map("room_id")
-  enabled            Boolean  @default(true)
-  canJoin            Boolean  @default(true) @map("can_join")
-  canChat            Boolean  @default(true) @map("can_chat")
-  canBid             Boolean  @default(true) @map("can_bid")
-  canBet             Boolean  @default(true) @map("can_bet")
-  canAllIn           Boolean  @default(false) @map("can_all_in")
-  canBanker          Boolean  @default(true) @map("can_banker")
-  canContinue        Boolean  @default(false) @map("can_continue")
-  canThrowDice       Boolean  @default(true) @map("can_throw_dice")
-  canGroupPacket     Boolean  @default(false) @map("can_group_packet")
-  canClaimSim        Boolean  @default(true) @map("can_claim_sim")
-  /** 0–1：本局参与竞标的概率 */
-  bidWeight          Float    @default(0.7) @map("bid_weight")
-  /** 相对庄池的下注比例下限（如 0.05 = 5%） */
-  betRatioMin        Float    @default(0.05) @map("bet_ratio_min")
-  /** 相对庄池的下注比例上限 */
-  betRatioMax        Float    @default(0.2) @map("bet_ratio_max")
-  /** 可选聊天短语 JSON 数组 */
-  chatPhrases        Json?    @map("chat_phrases")
-  targetBalanceCents BigInt   @default(500000) @map("target_balance_cents")
-  createdBy          String?  @map("created_by")
-  createdAt          DateTime @default(now()) @map("created_at")
-  updatedAt          DateTime @updatedAt @map("updated_at")
-  user               User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  room               Room     @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  id                  String   @id @default(cuid())
+  userId              String   @unique @map("user_id")
+  roomId              String   @map("room_id")
+  enabled             Boolean  @default(true)
+  canJoin             Boolean  @default(true) @map("can_join")
+  canChat             Boolean  @default(true) @map("can_chat")
+  canBid              Boolean  @default(true) @map("can_bid")
+  canBet              Boolean  @default(true) @map("can_bet")
+  canAllIn            Boolean  @default(false) @map("can_all_in")
+  canBanker           Boolean  @default(true) @map("can_banker")
+  canContinue         Boolean  @default(false) @map("can_continue")
+  canThrowDice        Boolean  @default(true) @map("can_throw_dice")
+  canGroupPacket      Boolean  @default(false) @map("can_group_packet")
+  /**
+   * 是否自动抢群内玩家发的红包
+   */
+  canClaimGroupPacket Boolean  @default(true) @map("can_claim_group_packet")
+  canClaimSim         Boolean  @default(true) @map("can_claim_sim")
+  /**
+   * 0–1：本局参与竞标的概率
+   */
+  bidWeight           Float    @default(0.7) @map("bid_weight")
+  /**
+   * 相对庄池的下注比例下限（如 0.05 = 5%）
+   */
+  betRatioMin         Float    @default(0.05) @map("bet_ratio_min")
+  /**
+   * 相对庄池的下注比例上限
+   */
+  betRatioMax         Float    @default(0.2) @map("bet_ratio_max")
+  /**
+   * 可选聊天短语 JSON 数组
+   */
+  chatPhrases         Json?    @map("chat_phrases")
+  targetBalanceCents  BigInt   @default(500000) @map("target_balance_cents")
+  createdBy           String?  @map("created_by")
+  createdAt           DateTime @default(now()) @map("created_at")
+  updatedAt           DateTime @updatedAt @map("updated_at")
+  user                User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  room                Room     @relation(fields: [roomId], references: [id], onDelete: Cascade)
 
   @@index([roomId, enabled])
   @@map("virtual_players")
@@ -144,23 +162,23 @@ model PaymentPin {
 }
 
 model Kyc {
-  id            String    @id @default(cuid())
-  userId        String    @unique @map("user_id")
-  realName      String    @map("real_name")
-  realNameHash  String?   @map("real_name_hash")
-  duitnowId     String    @map("duitnow_id")
-  duitnowHash   String?   @map("duitnow_hash")
-  bankName      String    @map("bank_name")
-  bankAccount   String    @map("bank_account")
-  bankAccountHash String? @map("bank_account_hash")
-  bankAccountLast4Hash String? @map("bank_account_last4_hash")
-  accountHolder String    @map("account_holder")
-  status        KycStatus @default(PENDING)
-  rejectReason  String?   @map("reject_reason")
-  reviewedBy    String?   @map("reviewed_by")
-  reviewedAt    DateTime? @map("reviewed_at")
-  submittedAt   DateTime  @default(now()) @map("submitted_at")
-  user          User      @relation(fields: [userId], references: [id])
+  id                   String    @id @default(cuid())
+  userId               String    @unique @map("user_id")
+  realName             String    @map("real_name")
+  realNameHash         String?   @map("real_name_hash")
+  duitnowId            String    @map("duitnow_id")
+  duitnowHash          String?   @map("duitnow_hash")
+  bankName             String    @map("bank_name")
+  bankAccount          String    @map("bank_account")
+  bankAccountHash      String?   @map("bank_account_hash")
+  bankAccountLast4Hash String?   @map("bank_account_last4_hash")
+  accountHolder        String    @map("account_holder")
+  status               KycStatus @default(PENDING)
+  rejectReason         String?   @map("reject_reason")
+  reviewedBy           String?   @map("reviewed_by")
+  reviewedAt           DateTime? @map("reviewed_at")
+  submittedAt          DateTime  @default(now()) @map("submitted_at")
+  user                 User      @relation(fields: [userId], references: [id])
 
   @@index([status])
   @@index([realNameHash])
@@ -179,14 +197,14 @@ enum KycStatus {
 // ─────────────────────────── 钱包与账务 ───────────────────────────
 
 model Wallet {
-  id                String   @id @default(cuid())
-  userId            String   @unique @map("user_id")
-  availableCents    BigInt   @default(0) @map("available_cents") // 可用余额
-  freezeBankerCents BigInt   @default(0) @map("freeze_banker_cents") // 冻结-庄池
-  freezeBetCents    BigInt   @default(0) @map("freeze_bet_cents") // 冻结-下注
-  freezeWithdrawCents BigInt @default(0) @map("freeze_withdraw_cents") // 冻结-提现
-  user              User     @relation(fields: [userId], references: [id])
-  updatedAt         DateTime @updatedAt @map("updated_at")
+  id                  String   @id @default(cuid())
+  userId              String   @unique @map("user_id")
+  availableCents      BigInt   @default(0) @map("available_cents") // 可用余额
+  freezeBankerCents   BigInt   @default(0) @map("freeze_banker_cents") // 冻结-庄池
+  freezeBetCents      BigInt   @default(0) @map("freeze_bet_cents") // 冻结-下注
+  freezeWithdrawCents BigInt   @default(0) @map("freeze_withdraw_cents") // 冻结-提现
+  user                User     @relation(fields: [userId], references: [id])
+  updatedAt           DateTime @updatedAt @map("updated_at")
 
   @@map("wallets")
 }
@@ -231,6 +249,7 @@ enum AccountType {
   TNG_TRANSIT
   PLATFORM_REWARD
   PLATFORM_REBATE
+  PLATFORM_PROFIT_POOL
   ADJUST_CLEARING
 }
 
@@ -265,24 +284,63 @@ enum DepositPayeeStatus {
 }
 
 model DepositOrder {
-  id             String               @id @default(cuid())
-  userId         String               @map("user_id")
-  requestId      String               @map("request_id")
-  amountCents    BigInt               @map("amount_cents")
-  proofUrl       String?              @map("proof_url")
-  payeeAccountId String?              @map("payee_account_id")
-  payeeSnapshot  Json?                @map("payee_snapshot") // 提交时银行/账号/户名快照
-  status         OrderStatus          @default(PENDING)
-  reviewedBy     String?              @map("reviewed_by")
-  reviewedAt     DateTime?            @map("reviewed_at")
-  rejectReason   String?              @map("reject_reason")
-  createdAt      DateTime             @default(now()) @map("created_at")
-  user           User                 @relation(fields: [userId], references: [id])
-  payeeAccount   DepositPayeeAccount? @relation(fields: [payeeAccountId], references: [id])
+  id              String               @id @default(cuid())
+  userId          String               @map("user_id")
+  requestId       String               @map("request_id")
+  amountCents     BigInt               @map("amount_cents")
+  proofUrl        String?              @map("proof_url")
+  payeeAccountId  String?              @map("payee_account_id")
+  payeeSnapshot   Json?                @map("payee_snapshot") // 提交时银行/账号/户名快照
+  status          OrderStatus          @default(PENDING)
+  reviewedBy      String?              @map("reviewed_by")
+  reviewedAt      DateTime?            @map("reviewed_at")
+  rejectReason    String?              @map("reject_reason")
+  createdAt       DateTime             @default(now()) @map("created_at")
+  /// 支付渠道：MANUAL=玩家转账后人工确认；VPAY=第三方网关自动到账
+  channel         DepositChannel       @default(MANUAL)
+  providerTradeNo String?              @map("provider_trade_no") // 网关平台单号
+  providerCode    String?              @map("provider_code") // 网关通道代码（trade_code）
+  payUrl          String?              @map("pay_url")
+  expiredAt       DateTime?            @map("expired_at")
+  /// 回调返回的实付金额，与下单金额不符时不自动入账
+  paidAmountCents BigInt?              @map("paid_amount_cents")
+  providerPayload Json?                @map("provider_payload") // 最近一次网关下单/回调原文留档
+  user            User                 @relation(fields: [userId], references: [id])
+  payeeAccount    DepositPayeeAccount? @relation(fields: [payeeAccountId], references: [id])
 
-  @@index([status])
   @@unique([userId, requestId])
+  @@index([status])
+  @@index([channel, status])
   @@map("deposit_orders")
+}
+
+enum DepositChannel {
+  MANUAL
+  VPAY
+}
+
+/// 第三方支付通道商户配置（后台填写，密钥加密存储）
+model PaymentProviderConfig {
+  id                    String   @id @default(cuid())
+  provider              String   @unique // VPAY
+  enabled               Boolean  @default(false)
+  baseUrl               String   @default("") @map("base_url") // 如 https://gateway.vpay.club
+  traderId              String   @default("") @map("trader_id")
+  apiToken              String   @default("") @map("api_token") // 加密存储
+  tradeCodes            Json     @default("[]") @map("trade_codes") // [{code,label,enabled}]
+  notifyIps             Json     @default("[]") @map("notify_ips") // 回调 IP 白名单，空=不限制
+  /// 签名 dt 字段的时区偏移（分钟），马来西亚为 +480
+  timezoneOffsetMinutes Int      @default(480) @map("timezone_offset_minutes")
+  notifyUrl             String   @default("") @map("notify_url") // 留空则用 PUBLIC_API_URL 推导
+  callbackUrl           String   @default("") @map("callback_url") // 留空则用 MINIAPP_URL 推导
+  orderTitle            String   @default("Deposit") @map("order_title")
+  minAmountCents        BigInt   @default(10000) @map("min_amount_cents")
+  maxAmountCents        BigInt   @default(0) @map("max_amount_cents") // 0=不限
+  updatedBy             String?  @map("updated_by")
+  createdAt             DateTime @default(now()) @map("created_at")
+  updatedAt             DateTime @updatedAt @map("updated_at")
+
+  @@map("payment_provider_configs")
 }
 
 /// 用户提现收款账户（KYC 默认账户 + 用户新增，新增需审核）
@@ -336,8 +394,8 @@ model WithdrawOrder {
   user              User             @relation(fields: [userId], references: [id])
   withdrawAccount   WithdrawAccount? @relation(fields: [withdrawAccountId], references: [id])
 
-  @@index([status])
   @@unique([userId, requestId])
+  @@index([status])
   @@map("withdraw_orders")
 }
 
@@ -369,19 +427,19 @@ enum BotStatus {
 
 // 游戏房：对局在 Mini App 网页房间内进行；chatId/botId 为旧 TG 群绑定遗留字段（已弃用）
 model Room {
-  id         String       @id @default(cuid())
-  gameCode   String       @unique @default("SUPREME_NIUNIU") @map("game_code")
-  chatId     BigInt?      @unique @map("chat_id") // 已弃用：旧 Telegram 群 ID
-  title      String       // 由游戏目录决定，不允许作为普通互动群自由改名
-  botId      String?      @map("bot_id") // 已弃用：旧群管理 Bot
-  minPlayers Int          @default(2) @map("min_players")
-  status     RoomStatus   @default(ACTIVE)
-  inviteLink String?      @map("invite_link") // 已弃用：旧群邀请链接
-  bot            TelegramBot?   @relation(fields: [botId], references: [id])
+  id             String          @id @default(cuid())
+  gameCode       String          @unique @default("SUPREME_NIUNIU") @map("game_code")
+  chatId         BigInt?         @unique @map("chat_id") // 已弃用：旧 Telegram 群 ID
+  title          String // 由游戏目录决定，不允许作为普通互动群自由改名
+  botId          String?         @map("bot_id") // 已弃用：旧群管理 Bot
+  minPlayers     Int             @default(2) @map("min_players")
+  status         RoomStatus      @default(ACTIVE)
+  inviteLink     String?         @map("invite_link") // 已弃用：旧群邀请链接
+  bot            TelegramBot?    @relation(fields: [botId], references: [id])
   rounds         Round[]
   members        RoomMember[]
   virtualPlayers VirtualPlayer[]
-  createdAt      DateTime       @default(now()) @map("created_at")
+  createdAt      DateTime        @default(now()) @map("created_at")
 
   @@map("rooms")
 }
@@ -476,16 +534,17 @@ model BankerBid {
 }
 
 model Bet {
-  id          String    @id @default(cuid())
-  roundId     String    @map("round_id")
-  userId      String    @map("user_id")
-  amountCents BigInt    @map("amount_cents")
-  isAllIn     Boolean   @default(false) @map("is_all_in") // 梭哈
-  status      BetStatus @default(FROZEN)
-  revision    Int       @default(0)
-  createdAt   DateTime  @default(now()) @map("created_at")
-  round       Round     @relation(fields: [roundId], references: [id])
-  user        User      @relation(fields: [userId], references: [id])
+  id            String    @id @default(cuid())
+  roundId       String    @map("round_id")
+  userId        String    @map("user_id")
+  amountCents   BigInt    @map("amount_cents")
+  reservedCents BigInt    @default(0) @map("reserved_cents") // 最大赔付预留金
+  isAllIn       Boolean   @default(false) @map("is_all_in") // 梭哈
+  status        BetStatus @default(FROZEN)
+  revision      Int       @default(0)
+  createdAt     DateTime  @default(now()) @map("created_at")
+  round         Round     @relation(fields: [roundId], references: [id])
+  user          User      @relation(fields: [userId], references: [id])
 
   @@unique([roundId, userId])
   @@map("bets")
@@ -515,22 +574,28 @@ model RoundEvent {
 // ─────────────────────────── TNG 红包与认额 ───────────────────────────
 
 model Packet {
-  id               String       @id @default(cuid())
-  roundId          String       @unique @map("round_id")
-  packerAccount    String?      @map("packer_account") // 发包 TNG 账号标识
-  claimUrl         String?      @map("claim_url")
-  totalCents       BigInt       @map("total_cents")
-  participantCount Int          @map("participant_count")
-  status           PacketStatus @default(CREATED)
-  createdAt        DateTime     @default(now()) @map("created_at")
-  sentAt           DateTime?    @map("sent_at")
-  expiresAt        DateTime?    @map("expires_at")
-  reconciledCents  BigInt       @default(0) @map("reconciled_cents")
-  returnedCents    BigInt       @default(0) @map("returned_cents")
-  round            Round        @relation(fields: [roundId], references: [id])
+  id               String        @id @default(cuid())
+  roundId          String        @unique @map("round_id")
+  channel          PacketChannel @default(TNG) // TNG=外部链接抢包；INTERNAL=小助手直发、余额入账
+  packerAccount    String?       @map("packer_account") // 发包 TNG 账号标识
+  claimUrl         String?       @map("claim_url")
+  totalCents       BigInt        @map("total_cents")
+  participantCount Int           @map("participant_count")
+  status           PacketStatus  @default(CREATED)
+  createdAt        DateTime      @default(now()) @map("created_at")
+  sentAt           DateTime?     @map("sent_at")
+  expiresAt        DateTime?     @map("expires_at")
+  reconciledCents  BigInt        @default(0) @map("reconciled_cents")
+  returnedCents    BigInt        @default(0) @map("returned_cents")
+  round            Round         @relation(fields: [roundId], references: [id])
   claims           Claim[]
 
   @@map("packets")
+}
+
+enum PacketChannel {
+  TNG // 系统外 TNG 链接，抢包在 TNG 客户端完成，金额靠后台录入
+  INTERNAL // 系统内红包：小助手直发，抢包金额随机拆分并直接入余额
 }
 
 enum PacketStatus {
@@ -581,6 +646,7 @@ enum ClaimSource {
   MANUAL
   PROVIDER // 预留：未来自动回调
   AUTO_TAIL // 自动认尾包：抢包超时后系统补录尾包金额
+  INTERNAL // 内部红包：玩家在系统内抢包，金额随机拆分并直接入余额
 }
 
 // ─────────────────────────── 结算 ───────────────────────────
@@ -738,6 +804,106 @@ model RebateSettlement {
   @@map("rebate_settlements")
 }
 
+// ─────────────────────── 利润池与称桶分配（代理/股东分成） ───────────────────────
+
+/// 代理/股东：绑定一个平台用户账号接收称桶分成
+model Agent {
+  id          String      @id @default(cuid())
+  userId      String      @unique @map("user_id")
+  user        User        @relation(fields: [userId], references: [id])
+  /// 后台展示名（如 A代理 / 股东-张三）
+  label       String
+  /// 称桶占成点数：实得比例 = sharePoints ÷ 称桶基准(默认130)。65 点 → 50%
+  sharePoints Int         @map("share_points")
+  status      AgentStatus @default(ACTIVE)
+  createdAt   DateTime    @default(now()) @map("created_at")
+  updatedAt   DateTime    @updatedAt @map("updated_at")
+
+  players AgentPlayer[]
+  shares  AgentProfitShare[]
+
+  @@index([status])
+  @@map("agents")
+}
+
+enum AgentStatus {
+  ACTIVE
+  DISABLED
+}
+
+/// 玩家归属：一个玩家最多归属一个代理，其有效流水计入该代理的贡献
+model AgentPlayer {
+  id      String   @id @default(cuid())
+  agentId String   @map("agent_id")
+  userId  String   @unique @map("user_id")
+  agent   Agent    @relation(fields: [agentId], references: [id])
+  user    User     @relation(fields: [userId], references: [id])
+  boundAt DateTime @default(now()) @map("bound_at")
+  boundBy String?  @map("bound_by")
+
+  @@index([agentId])
+  @@map("agent_players")
+}
+
+/// 每日利润池：抽水收入 − 公司支出（流水×比例）± 负结转 = 净利润池
+model ProfitPoolDaily {
+  id   String @id @default(cuid())
+  date String @unique // YYYY-MM-DD（马来西亚时区）
+
+  /// 玩家赢抽水（当日实收）
+  rakePlayerCents BigInt @default(0) @map("rake_player_cents")
+  /// 庄家赢抽水（当日实收）
+  rakeBankerCents BigInt @default(0) @map("rake_banker_cents")
+  rakeTotalCents  BigInt @map("rake_total_cents")
+  /// 公司总流水（全体用户当日有效下注合计，口径与推广返水一致）
+  turnoverCents   BigInt @map("turnover_cents")
+
+  expenseRatioSnapshot Float  @map("expense_ratio_snapshot")
+  expenseCents         BigInt @map("expense_cents")
+  /// 前一日负结转（≤0）
+  carryInCents         BigInt @default(0) @map("carry_in_cents")
+  /// 净利润池 = 抽水 − 支出 + 负结转
+  netPoolCents         BigInt @map("net_pool_cents")
+  /// 实际分给代理的合计
+  distributedCents     BigInt @default(0) @map("distributed_cents")
+  /// 公司留存 = 净池 − 分配合计（净池为正时）
+  residualCents        BigInt @default(0) @map("residual_cents")
+  /// 结转到次日的负额（净池 ≤ 0 时 = 净池，否则 0）
+  carryOutCents        BigInt @default(0) @map("carry_out_cents")
+  bucketBaseSnapshot   Int    @map("bucket_base_snapshot")
+
+  status    String   @default("SETTLED") // SETTLED | NO_DISTRIBUTION
+  settledBy String?  @map("settled_by")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  shares AgentProfitShare[]
+
+  @@index([date])
+  @@map("profit_pool_daily")
+}
+
+/// 代理称桶分配明细：金额 = 净池 × (代理流水 ÷ 公司流水) × (占成点数 ÷ 称桶基准)
+model AgentProfitShare {
+  id      String          @id @default(cuid())
+  poolId  String          @map("pool_id")
+  pool    ProfitPoolDaily @relation(fields: [poolId], references: [id])
+  agentId String          @map("agent_id")
+  agent   Agent           @relation(fields: [agentId], references: [id])
+  date    String
+
+  turnoverCents        BigInt   @map("turnover_cents")
+  companyTurnoverCents BigInt   @map("company_turnover_cents")
+  sharePointsSnapshot  Int      @map("share_points_snapshot")
+  bucketBaseSnapshot   Int      @map("bucket_base_snapshot")
+  amountCents          BigInt   @map("amount_cents")
+  ledgerRef            String?  @map("ledger_ref")
+  createdAt            DateTime @default(now()) @map("created_at")
+
+  @@unique([date, agentId])
+  @@index([agentId, date])
+  @@map("agent_profit_shares")
+}
+
 model Leaderboard {
   id           String   @id @default(cuid())
   gameCode     String   @default("SUPREME_NIUNIU") @map("game_code")
@@ -770,7 +936,9 @@ model Announcement {
   @@map("announcements")
 }
 
-/** 小程序「系统通知」收件箱（运营可自定义群发） */
+/**
+ * 小程序「系统通知」收件箱（运营可自定义群发）
+ */
 model SystemNotice {
   id           String             @id @default(cuid())
   title        String
@@ -843,7 +1011,9 @@ model GroupPacket {
   count          Int
   remainingCents BigInt   @map("remaining_cents")
   remainingCount Int      @map("remaining_count")
-  /** RANDOM = 拼手气 / EQUAL = 平分 */
+  /**
+   * RANDOM = 拼手气 / EQUAL = 平分
+   */
   mode           String   @default("RANDOM")
   greeting       String   @default("恭喜发财，大吉大利")
   status         String   @default("ACTIVE") // ACTIVE / FINISHED / EXPIRED
@@ -853,9 +1023,9 @@ model GroupPacket {
   sender User               @relation("GroupPacketSender", fields: [senderId], references: [id])
   claims GroupPacketClaim[]
 
+  @@unique([senderId, requestId])
   @@index([roomId, createdAt])
   @@index([status, expiresAt])
-  @@unique([senderId, requestId])
   @@map("group_packets")
 }
 

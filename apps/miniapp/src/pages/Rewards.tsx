@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { api, rm } from '../api';
+import { goBack } from '../lib/nav';
 
 type RewardData = Awaited<ReturnType<typeof api.rewards>>;
 type RewardItem = RewardData['items'][number];
@@ -69,6 +70,7 @@ function statusOf(item: RewardItem) {
 
 export default function Rewards() {
   const navigate = useNavigate();
+  const location = useLocation();
   const { roomId = '' } = useParams();
   const [tab, setTab] = useState<Tab>('CHESS');
   const [data, setData] = useState<RewardData | null>(null);
@@ -136,7 +138,7 @@ export default function Rewards() {
   return (
     <div className="page subpage rw-page">
       <header className="subpage-header">
-        <button type="button" onClick={() => navigate(-1)} aria-label="返回">
+        <button type="button" onClick={() => goBack(navigate, location, roomId ? `/game/${roomId}` : '/')} aria-label="返回">
           ‹
         </button>
         <div>

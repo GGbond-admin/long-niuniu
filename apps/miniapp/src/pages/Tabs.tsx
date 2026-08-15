@@ -102,7 +102,11 @@ export default function Tabs({
       )}
       {visited.wallet && (
         <div className="tab-panel" hidden={tab !== 'wallet'} aria-hidden={tab !== 'wallet'}>
-          <Wallet kycStatus={kyc} active={tab === 'wallet'} />
+          <Wallet
+            kycStatus={kyc}
+            active={tab === 'wallet'}
+            onGoLobby={() => selectTab('lobby')}
+          />
         </div>
       )}
       {visited.chat && (

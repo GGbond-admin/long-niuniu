@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { api, rm } from '../api';
+import { goBack } from '../lib/nav';
 import BrandLogo from '../components/BrandLogo';
 
 type Period = 'daily' | 'weekly' | 'monthly';
@@ -52,6 +53,7 @@ function formatUpdatedAt(value?: string) {
 
 export default function Leaderboards() {
   const navigate = useNavigate();
+  const location = useLocation();
   const { roomId = '' } = useParams();
   const [period, setPeriod] = useState<Period>('daily');
   const [board, setBoard] = useState<Board>('points');
@@ -116,7 +118,7 @@ export default function Leaderboards() {
   return (
     <div className="page subpage lb-page">
       <header className="subpage-header">
-        <button type="button" onClick={() => navigate(-1)} aria-label="返回">
+        <button type="button" onClick={() => goBack(navigate, location, roomId ? `/game/${roomId}` : '/')} aria-label="返回">
           ‹
         </button>
         <div>

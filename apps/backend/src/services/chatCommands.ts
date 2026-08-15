@@ -2,7 +2,7 @@
  * 网页互动群聊天指令：数字竞标/下注、sh 梭哈、0 撤回、/重推。
  */
 import { RoundPhase } from '@prisma/client';
-import { toCents } from '../engine/betting.js';
+import { fromCents, toCentsBigInt } from '../engine/betting.js';
 import { prisma } from '../lib/prisma.js';
 import { withRedisLock } from '../lib/redis.js';
 import {
@@ -11,6 +11,7 @@ import {
   GameError,
   placeBankerBid,
   placeBet,
+  type PlaceBetResult,
   withdrawBet,
 } from './game.js';
 import { gameBus } from './gameBus.js';
@@ -23,12 +24,133 @@ import {
   appendSystemChatOnce,
   ensureRoundAnnouncement,
 } from './roomHub.js';
+import { WalletError } from './wallet.js';
+import { gameErrorMessage, walletErrorMessage } from './errorMessages.js';
+
+export type ChatCommandAction =
+  | 'repost'
+  | 'all_in'
+  | 'withdraw'
+  | 'bid'
+  | 'bet';
+
+type BetAcceptanceDetails = {
+  requestedAmountCents: string;
+  liabilityBalanceCents: string;
+  maxAffordableCents: string;
+  roomMaxCents: string;
+  maxAcceptedCents: string;
+  maxMultiplier: number;
+  reservedCents: string;
+  adjusted: boolean;
+  adjustedBy: string[];
+};
 
 export type ChatCommandResult =
   | { kind: 'ignored' }
   | { kind: 'muted'; message: string }
-  | { kind: 'ok'; action: string; echo: string }
-  | { kind: 'error'; message: string };
+  | {
+      kind: 'ok';
+      action: ChatCommandAction;
+      echo: string;
+      amountCents?: string;
+      acceptance?: BetAcceptanceDetails;
+    }
+  | {
+      kind: 'error';
+      message: string;
+      action?: ChatCommandAction;
+      amountCents?: string;
+    };
+
+export type PrivateBetConfirmation = {
+  type: 'bet_confirmation';
+  status: 'success' | 'failed';
+  action: 'bet' | 'all_in';
+  /** 最终实际接受金额 */
+  amountCents: string;
+  acceptance?: BetAcceptanceDetails;
+  reason?: string;
+};
+
+/** 只回给发起下注的 socket，不写群聊、不进入公共历史。 */
+export function privateBetConfirmationFor(
+  result: ChatCommandResult,
+): PrivateBetConfirmation | null {
+  if (
+    (result.kind !== 'ok' && result.kind !== 'error') ||
+    (result.action !== 'bet' && result.action !== 'all_in') ||
+    !result.amountCents
+  ) {
+    return null;
+  }
+  return result.kind === 'ok'
+    ? {
+        type: 'bet_confirmation',
+        status: 'success',
+        action: result.action,
+        amountCents: result.amountCents,
+        ...(result.acceptance ? { acceptance: result.acceptance } : {}),
+      }
+    : {
+        type: 'bet_confirmation',
+        status: 'failed',
+        action: result.action,
+        amountCents: result.amountCents,
+        reason: result.message,
+      };
+}
+
+function compactMoney(cents: bigint): string {
+  return fromCents(cents).replace(/\.00$/, '').replace(/(\.\d)0$/, '$1');
+}
+
+function parseCommandAmountCents(amount: string): bigint {
+  try {
+    return toCentsBigInt(amount);
+  } catch (error) {
+    throw new GameError(
+      error instanceof Error && error.message === 'AMOUNT_TOO_LARGE'
+        ? 'AMOUNT_TOO_LARGE'
+        : 'INVALID_AMOUNT',
+    );
+  }
+}
+
+function successfulBetCommand(
+  action: 'bet' | 'all_in',
+  originalEcho: string,
+  requestedCents: bigint,
+  result: PlaceBetResult,
+): Extract<ChatCommandResult, { kind: 'ok' }> {
+  // 测试替身或滚动部署中的旧实现若暂未返回结构，保持原金额兼容。
+  const acceptedCents = result?.acceptedCents ?? requestedCents;
+  const adjusted = result?.adjusted ?? acceptedCents !== requestedCents;
+  const echo = adjusted
+    ? `${action === 'all_in' ? 'sh' : ''}${compactMoney(acceptedCents)}`
+    : originalEcho;
+  const acceptance =
+    result?.liabilityBalanceCents !== undefined
+      ? {
+          requestedAmountCents: String(requestedCents),
+          liabilityBalanceCents: String(result.liabilityBalanceCents),
+          maxAffordableCents: String(result.maxAffordableCents),
+          roomMaxCents: String(result.roomMaxCents),
+          maxAcceptedCents: String(result.maxAcceptedCents),
+          maxMultiplier: result.maxMultiplier,
+          reservedCents: String(result.reservedCents),
+          adjusted,
+          adjustedBy: result.adjustedBy,
+        }
+      : undefined;
+  return {
+    kind: 'ok',
+    action,
+    echo,
+    amountCents: String(acceptedCents),
+    ...(acceptance ? { acceptance } : {}),
+  };
+}
 
 const MUTED_PHASES = new Set<string>([RoundPhase.CLAIMING]);
 const diceCeremonyInFlight = new Map<string, Promise<DiceThrowResult>>();
@@ -328,13 +450,18 @@ export async function handleRoomChatCommand(params: {
     if (!round || round.phase !== RoundPhase.BETTING) {
       return { kind: 'ignored' };
     }
+    let amountCents: string | undefined;
     try {
-      await placeBet(round.id, params.userId, BigInt(toCents(shMatch[1]!)), true);
-      return { kind: 'ok', action: 'all_in', echo: text };
+      const requestedCents = parseCommandAmountCents(shMatch[1]!);
+      amountCents = String(requestedCents);
+      const result = await placeBet(round.id, params.userId, requestedCents, true);
+      return successfulBetCommand('all_in', text, requestedCents, result);
     } catch (e) {
       return {
         kind: 'error',
-        message: e instanceof GameError ? humanizeGameError(e) : '梭哈失败',
+        action: 'all_in',
+        ...(amountCents ? { amountCents } : {}),
+        message: humanizeCommandError(e, '梭哈失败'),
       };
     }
   }
@@ -362,7 +489,7 @@ export async function handleRoomChatCommand(params: {
 
   if (round.phase === RoundPhase.BANKER_BID) {
     try {
-      await placeBankerBid(round.id, params.userId, BigInt(toCents(amountToken)));
+      await placeBankerBid(round.id, params.userId, parseCommandAmountCents(amountToken));
       return { kind: 'ok', action: 'bid', echo: amountToken };
     } catch (e) {
       return {
@@ -373,13 +500,18 @@ export async function handleRoomChatCommand(params: {
   }
 
   if (round.phase === RoundPhase.BETTING) {
+    let amountCents: string | undefined;
     try {
-      await placeBet(round.id, params.userId, BigInt(toCents(amountToken)), false);
-      return { kind: 'ok', action: 'bet', echo: amountToken };
+      const requestedCents = parseCommandAmountCents(amountToken);
+      amountCents = String(requestedCents);
+      const result = await placeBet(round.id, params.userId, requestedCents, false);
+      return successfulBetCommand('bet', amountToken, requestedCents, result);
     } catch (e) {
       return {
         kind: 'error',
-        message: e instanceof GameError ? humanizeGameError(e) : '下注失败',
+        action: 'bet',
+        ...(amountCents ? { amountCents } : {}),
+        message: humanizeCommandError(e, '下注失败'),
       };
     }
   }
@@ -388,18 +520,13 @@ export async function handleRoomChatCommand(params: {
 }
 
 function humanizeGameError(error: GameError): string {
-  const map: Record<string, string> = {
-    INVALID_PHASE: '当前阶段不可操作，请点刷新同步状态',
-    PHASE_ENDED: '本阶段倒计时已结束，请等待下一阶段',
-    INSUFFICIENT_BALANCE: '余额不足（竞标需覆盖庄钱+上庄费+服务费）',
-    BID_OUT_OF_RANGE: '竞标金额超出范围',
-    BET_OUT_OF_RANGE: '下注金额超出范围',
-    BANKER_CANNOT_BET: '庄家不能下注',
-    NOT_ENOUGH_PLAYERS: '人数不足',
-    NOT_IN_ROOM: '您已不在互动群内，请点右上角刷新重新进入',
-    KYC_REQUIRED: '请先完成实名认证',
-  };
-  return map[error.code] ?? error.code;
+  return gameErrorMessage(error);
+}
+
+function humanizeCommandError(error: unknown, fallback: string): string {
+  if (error instanceof GameError) return gameErrorMessage(error);
+  if (error instanceof WalletError) return walletErrorMessage(error.code);
+  return fallback;
 }
 
 export async function ensureUserInRoom(roomId: string, userId: string) {

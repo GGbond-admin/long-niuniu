@@ -12,6 +12,7 @@ import {
   leaveVirtualPlayer,
   listVirtualPlayers,
   randomizeVirtualIdentity,
+  setVirtualPlayersEnabled,
   updateVirtualPlayer,
 } from '../services/virtualPlayers.js';
 import { actAsVirtualPlayer } from '../services/virtualPlayerWorker.js';
@@ -43,6 +44,7 @@ const capabilitySchema = z.object({
   canContinue: z.boolean().optional(),
   canThrowDice: z.boolean().optional(),
   canGroupPacket: z.boolean().optional(),
+  canClaimGroupPacket: z.boolean().optional(),
   canClaimSim: z.boolean().optional(),
   bidWeight: z.number().min(0).max(1).optional(),
   betRatioMin: z.number().min(0).max(1).optional(),
@@ -95,6 +97,35 @@ export async function adminVirtualPlayerRoutes(app: FastifyInstance) {
         },
       });
       return { item };
+    } catch (error) {
+      if (error instanceof GameError) {
+        return reply.code(400).send({ error: error.code, details: error.details });
+      }
+      throw error;
+    }
+  });
+
+  /** 一键启用/停用（可限定单个互动群） */
+  app.post('/api/admin/virtual-players/bulk-enabled', { preHandler: operators }, async (req, reply) => {
+    const adminId = (req.user as { sub: string }).sub;
+    const body = z
+      .object({
+        enabled: z.boolean(),
+        roomId: roomIdSchema.optional(),
+      })
+      .parse(req.body ?? {});
+    try {
+      const result = await setVirtualPlayersEnabled(body.enabled, body.roomId);
+      await prisma.auditLog.create({
+        data: {
+          adminId,
+          action: body.enabled ? 'virtual_player_bulk_enable' : 'virtual_player_bulk_disable',
+          target: body.roomId ?? 'all',
+          after: { count: result.count, roomId: body.roomId ?? null, enabled: body.enabled },
+          ip: req.ip,
+        },
+      });
+      return { ok: true, count: result.count };
     } catch (error) {
       if (error instanceof GameError) {
         return reply.code(400).send({ error: error.code, details: error.details });

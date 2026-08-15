@@ -4,14 +4,21 @@
  */
 import { BetStatus, RoundPhase } from '@prisma/client';
 import { bettingRange, fromCents } from '../engine/betting.js';
+import { DEFAULT_FEE_CONFIG, rakeRatioFor } from '../engine/fees.js';
 import { formatScoreboard } from '../bot/messages.js';
 import { prisma } from '../lib/prisma.js';
+import { cancelReasonText } from './errorMessages.js';
 import {
   getMessageTemplatesForRoom,
   parseSettingsSnapshot,
   renderMessage,
   type MessageTemplates,
 } from './gameSettings.js';
+
+/** 0.03 → "3"、0.045 → "4.5"（模板里已带 % 符号） */
+function formatPercent(ratio: number): string {
+  return String(Math.round(ratio * 1000) / 10);
+}
 
 function stripHtml(html: string): string {
   return html
@@ -232,15 +239,20 @@ export async function buildRoundAnnounceMessages(params: {
   }
 
   if (params.to === RoundPhase.CLAIM_EXPIRED) {
-    const rakePercent = Math.round((settings?.fees.rakeRatio ?? 0.05) * 100);
+    const playerRakePercent = formatPercent(
+      settings ? rakeRatioFor('PLAYER', settings.fees) : DEFAULT_FEE_CONFIG.playerRakeRatio,
+    );
+    const bankerRakePercent = formatPercent(
+      settings ? rakeRatioFor('BANKER', settings.fees) : DEFAULT_FEE_CONFIG.bankerRakeRatio,
+    );
     return [
       banner('claim-stop'),
       text(stripHtml(templates.claimExpired)),
       text(
         stripHtml(
           renderMessage(templates.rakeNotice, {
-            playerRake: rakePercent,
-            bankerRake: rakePercent,
+            playerRake: playerRakePercent,
+            bankerRake: bankerRakePercent,
           }),
         ),
       ),
@@ -288,7 +300,7 @@ export async function buildRoundAnnounceMessages(params: {
         stripHtml(
           renderMessage(templates.cancelled, {
             seqNo: round.seqNo,
-            reason: round.cancelReason ?? '运营取消',
+            reason: cancelReasonText(round.cancelReason),
           }),
         ),
       ),

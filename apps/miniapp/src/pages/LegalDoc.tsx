@@ -1,4 +1,5 @@
-import { Link, useNavigate, useParams } from 'react-router-dom';
+import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
+import { goBack } from '../lib/nav';
 import { legalDocs, type LegalDocKey } from '../legal';
 
 function isLegalKey(value: string | undefined): value is LegalDocKey {
@@ -14,6 +15,7 @@ function isLegalKey(value: string | undefined): value is LegalDocKey {
 export default function LegalDoc() {
   const { type } = useParams();
   const navigate = useNavigate();
+  const location = useLocation();
   const key: LegalDocKey = isLegalKey(type) ? type : 'terms';
   const doc = legalDocs[key];
   const related = (Object.keys(legalDocs) as LegalDocKey[]).filter((item) => item !== key);
@@ -21,7 +23,7 @@ export default function LegalDoc() {
   return (
     <div className="page subpage legal-page">
       <header className="subpage-header">
-        <button type="button" onClick={() => navigate(-1)} aria-label="返回">
+        <button type="button" onClick={() => goBack(navigate, location, '/settings/legal')} aria-label="返回">
           ‹
         </button>
         <div>

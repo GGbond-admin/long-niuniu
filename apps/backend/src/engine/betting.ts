@@ -38,6 +38,102 @@ export interface BettingRange {
   shMaxCents: number;
 }
 
+export type BetAdjustmentReason = 'ROOM_LIMIT' | 'LIABILITY_LIMIT';
+
+interface BetAcceptanceBase {
+  requestedCents: bigint;
+  liabilityBalanceCents: bigint;
+  maxAffordableCents: bigint;
+  roomMinCents: bigint;
+  roomMaxCents: bigint;
+  maxAcceptedCents: bigint;
+  maxMultiplier: number;
+}
+
+export type BetAcceptance =
+  | (BetAcceptanceBase & {
+      ok: true;
+      acceptedCents: bigint;
+      reservedCents: bigint;
+      adjusted: boolean;
+      adjustedBy: BetAdjustmentReason[];
+    })
+  | (BetAcceptanceBase & {
+      ok: false;
+      reason: 'BELOW_BET_MIN' | 'BELOW_SH_MIN' | 'MAX_LIABILITY_BELOW_MIN';
+    });
+
+/** 当前赔付余额在最高倍数下可支持的下注额；按需求向下取整至完整 RM。 */
+export function maxAffordableBetCents(
+  liabilityBalanceCents: bigint,
+  maxMultiplier: number,
+): bigint {
+  if (liabilityBalanceCents < 0n) throw new Error('liabilityBalanceCents must be non-negative');
+  if (!Number.isInteger(maxMultiplier) || maxMultiplier <= 0) {
+    throw new Error('maxMultiplier must be a positive integer');
+  }
+  const wholeRm = liabilityBalanceCents / (BigInt(maxMultiplier) * 100n);
+  return wholeRm * 100n;
+}
+
+/**
+ * 计算最终接受下注：
+ * - 低于玩法最低额仍拒绝；
+ * - 高于房间上限或余额赔付能力时自动降额；
+ * - 预留金额覆盖本局最高倍数的最坏损失。
+ */
+export function acceptBetAmount(params: {
+  requestedCents: bigint;
+  liabilityBalanceCents: bigint;
+  maxMultiplier: number;
+  isAllIn: boolean;
+  range: BettingRange;
+}): BetAcceptance {
+  const roomMinCents = BigInt(params.isAllIn ? params.range.shMinCents : params.range.betMinCents);
+  const roomMaxCents = BigInt(params.isAllIn ? params.range.shMaxCents : params.range.betMaxCents);
+  const maxAffordableCents = maxAffordableBetCents(
+    params.liabilityBalanceCents,
+    params.maxMultiplier,
+  );
+  const maxAcceptedCents =
+    maxAffordableCents < roomMaxCents ? maxAffordableCents : roomMaxCents;
+  const base: BetAcceptanceBase = {
+    requestedCents: params.requestedCents,
+    liabilityBalanceCents: params.liabilityBalanceCents,
+    maxAffordableCents,
+    roomMinCents,
+    roomMaxCents,
+    maxAcceptedCents,
+    maxMultiplier: params.maxMultiplier,
+  };
+
+  if (params.requestedCents < roomMinCents) {
+    return {
+      ...base,
+      ok: false,
+      reason: params.isAllIn ? 'BELOW_SH_MIN' : 'BELOW_BET_MIN',
+    };
+  }
+  if (maxAcceptedCents < roomMinCents) {
+    return { ...base, ok: false, reason: 'MAX_LIABILITY_BELOW_MIN' };
+  }
+
+  const acceptedCents =
+    params.requestedCents < maxAcceptedCents ? params.requestedCents : maxAcceptedCents;
+  const adjustedBy: BetAdjustmentReason[] = [];
+  if (params.requestedCents > roomMaxCents) adjustedBy.push('ROOM_LIMIT');
+  if (params.requestedCents > maxAffordableCents) adjustedBy.push('LIABILITY_LIMIT');
+
+  return {
+    ...base,
+    ok: true,
+    acceptedCents,
+    reservedCents: acceptedCents * BigInt(params.maxMultiplier),
+    adjusted: acceptedCents !== params.requestedCents,
+    adjustedBy,
+  };
+}
+
 export function bettingRange(
   potCents: number,
   playerCount: number,
@@ -100,6 +196,22 @@ export function toCents(amount: string | number): number {
   const [int, dec = ''] = s.split('.');
   const d2 = (dec + '00').slice(0, 2);
   return parseInt(int, 10) * 100 + parseInt(d2, 10);
+}
+
+/** PostgreSQL BIGINT 正数上限；所有持久化金额必须在此范围内。 */
+export const MAX_MONEY_CENTS = 9_223_372_036_854_775_807n;
+
+/** 从十进制字符串精确解析金额，避免先经过 Number 导致大额舍入。 */
+export function toCentsBigInt(amount: string): bigint {
+  const normalized = amount.trim();
+  // 先限长再构造 BigInt，避免超长 REST/WS 输入放大 CPU 消耗。
+  if (normalized.length > 32) throw new Error('AMOUNT_TOO_LARGE');
+  const match = /^(\d+)(?:\.(\d{1,2}))?$/.exec(normalized);
+  if (!match) throw new Error('INVALID_AMOUNT');
+  const fraction = (match[2] ?? '').padEnd(2, '0');
+  const cents = BigInt(match[1]) * 100n + BigInt(fraction || '0');
+  if (cents > MAX_MONEY_CENTS) throw new Error('AMOUNT_TOO_LARGE');
+  return cents;
 }
 
 export function fromCents(cents: string | number | bigint): string {

@@ -8,6 +8,7 @@ import {
   handTypeOf,
   isBust,
   keyDigits,
+  maxPayoutMultiplier,
   pointsOf,
 } from './hand.js';
 import { toCents } from './betting.js';
@@ -59,6 +60,10 @@ describe('牌型判定（06 文档 §1.2）', () => {
     expect(handTypeOf(toCents('0.10'))).toBe(HandType.JINNIU);
     expect(handTypeOf(toCents('0.50'))).toBe(HandType.JINNIU);
   });
+  it('免死：0.01 固定判免死，不再归入金牛', () => {
+    expect(handTypeOf(toCents('0.01'))).toBe(HandType.MIANSI);
+    expect(handTypeOf(toCents('0.02'))).toBe(HandType.JINNIU); // 其余单非零位仍是金牛
+  });
   it('普通：2.80 / 3.42', () => {
     expect(handTypeOf(toCents('2.80'))).toBe(HandType.NORMAL);
     expect(handTypeOf(toCents('3.42'))).toBe(HandType.NORMAL);
@@ -84,6 +89,24 @@ describe('比牌（06 文档 §2）', () => {
     const a = evaluateHand(toCents('2.80'));
     const b = evaluateHand(toCents('2.80'));
     expect(compareHands(a, b)).toBe(CompareResult.TIE);
+  });
+});
+
+describe('最大赔付倍数', () => {
+  it('默认配置最高为豹子 17 倍，免死占位倍数不参与', () => {
+    expect(maxPayoutMultiplier()).toBe(17);
+  });
+
+  it('使用本局配置中的真实最高倍数，不硬编码 17', () => {
+    expect(
+      maxPayoutMultiplier({
+        ...DEFAULT_HAND_CONFIG,
+        normalMultipliers: {
+          ...DEFAULT_HAND_CONFIG.normalMultipliers,
+          10: 20,
+        },
+      }),
+    ).toBe(20);
   });
 });
 
@@ -121,5 +144,11 @@ describe('自爆（06 文档 §2.1）', () => {
   it('豁免关闭时金牛 0.10 判自爆', () => {
     const h = evaluateHand(toCents('0.10'));
     expect(isBust(h, { ...DEFAULT_HAND_CONFIG, bustExemptSpecialHands: false })).toBe(true);
+  });
+  it('免死 0.01 永不自爆（即使豁免关闭）', () => {
+    const h = evaluateHand(toCents('0.01'));
+    expect(h.type).toBe(HandType.MIANSI);
+    expect(isBust(h)).toBe(false);
+    expect(isBust(h, { ...DEFAULT_HAND_CONFIG, bustExemptSpecialHands: false })).toBe(false);
   });
 });

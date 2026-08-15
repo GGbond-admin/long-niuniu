@@ -1,16 +1,19 @@
 import { useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { QRCodeCanvas } from 'qrcode.react';
 import { api } from '../api';
 import BrandLogo from '../components/BrandLogo';
-import { tg } from '../telegram';
+import { goBack } from '../lib/nav';
+import { openTgLink } from '../telegram';
 import { LegalLinks } from './LegalDoc';
 
 export default function InviteFriends() {
   const [data, setData] = useState<Awaited<ReturnType<typeof api.inviteLink>> | null>(null);
   const [error, setError] = useState('');
   const [copied, setCopied] = useState<'uid' | 'link' | null>(null);
+  const [copyError, setCopyError] = useState('');
   const navigate = useNavigate();
+  const location = useLocation();
 
   useEffect(() => {
     api
@@ -33,11 +36,22 @@ export default function InviteFriends() {
     window.setTimeout(() => setCopied(null), 1500);
   }
 
+  async function copyText(kind: 'uid' | 'link', value: string) {
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error('CLIPBOARD_UNAVAILABLE');
+      await navigator.clipboard.writeText(value);
+      setCopyError('');
+      flash(kind);
+    } catch {
+      setCopyError('复制失败，请长按手动复制');
+    }
+  }
+
   if (error) {
     return (
       <div className="page subpage iv-page">
         <header className="subpage-header">
-          <button type="button" onClick={() => navigate(-1)} aria-label="返回">
+          <button type="button" onClick={() => goBack(navigate, location)} aria-label="返回">
             ‹
           </button>
           <div>
@@ -63,13 +77,13 @@ export default function InviteFriends() {
 
   function share() {
     const url = `https://t.me/share/url?url=${encodeURIComponent(data!.deepLink)}&text=${encodeURIComponent('加入至尊牛牛，与我一起参与牌局')}`;
-    tg()?.openTelegramLink(url);
+    openTgLink(url);
   }
 
   return (
     <div className="page subpage iv-page">
       <header className="subpage-header">
-        <button type="button" onClick={() => navigate(-1)} aria-label="返回">
+        <button type="button" onClick={() => goBack(navigate, location)} aria-label="返回">
           ‹
         </button>
         <div>
@@ -97,10 +111,7 @@ export default function InviteFriends() {
             <button
               type="button"
               className="iv-uid"
-              onClick={() => {
-                navigator.clipboard?.writeText(data.uid);
-                flash('uid');
-              }}
+              onClick={() => void copyText('uid', data.uid)}
             >
               UID {data.uid}
               <em>{copied === 'uid' ? '已复制' : '复制'}</em>
@@ -128,14 +139,13 @@ export default function InviteFriends() {
           <button
             type="button"
             className="iv-btn primary"
-            onClick={() => {
-              navigator.clipboard?.writeText(data.deepLink);
-              flash('link');
-            }}
+            onClick={() => void copyText('link', data.deepLink)}
           >
             {copied === 'link' ? '邀请链接已复制 ✓' : '复制专属邀请链接'}
           </button>
         </div>
+
+        {copyError && <div className="inline-alert error">{copyError}</div>}
       </section>
 
       <section className="iv-rules">

@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { api } from '../api';
 import PaymentPinInput from '../components/PaymentPinInput';
+import { goBack } from '../lib/nav';
 import type { Session } from '../sessionStore';
 import { paymentPinErrorMessage } from '../lib/paymentPin';
 
@@ -69,7 +70,13 @@ export default function PaymentPinSettings({
       <header className="subpage-header">
         <button
           type="button"
-          onClick={() => navigate(changing ? '/settings' : '/settings/legal')}
+          onClick={() =>
+            // 强制设置支付密码期间（已实名但未设密），普通页面都会被守卫弹回本页，
+            // 回退历史只会原地打转，因此固定跳到允许访问的协议页；其余情况真实回退。
+            approved && !changing
+              ? navigate('/settings/legal')
+              : goBack(navigate, location, '/settings')
+          }
           aria-label="返回"
         >
           ‹

@@ -9,15 +9,23 @@ export interface FeeConfig {
   serviceFeeCents: number;
   /** 红包人均单价（分），默认 104 = RM1.04 */
   packetPerHeadCents: number;
-  /** 抽水比例（只抽赢方盈利），默认 5% */
-  rakeRatio: number;
+  /** 玩家（闲家）赢抽水比例（只抽赢方盈利），默认 3% */
+  playerRakeRatio: number;
+  /** 庄家赢抽水比例（只抽赢方盈利），默认 5% */
+  bankerRakeRatio: number;
+  /**
+   * @deprecated 旧版单一抽水比例。仅用于历史局配置快照兼容：
+   * 快照里存在 rakeRatio 而缺少分侧比例时，两侧均按此值抽取。
+   */
+  rakeRatio?: number;
 }
 
 export const DEFAULT_FEE_CONFIG: FeeConfig = {
   bankerSeatFeeRatio: 0.01,
   serviceFeeCents: 3800,
   packetPerHeadCents: 104,
-  rakeRatio: 0.05,
+  playerRakeRatio: 0.03,
+  bankerRakeRatio: 0.05,
 };
 
 /** 上庄费 = 庄钱 × 比例 */
@@ -58,8 +66,22 @@ export function bankerFees(
   };
 }
 
-/** 抽水：只抽赢方盈利 */
-export function rakeOf(profitCents: number, config: FeeConfig = DEFAULT_FEE_CONFIG): number {
+export type RakeSide = 'PLAYER' | 'BANKER';
+
+/** 分侧抽水比例：优先分侧配置，历史快照回退到旧版单一 rakeRatio */
+export function rakeRatioFor(side: RakeSide, config: FeeConfig = DEFAULT_FEE_CONFIG): number {
+  if (side === 'PLAYER') {
+    return config.playerRakeRatio ?? config.rakeRatio ?? DEFAULT_FEE_CONFIG.playerRakeRatio;
+  }
+  return config.bankerRakeRatio ?? config.rakeRatio ?? DEFAULT_FEE_CONFIG.bankerRakeRatio;
+}
+
+/** 抽水：只抽赢方盈利（玩家赢/庄家赢比例可分别配置） */
+export function rakeOf(
+  profitCents: number,
+  side: RakeSide,
+  config: FeeConfig = DEFAULT_FEE_CONFIG,
+): number {
   if (profitCents <= 0) return 0;
-  return Math.round(profitCents * config.rakeRatio);
+  return Math.round(profitCents * rakeRatioFor(side, config));
 }

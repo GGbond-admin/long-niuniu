@@ -16,6 +16,16 @@ export default function SupportChat() {
   const [ready, setReady] = useState(false);
   const endRef = useRef<HTMLDivElement>(null);
   const didInitialScrollRef = useRef(false);
+  const streamRef = useRef<HTMLElement>(null);
+  // 用户滚动时记录是否接近底部；发送自己的消息后强制贴底一次
+  const nearBottomRef = useRef(true);
+  const forceScrollRef = useRef(false);
+
+  function trackScroll() {
+    const el = streamRef.current;
+    if (!el) return;
+    nearBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+  }
 
   async function load() {
     try {
@@ -41,11 +51,15 @@ export default function SupportChat() {
 
   useEffect(() => {
     if (!ready) return;
-    const behavior: ScrollBehavior = didInitialScrollRef.current ? 'smooth' : 'auto';
-    // 进房先瞬间贴底看最新消息，之后新消息再平滑跟随
+    const isInitial = !didInitialScrollRef.current;
+    // 仅进房、用户本就贴近底部、或刚发送自己的消息时才自动贴底，避免上翻历史被拽回
+    if (!isInitial && !nearBottomRef.current && !forceScrollRef.current) return;
+    forceScrollRef.current = false;
+    const behavior: ScrollBehavior = isInitial ? 'auto' : 'smooth';
     requestAnimationFrame(() => {
       endRef.current?.scrollIntoView({ behavior, block: 'end' });
       didInitialScrollRef.current = true;
+      nearBottomRef.current = true;
     });
   }, [messages, ready]);
 
@@ -57,6 +71,7 @@ export default function SupportChat() {
     try {
       await api.sendChat({ type: 'TEXT', content });
       setText('');
+      forceScrollRef.current = true;
       await load();
     } catch (err) {
       setError((err as Error).message || '发送失败，请重试');
@@ -70,6 +85,7 @@ export default function SupportChat() {
     setError('');
     try {
       await api.sendChat({ type: 'STICKER', stickerId });
+      forceScrollRef.current = true;
       await load();
     } catch (err) {
       setError((err as Error).message || '发送失败，请重试');
@@ -102,7 +118,7 @@ export default function SupportChat() {
         </div>
       </header>
 
-      <main className="message-stream">
+      <main className="message-stream" ref={streamRef} onScroll={trackScroll}>
         <div className="chat-date">加密客服会话</div>
         {!ready && <div className="empty-inline">加载中…</div>}
         {error && !messages.length && <div className="inline-alert error">{error}</div>}

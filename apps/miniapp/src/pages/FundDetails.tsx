@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { api } from '../api';
+import { goBack } from '../lib/nav';
 import {
   LEDGER_FILTERS,
   formatLedgerAmount,
@@ -12,6 +13,7 @@ type Entry = Awaited<ReturnType<typeof api.wallet>>['entries'][number];
 
 export default function FundDetails() {
   const navigate = useNavigate();
+  const location = useLocation();
   const [category, setCategory] = useState<LedgerCategory>('all');
   const [entries, setEntries] = useState<Entry[]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
@@ -61,7 +63,7 @@ export default function FundDetails() {
   return (
     <div className="page subpage fd-page">
       <header className="subpage-header">
-        <button type="button" onClick={() => navigate(-1)} aria-label="返回">
+        <button type="button" onClick={() => goBack(navigate, location)} aria-label="返回">
           ‹
         </button>
         <div>

@@ -35,28 +35,48 @@ export default function ChatHub({ active = true }: { active?: boolean }) {
   const [noticePreview, setNoticePreview] = useState<Awaited<
     ReturnType<typeof api.noticesPreview>
   > | null>(null);
+  const [lobbyLoading, setLobbyLoading] = useState(true);
+  const [lobbyFailed, setLobbyFailed] = useState(false);
+  const [retryKey, setRetryKey] = useState(0);
 
   useEffect(() => {
     if (!active) return;
     let cancelled = false;
-    const load = () =>
-      void Promise.all([
-        api.lobby(),
-        api.chatPreview().catch(() => null),
-        api.noticesPreview().catch(() => null),
-      ]).then(([roomData, chat, notices]) => {
-        if (cancelled) return;
-        setLobby(roomData);
-        setChatPreview(chat);
-        setNoticePreview(notices);
-      });
+    // lobby 与预览分开请求：任一失败不影响其余行渲染
+    const load = () => {
+      void api
+        .lobby()
+        .then((roomData) => {
+          if (cancelled) return;
+          setLobby(roomData);
+          setLobbyFailed(false);
+        })
+        .catch(() => {
+          if (!cancelled) setLobbyFailed(true);
+        })
+        .finally(() => {
+          if (!cancelled) setLobbyLoading(false);
+        });
+      void api
+        .chatPreview()
+        .then((chat) => {
+          if (!cancelled) setChatPreview(chat);
+        })
+        .catch(() => undefined);
+      void api
+        .noticesPreview()
+        .then((notices) => {
+          if (!cancelled) setNoticePreview(notices);
+        })
+        .catch(() => undefined);
+    };
     void load();
     const timer = window.setInterval(load, 5_000);
     return () => {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [active]);
+  }, [active, retryKey]);
 
   const last = chatPreview?.latest;
   const supportUnread = chatPreview?.unread ?? 0;
@@ -76,6 +96,23 @@ export default function ChatHub({ active = true }: { active?: boolean }) {
       <PageHeader title="消息" subtitle="Inbox" />
 
       <section className="inbox-panel" aria-label="会话列表">
+        {lobbyLoading && !lobby && <div className="empty-inline">牌局会话加载中…</div>}
+        {lobbyFailed && !lobby && !lobbyLoading && (
+          <section className="feature-load-error" role="alert">
+            <strong>牌局会话没有加载成功</strong>
+            <p>请检查网络后重试，客服与系统通知不受影响。</p>
+            <button
+              type="button"
+              onClick={() => {
+                setLobbyLoading(true);
+                setLobbyFailed(false);
+                setRetryKey((key) => key + 1);
+              }}
+            >
+              重试
+            </button>
+          </section>
+        )}
         {games.map((game, index) => {
           const gamePreview = game.round
             ? `第 ${game.round.seqNo} 局 · ${phaseLabel[game.round.phase] ?? game.round.phase}`

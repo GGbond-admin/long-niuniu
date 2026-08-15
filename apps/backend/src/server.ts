@@ -21,14 +21,21 @@ import { adminGameRoutes, gameRoutes } from './routes/game.js';
 import { gameRoomRoutes } from './routes/gameRoom.js';
 import { initRoomHub } from './services/roomHub.js';
 import { adminOperationsRoutes, operationsRoutes } from './routes/operations.js';
+import { adminProfitPoolRoutes } from './routes/profitPool.js';
 import { adminVirtualPlayerRoutes } from './routes/virtualPlayers.js';
 import { adminNoticeRoutes, noticeRoutes } from './routes/notices.js';
 import { uploadRoutes } from './routes/uploads.js';
+import { paymentRoutes } from './routes/payments.js';
 import { settingsRoutes } from './routes/settings.js';
 import { pushService, PushService } from './services/push.js';
 import { WalletError } from './services/wallet.js';
 import { GameError } from './services/game.js';
 import { PaymentPinError } from './services/paymentPin.js';
+import {
+  gameErrorMessage,
+  paymentPinMessage,
+  walletErrorMessage,
+} from './services/errorMessages.js';
 
 declare module 'fastify' {
   interface FastifyInstance {
@@ -179,12 +186,17 @@ export async function buildServer() {
     }
   });
 
+  // 玩家可见错误统一附带中文 message（前端优先展示 message，其次才是错误码）
   app.setErrorHandler((err, _req, reply) => {
     if (err instanceof ZodError) {
-      return reply.code(400).send({ error: 'VALIDATION', issues: err.issues });
+      return reply.code(400).send({
+        error: 'VALIDATION',
+        message: '提交的资料格式有误，请检查后重试',
+        issues: err.issues,
+      });
     }
     if (err instanceof WalletError) {
-      return reply.code(400).send({ error: err.code });
+      return reply.code(400).send({ error: err.code, message: walletErrorMessage(err.code) });
     }
     if (err instanceof PaymentPinError) {
       const status =
@@ -193,7 +205,9 @@ export async function buildServer() {
           : err.code === 'PAYMENT_PIN_REQUIRED'
             ? 409
             : 400;
-      return reply.code(status).send({ error: err.code, details: err.details });
+      return reply
+        .code(status)
+        .send({ error: err.code, message: paymentPinMessage(err.code), details: err.details });
     }
     if (err instanceof GameError) {
       const status = ['ROUND_NOT_FOUND', 'ROOM_NOT_FOUND', 'PACKET_NOT_FOUND'].includes(err.code)
@@ -203,10 +217,17 @@ export async function buildServer() {
           : err.code === 'KYC_REQUIRED' || err.code === 'NOT_IN_ROOM'
             ? 403
             : 400;
-      return reply.code(status).send({ error: err.code, details: err.details });
+      return reply
+        .code(status)
+        .send({ error: err.code, message: gameErrorMessage(err), details: err.details });
+    }
+    if ((err as { statusCode?: number }).statusCode === 429) {
+      return reply
+        .code(429)
+        .send({ error: 'RATE_LIMITED', message: '操作过于频繁，请稍后再试' });
     }
     app.log.error(err);
-    return reply.code(500).send({ error: 'INTERNAL' });
+    return reply.code(500).send({ error: 'INTERNAL', message: '服务器繁忙，请稍后重试' });
   });
 
   app.get('/healthz', async () => ({ ok: true }));
@@ -223,6 +244,7 @@ export async function buildServer() {
   await app.register(onboardingRoutes);
   await app.register(settingsRoutes);
   await app.register(walletRoutes);
+  await app.register(paymentRoutes);
   await app.register(promotionRoutes);
   await app.register(adminRoutes);
   await app.register(gameRoutes);
@@ -231,6 +253,7 @@ export async function buildServer() {
   await app.register(adminVirtualPlayerRoutes);
   await app.register(operationsRoutes);
   await app.register(adminOperationsRoutes);
+  await app.register(adminProfitPoolRoutes);
   await app.register(noticeRoutes);
   await app.register(adminNoticeRoutes);
   await app.register(uploadRoutes);

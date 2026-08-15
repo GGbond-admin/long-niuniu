@@ -25,6 +25,7 @@ const capabilityColumn: Record<VirtualCapability, keyof Prisma.VirtualPlayerSele
   continue: 'canContinue',
   dice: 'canThrowDice',
   groupPacket: 'canGroupPacket',
+  claimGroupPacket: 'canClaimGroupPacket',
   claimSim: 'canClaimSim',
 };
 
@@ -44,6 +45,7 @@ export type VirtualPlayerInput = {
   canContinue?: boolean;
   canThrowDice?: boolean;
   canGroupPacket?: boolean;
+  canClaimGroupPacket?: boolean;
   canClaimSim?: boolean;
   bidWeight?: number;
   betRatioMin?: number;
@@ -254,6 +256,7 @@ export async function createVirtualPlayer(input: VirtualPlayerInput) {
         canContinue: input.canContinue ?? false,
         canThrowDice: input.canThrowDice ?? true,
         canGroupPacket: input.canGroupPacket ?? false,
+        canClaimGroupPacket: input.canClaimGroupPacket ?? true,
         canClaimSim: input.canClaimSim ?? true,
         bidWeight,
         betRatioMin,
@@ -303,6 +306,7 @@ export async function updateVirtualPlayer(
   if (patch.canContinue !== undefined) data.canContinue = patch.canContinue;
   if (patch.canThrowDice !== undefined) data.canThrowDice = patch.canThrowDice;
   if (patch.canGroupPacket !== undefined) data.canGroupPacket = patch.canGroupPacket;
+  if (patch.canClaimGroupPacket !== undefined) data.canClaimGroupPacket = patch.canClaimGroupPacket;
   if (patch.canClaimSim !== undefined) data.canClaimSim = patch.canClaimSim;
   if (patch.bidWeight !== undefined) data.bidWeight = clampRatio(patch.bidWeight, existing.bidWeight);
   if (patch.betRatioMin !== undefined) {
@@ -473,6 +477,19 @@ export async function topUpVirtualIfNeeded(userId: string, operatorId = 'SYSTEM'
   if (available >= profile.targetBalanceCents) return null;
   const need = profile.targetBalanceCents - available;
   return fundVirtualPlayer(userId, need, operatorId, '虚拟玩家自动补款');
+}
+
+/** 一键启用/停用虚拟玩家；roomId 为空时作用于全部 */
+export async function setVirtualPlayersEnabled(enabled: boolean, roomId?: string) {
+  if (roomId) {
+    const room = await prisma.room.findUnique({ where: { id: roomId }, select: { id: true } });
+    if (!room) throw new GameError('ROOM_NOT_FOUND');
+  }
+  const result = await prisma.virtualPlayer.updateMany({
+    where: roomId ? { roomId } : {},
+    data: { enabled },
+  });
+  return { count: result.count };
 }
 
 export async function joinVirtualPlayer(id: string) {

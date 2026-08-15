@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { api } from '../api';
+import { goBack } from '../lib/nav';
 import { LegalLinks } from './LegalDoc';
 
 type KycSnapshot = Awaited<ReturnType<typeof api.me>>['kyc'];
@@ -14,16 +15,21 @@ export default function KycForm({ onDone }: { onDone: () => Promise<void> }) {
   const [agreed, setAgreed] = useState(false);
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [loadFailed, setLoadFailed] = useState(false);
+  const [retryKey, setRetryKey] = useState(0);
   const [error, setError] = useState('');
   const navigate = useNavigate();
+  const location = useLocation();
 
   useEffect(() => {
+    setLoading(true);
+    setLoadFailed(false);
     api
       .me()
       .then((me) => setSnapshot(me.kyc))
-      .catch(() => undefined)
+      .catch(() => setLoadFailed(true))
       .finally(() => setLoading(false));
-  }, []);
+  }, [retryKey]);
 
   const set = (k: keyof typeof form) => (e: React.ChangeEvent<HTMLInputElement>) =>
     setForm((f) => ({ ...f, [k]: e.target.value }));
@@ -52,10 +58,34 @@ export default function KycForm({ onDone }: { onDone: () => Promise<void> }) {
 
   if (loading) return <div className="loading">加载中…</div>;
 
+  if (loadFailed) {
+    return (
+      <div className="page subpage kyc-page">
+        <header className="subpage-header">
+          <button type="button" onClick={() => goBack(navigate, location)} aria-label="返回">
+            ‹
+          </button>
+          <div>
+            <span className="eyebrow">身份核验</span>
+            <h1>实名认证</h1>
+          </div>
+          <span />
+        </header>
+        <section className="feature-load-error" role="alert">
+          <strong>认证状态没有加载成功</strong>
+          <p>请检查网络后重试，避免重复提交认证资料。</p>
+          <button type="button" onClick={() => setRetryKey((key) => key + 1)}>
+            重试
+          </button>
+        </section>
+      </div>
+    );
+  }
+
   return (
     <div className="page subpage kyc-page">
       <header className="subpage-header">
-        <button type="button" onClick={() => navigate(-1)} aria-label="返回">
+        <button type="button" onClick={() => goBack(navigate, location)} aria-label="返回">
           ‹
         </button>
         <div>
@@ -97,7 +127,7 @@ export default function KycForm({ onDone }: { onDone: () => Promise<void> }) {
               管理提现账户
             </button>
           )}
-          <button className="btn secondary" type="button" onClick={() => navigate(-1)}>
+          <button className="btn secondary" type="button" onClick={() => goBack(navigate, location)}>
             返回
           </button>
         </section>

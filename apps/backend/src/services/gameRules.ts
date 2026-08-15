@@ -64,29 +64,131 @@ export type GameRuleDocumentInput = z.infer<typeof gameRuleDocumentInput>;
 
 const supremeSections: GameRuleDocumentInput['sections'] = [
   {
+    id: 'overview',
+    title: '游戏简介',
+    body:
+      '至尊牛牛是基于 Touch n Go eWallet 红包链接的多人对战玩法。\n' +
+      '每局由一位玩家通过竞标庄钱做「庄家」，闲家自由下注，系统统一发出 TNG 红包链接，按抢到的金额识别「点数 / 牌型」并比对庄闲大小，胜者按倍数赢取庄家筹码，平台抽取小额抽水。',
+  },
+  {
+    id: 'where-to-play',
+    title: '在哪里玩',
+    body:
+      '本游戏在「至尊牛牛互动群」内进行，请先进入「我的消息 → 至尊牛牛互动群」参与对局。竞标庄钱、下注、抢包等动作都在该群内完成。',
+  },
+  {
+    id: 'roles',
+    title: '角色说明',
+    body:
+      '庄家：通过竞标庄钱上庄获得的玩家，承担本局所有闲家的输赢，赔付上限为庄池金额。\n' +
+      '闲家：未做庄的其他玩家，可在下注阶段下注与庄家对赌；不下注即视为本局弃权。',
+  },
+  {
     id: 'flow',
     title: '游戏流程',
-    body: '竞标庄家 → 玩家下注 → 庄家投骰 → 发放红包 → 玩家抢包 → 系统按牌型自动结算。',
+    body:
+      '1. 大厅阶段\n' +
+      '玩家进入对应群组房间等待开局；系统在凑够最低人数后自动开启下一局。\n' +
+      '2. 上庄 · 竞标庄钱\n' +
+      '所有玩家可在倒计时内输入金额竞标庄钱，最高出价者成为本局庄家，相应金额从余额中冻结作「庄池」。\n' +
+      '续庄：上一局做庄的玩家如果选择续庄，将沿用上一局的庄钱继续做庄，无需再次竞标；同一玩家每桌仅可续庄一次。\n' +
+      '无人竞标庄钱：本局取消，不进入下注阶段。\n' +
+      '余额不足：系统会拒绝竞标并退回出价。\n' +
+      '3. 下注阶段\n' +
+      '除庄家外的玩家可在「下注范围」内下注，倒计时结束即停止。\n' +
+      '系统按本局最高牌型倍数（默认 17 倍）计算余额可承担的最高下注；输入过高时自动降低并显示实际接受金额。\n' +
+      '未下注：视为本局弃权，不参与结算（不赢不输）。\n' +
+      '下注成功：系统冻结「实际下注 × 本局最高倍数」作为最大赔付预留金，撤回或结算后退回未使用部分。\n' +
+      '4. 系统发包\n' +
+      '下注阶段结束后，系统统一发出 TNG 红包链接到游戏群。庄家与所有已下注的闲家依次抢包；抢到金额即为本人本局的「红包金额」。\n' +
+      '5. 抢额识别\n' +
+      '系统按红包金额的小数与整数位计算「点数」与「牌型」（详见下方「点数计算」「牌型与倍数」章节）。\n' +
+      '6. 结算\n' +
+      '系统逐个比对庄家与闲家的牌型 / 点数，按倍数结算并扣除抽水：\n' +
+      '闲家赢：庄家从庄池支付倍数 × 下注，平台抽取闲赢抽水（默认 3%）。\n' +
+      '闲家输：按庄家牌型倍数从闲家预留金赔付，平台抽取庄家盈利的抽水（默认 5%）。\n' +
+      '牌型等级及点数相同：继续比较红包金额；金额完全相同则平局退回。\n' +
+      '庄池不足赔付：以庄池余额为上限，不足部分免赔。',
+  },
+  {
+    id: 'points',
+    title: '点数计算',
+    body:
+      '将红包金额（含小数点后两位）的所有数字相加，取个位数即为「点数」。\n' +
+      '例：3.42　3 + 4 + 2 = 9　9 点\n' +
+      '总和为 0 或末位为 0 时显示为 10 点（即「牛牛」最大点数）。',
   },
   {
     id: 'hands',
-    title: '牌型与大小',
-    body: '系统根据红包金额尾数计算牛牛牌型；同牌型按点数及既定优先级比较，具体倍数以本页实时配置为准。',
+    title: '牌型与倍数（由高到低）',
+    body:
+      '豹子（17 倍）：三位非零相同数字，如 1.11 / 7.77 / 9.99。\n' +
+      '满牛（15 倍）：整数金额，如 1.00 / 5.00 / 88.00，即「牛牛」最大牌型。\n' +
+      '反顺（14 倍）：三位数字严格递减，如 9.87 / 3.21 / 2.10。\n' +
+      '顺子（13 倍）：三位数字严格递增，如 0.12 / 1.23 / 7.89。\n' +
+      '对子（12 倍）：末两位相同非零数字，如 1.22 / 7.55。\n' +
+      '金牛（11 倍）：仅一位非零数字，如 0.10 / 0.50。\n' +
+      '普通：按 1–10 点数倍数结算。\n' +
+      '实际倍数以游戏内显示为准（与后台配置实时同步）。',
   },
   {
-    id: 'betting',
-    title: '下注与梭哈',
-    body: '仅在下注阶段接受操作。普通下注、梭哈范围及竞标上下限由当前游戏配置决定，封盘后不可修改。',
+    id: 'comparison',
+    title: '牌型比较规则',
+    body:
+      '先比牌型等级：豹子 ＞ 满牛 ＞ 反顺 ＞ 顺子 ＞ 对子 ＞ 金牛 ＞ 普通。\n' +
+      '等级不同：高等级胜。\n' +
+      '等级相同 / 点数相同：比红包金额，金额大者胜。\n' +
+      '例：2.80（10 点）赢 1.09（10 点）。\n' +
+      '等级相同且金额完全相同：视为平局，本对不结算（双方下注金额原路返回）。\n' +
+      '例：2.80 平 2.80。',
   },
   {
-    id: 'settlement',
-    title: '结算与费用',
-    body: '余额先冻结后结算，取消局原路退回。玩家盈利抽水、庄家盈利抽水及相关费用以本局配置快照为准。',
+    id: 'banker',
+    title: '如果您是庄家',
+    body:
+      '本局所有已下注的闲家与您对赌。\n' +
+      '赔付总额以「庄池」（您的中标金额）为上限，不会超过庄池亏损。\n' +
+      '庄家盈利时，平台从盈利中抽取庄家抽水（默认 5%）。\n' +
+      '本局结束后可选择「续庄」，沿用相同的庄钱继续坐庄；同一玩家每桌仅可续庄一次。',
   },
   {
-    id: 'fairness',
-    title: '公平与风险提示',
-    body: '每局开始时冻结规则快照，后台后续修改只影响下一局。请理性参与并妥善保管账户及支付密码。',
+    id: 'player',
+    title: '如果您是闲家',
+    body:
+      '请在下注倒计时内完成下注；超时未下注视为弃权，不参与结算。\n' +
+      '最高可下注 = 当前可承担余额 ÷ 本局最高牌型倍数（默认 17），向下取整到完整 RM；超过时系统自动按最高可下注额接受。\n' +
+      '赢家：按牌型倍数 × 您的下注获得收益（扣闲赢抽水）。\n' +
+      '输家：按庄家牌型倍数从已冻结的最大赔付预留金扣除，剩余预留金自动退回。\n' +
+      '未下注 / 弃权：本局对您不结算，余额不变。',
+  },
+  {
+    id: 'rewards',
+    title: '棋牌奖励',
+    body:
+      '每日抢到指定牌型组合即可领取额外奖励：\n' +
+      '豹子王（豹子 ×3）：奖励 RM 288.88。\n' +
+      '满牛王（满牛 ×3）：奖励 RM 288.88。\n' +
+      '顺子王（顺子 ×3）：奖励 RM 188.88。\n' +
+      '反顺王（反顺 ×3）：奖励 RM 188.88。\n' +
+      '每日 0 点重新计算，未完成的进度不会跨天累计。具体牌型要求与奖励金额以游戏内公告为准。',
+  },
+  {
+    id: 'special-cases',
+    title: '特殊情况',
+    body:
+      '无人竞标庄钱上庄：本局自动取消，无人参与结算。\n' +
+      '下注阶段无人下注：本局取消，庄池金额全额退回庄家。\n' +
+      '红包链接异常 / 失效：系统自动取消本局，所有冻结金额原路退回。\n' +
+      '抢包超时：未抢部分按规则自动结算或退回。',
+  },
+  {
+    id: 'notes',
+    title: '注意事项',
+    body:
+      '上庄前请确认账户余额足够覆盖庄池；不足将自动退回竞标庄钱。\n' +
+      '红包链接由系统统一发出，禁止玩家私下分享或冒充系统链接。\n' +
+      '抢包顺序按操作时间确定，请提前准备 TNG 客户端。\n' +
+      '牌型 / 倍数 / 抽水比例 / 服务费等数值会根据运营情况调整，请以游戏内显示为准。',
   },
 ];
 
@@ -96,9 +198,8 @@ function defaultRuleDocument(
   const game = GAME_CATALOG[gameCode];
   if (gameCode === SUPREME_NIUNIU_GAME_CODE) {
     return {
-      title: '至尊牛牛游戏规则',
-      summary:
-        '抢红包比牌型，庄闲实时结算。所有资金数值以开局时冻结的游戏配置为准。',
+      title: '至尊牛牛玩法规则',
+      summary: '',
       sections: supremeSections,
       status: 'PUBLISHED',
     };
@@ -122,9 +223,70 @@ function defaultRuleDocument(
   };
 }
 
+function replaceLegacySupremeBrand(value: string): string {
+  return value.replace(/12(?:年)?牛牛?/g, '至尊牛牛');
+}
+
+function replaceLegacyBrandInSections(
+  sections: Prisma.JsonValue,
+): Prisma.InputJsonValue {
+  return JSON.parse(
+    replaceLegacySupremeBrand(JSON.stringify(sections)),
+  ) as Prisma.InputJsonValue;
+}
+
+function sectionIds(sections: Prisma.JsonValue): string[] {
+  if (!Array.isArray(sections)) return [];
+  return sections.flatMap((section) => {
+    if (
+      section &&
+      typeof section === 'object' &&
+      !Array.isArray(section) &&
+      typeof section.id === 'string'
+    ) {
+      return [section.id];
+    }
+    return [];
+  });
+}
+
+function isCompactSystemSupremeRules(document: {
+  updatedBy: string | null;
+  sections: Prisma.JsonValue;
+}): boolean {
+  // 早期 seed 数据没有写 updatedBy；管理员发布过的同名章节不可自动覆盖。
+  if (document.updatedBy !== null && document.updatedBy !== 'SYSTEM') return false;
+  return (
+    sectionIds(document.sections).join(',') ===
+    'flow,hands,betting,settlement,fairness'
+  );
+}
+
 export async function ensureGameRuleDefaults(): Promise<void> {
   for (const gameCode of SUPPORTED_GAME_CODES) {
     const defaults = defaultRuleDocument(gameCode);
+    const existing = await prisma.gameRuleDocument.findUnique({
+      where: { gameCode },
+    });
+    const upgradeCompactDefault =
+      gameCode === SUPREME_NIUNIU_GAME_CODE &&
+      !!existing &&
+      isCompactSystemSupremeRules(existing);
+    const normalizedTitle = existing
+      ? replaceLegacySupremeBrand(existing.title)
+      : '';
+    const normalizedSummary = existing
+      ? replaceLegacySupremeBrand(existing.summary)
+      : '';
+    const normalizedSections = existing
+      ? replaceLegacyBrandInSections(existing.sections)
+      : ([] as Prisma.InputJsonValue);
+    const hasLegacyBrand =
+      !!existing &&
+      (normalizedTitle !== existing.title ||
+        normalizedSummary !== existing.summary ||
+        JSON.stringify(normalizedSections) !== JSON.stringify(existing.sections));
+
     await prisma.gameRuleDocument.upsert({
       where: { gameCode },
       create: {
@@ -137,7 +299,24 @@ export async function ensureGameRuleDefaults(): Promise<void> {
         updatedBy: 'SYSTEM',
         publishedAt: new Date(),
       },
-      update: {},
+      update: upgradeCompactDefault
+        ? {
+            title: defaults.title,
+            summary: defaults.summary,
+            sections: defaults.sections as Prisma.InputJsonValue,
+            status: defaults.status,
+            version: { increment: 1 },
+            updatedBy: 'SYSTEM',
+            publishedAt: new Date(),
+          }
+        : hasLegacyBrand
+          ? {
+              title: normalizedTitle,
+              summary: normalizedSummary,
+              sections: normalizedSections,
+              version: { increment: 1 },
+            }
+          : {},
     });
   }
 }

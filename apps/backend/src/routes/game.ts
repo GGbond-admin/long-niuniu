@@ -8,6 +8,7 @@ import { prisma } from '../lib/prisma.js';
 import {
   cancelRound,
   claimCandidates,
+  claimInternalPacket,
   claimUrlForParticipant,
   closeBetting,
   correctClaim,
@@ -16,6 +17,7 @@ import {
   forfeitMissingPlayer,
   GameError,
   pauseAssistantService,
+  publishInternalPacket,
   publishPacket,
   refreshUnannouncedClaimDeadline,
   reconcileCancelledPacket,
@@ -26,7 +28,12 @@ import {
   startRound,
 } from '../services/game.js';
 import { gameBus } from '../services/gameBus.js';
-import { getGameSettings, setAssistantService } from '../services/gameSettings.js';
+import { finalizeInternalRound } from '../services/internalPacket.js';
+import {
+  getGameSettings,
+  setAssistantService,
+  setPacketChannel,
+} from '../services/gameSettings.js';
 import { processRoundRewards } from '../services/rewards.js';
 import { malaysiaDay } from '../services/rebates.js';
 import {
@@ -311,6 +318,46 @@ export async function gameRoutes(app: FastifyInstance) {
     };
   });
 
+  /** 红包结束后仍可点开查看抢包/认额名单（微信式手气榜） */
+  app.get('/api/game/packets/:id', { preHandler: [app.authUser] }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const packet = await prisma.packet.findUnique({
+      where: { id },
+      include: {
+        round: {
+          select: {
+            bankerId: true,
+            phase: true,
+            claims: {
+              include: {
+                user: { select: { uid: true, nickname: true, avatarUrl: true } },
+              },
+              orderBy: { createdAt: 'asc' },
+            },
+          },
+        },
+      },
+    });
+    if (!packet) return reply.code(404).send({ error: 'PACKET_NOT_FOUND' });
+    return {
+      id: packet.id,
+      channel: packet.channel,
+      status: packet.status,
+      phase: packet.round.phase,
+      totalCents: String(packet.totalCents),
+      participantCount: packet.participantCount,
+      claims: packet.round.claims.map((claim) => ({
+        uid: claim.user.uid,
+        nickname: claim.user.nickname,
+        avatarUrl: claim.user.avatarUrl,
+        amountCents: String(claim.amountCents),
+        isBanker: !!packet.round.bankerId && claim.userId === packet.round.bankerId,
+        isTail: claim.source === 'AUTO_TAIL',
+        at: (claim.confirmedAt ?? claim.createdAt).toISOString(),
+      })),
+    };
+  });
+
   app.post(
     '/api/game/packets/:id/claim',
     { preHandler: [app.authUser, app.requireKyc] },
@@ -318,6 +365,30 @@ export async function gameRoutes(app: FastifyInstance) {
       const { id } = req.params as { id: string };
       const userId = (req.user as { sub: string }).sub;
       try {
+        const packet = await prisma.packet.findUnique({
+          where: { id },
+          select: { channel: true, roundId: true },
+        });
+        if (packet?.channel === 'INTERNAL') {
+          const result = await claimInternalPacket(id, userId);
+          gameBus.claimRecorded({
+            roundId: packet.roundId,
+            userId,
+            amountCents: String(result.claim.amountCents),
+          });
+          if (result.complete) {
+            // 全员抢完立即自动结算；失败留给调度器超时兜底，不影响本次领取。
+            void finalizeInternalRound(packet.roundId).catch((error) => {
+              app.log.error(error, 'finalize internal round after claim failed');
+            });
+          }
+          return {
+            channel: 'INTERNAL',
+            amountCents: String(result.claim.amountCents),
+            handType: result.claim.handType,
+            points: result.claim.points,
+          };
+        }
         return { url: await claimUrlForParticipant(id, userId) };
       } catch (error) {
         if (error instanceof GameError && error.code === 'NOT_ELIGIBLE_TO_CLAIM') {
@@ -963,6 +1034,7 @@ export async function adminGameRoutes(app: FastifyInstance) {
             assistantEnabled: settings.round.assistantEnabled !== false,
             autoStart: Boolean(settings.round.autoStart),
           },
+          packetChannel: settings.round.packetChannel === 'INTERNAL' ? 'INTERNAL' : 'TNG',
         };
       }),
       botService: {
@@ -1453,6 +1525,75 @@ export async function adminGameRoutes(app: FastifyInstance) {
     return { ok: true, packet };
   });
 
+  /** 本局改用小助手直发内部红包（不依赖发包方式配置，运营可临时切换） */
+  app.post(
+    '/api/admin/rounds/:id/packet/internal',
+    { preHandler: operations },
+    async (req, reply) => {
+      const { id } = req.params as { id: string };
+      const adminId = (req.user as { sub: string }).sub;
+      const round = await requireSupportedRound(id);
+      let packet;
+      try {
+        packet = await publishInternalPacket({ roundId: id, actorId: adminId });
+      } catch (error) {
+        if (error instanceof GameError && error.code === 'BANKER_DICE_NOT_READY') {
+          return reply.code(409).send({
+            error: 'BANKER_DICE_NOT_READY',
+            message: '庄家还未完成投骰，投骰后才能发包',
+          });
+        }
+        throw error;
+      }
+      await appendGamePacketMessage(round.roomId, {
+        packetId: packet.id,
+        roundId: id,
+      });
+      await refreshUnannouncedClaimDeadline(id);
+      await ensureRoundAnnouncement({
+        roundId: id,
+        roomId: round.roomId,
+        to: RoundPhase.CLAIMING,
+      });
+      emitTransition(id, round.roomId, round.phase, RoundPhase.CLAIMING);
+      await prisma.auditLog.create({
+        data: {
+          adminId,
+          action: 'packet_publish_internal',
+          target: packet.id,
+          after: { roundId: id, channel: 'INTERNAL' },
+          ip: req.ip,
+        },
+      });
+      return { ok: true, packet };
+    },
+  );
+
+  /** 切换发包方式（TNG 链接 / 小助手直发）；进行中的牌局沿用原快照，下一局生效 */
+  app.post(
+    '/api/admin/rooms/:id/packet-channel',
+    { preHandler: operations },
+    async (req) => {
+      const { id } = req.params as { id: string };
+      const adminId = (req.user as { sub: string }).sub;
+      const { channel } = z
+        .object({ channel: z.enum(['TNG', 'INTERNAL']) })
+        .parse(req.body ?? {});
+      const room = await requireSupportedRoom(id);
+      const next = await setPacketChannel(room.gameCode, channel, adminId);
+      await prisma.auditLog.create({
+        data: {
+          adminId,
+          action: 'packet_channel_switch',
+          target: id,
+          after: { gameCode: room.gameCode, packetChannel: next.packetChannel },
+          ip: req.ip,
+        },
+      });
+      return { ok: true, packetChannel: next.packetChannel };
+    },
+  );
+
   app.get('/api/admin/claims/candidates', { preHandler: operations }, async (req) => {
     const { name } = z.object({ name: z.string().min(2).max(100) }).parse(req.query);
     return { items: await claimCandidates(name) };
@@ -1657,7 +1798,9 @@ export async function adminGameRoutes(app: FastifyInstance) {
           },
           _sum: { amountCents: true },
         });
-      const platformDebit = (accountType: 'PLATFORM_REWARD' | 'PLATFORM_REBATE') =>
+      const platformDebit = (
+        accountType: 'PLATFORM_REWARD' | 'PLATFORM_REBATE' | 'PLATFORM_PROFIT_POOL',
+      ) =>
         prisma.ledgerEntry.aggregate({
           where: { accountType, direction: 'DEBIT', userId: null, createdAt: window },
           _sum: { amountCents: true },
@@ -1665,12 +1808,15 @@ export async function adminGameRoutes(app: FastifyInstance) {
 
       const [
         settleSum,
+        rakePlayerSum,
+        rakeBankerSum,
         rakeLedger,
         seatFees,
         serviceFees,
         packetFees,
         rewardsPaid,
         rebatesPaid,
+        profitSharesPaid,
         deposits,
         withdrawals,
         settledRounds,
@@ -1682,12 +1828,21 @@ export async function adminGameRoutes(app: FastifyInstance) {
           where: { createdAt: window },
           _sum: { betCents: true, rakeCents: true, paidCents: true, shortfallCents: true },
         }),
+        prisma.settlement.aggregate({
+          where: { createdAt: window, outcome: 'PLAYER_WIN' },
+          _sum: { rakeCents: true },
+        }),
+        prisma.settlement.aggregate({
+          where: { createdAt: window, outcome: 'BANKER_WIN' },
+          _sum: { rakeCents: true },
+        }),
         platformCredit('PLATFORM_RAKE'),
         platformCredit('PLATFORM_FEES', ['fee_banker_seat']),
         platformCredit('PLATFORM_FEES', ['fee_service']),
         platformCredit('PLATFORM_RESERVE', ['fee_packet_agent']),
         platformDebit('PLATFORM_REWARD'),
         platformDebit('PLATFORM_REBATE'),
+        platformDebit('PLATFORM_PROFIT_POOL'),
         prisma.depositOrder.aggregate({
           where: { status: 'COMPLETED', reviewedAt: window },
           _sum: { amountCents: true },
@@ -1715,6 +1870,15 @@ export async function adminGameRoutes(app: FastifyInstance) {
       const balances = Object.fromEntries(
         accounts.map((account) => [account.accountType, String(account.balanceCents)]),
       );
+      // 平台当日净利（现金口径）= 抽水 + 上庄费 + 服务费 − 奖励 − 返水 − 代理分成
+      // 代包费与红包备付（PLATFORM_RESERVE）勾稽，不计入净利。
+      const netProfitCents =
+        (rakeLedger._sum.amountCents ?? 0n) +
+        (seatFees._sum.amountCents ?? 0n) +
+        (serviceFees._sum.amountCents ?? 0n) -
+        (rewardsPaid._sum.amountCents ?? 0n) -
+        (rebatesPaid._sum.amountCents ?? 0n) -
+        (profitSharesPaid._sum.amountCents ?? 0n);
       return {
         date,
         settledRounds,
@@ -1723,11 +1887,15 @@ export async function adminGameRoutes(app: FastifyInstance) {
         payoutsCents: String(settleSum._sum.paidCents ?? 0n),
         shortfallCents: String(settleSum._sum.shortfallCents ?? 0n),
         rakeCents: String(rakeLedger._sum.amountCents ?? 0n),
+        rakePlayerCents: String(rakePlayerSum._sum.rakeCents ?? 0n),
+        rakeBankerCents: String(rakeBankerSum._sum.rakeCents ?? 0n),
         seatFeeCents: String(seatFees._sum.amountCents ?? 0n),
         serviceFeeCents: String(serviceFees._sum.amountCents ?? 0n),
         packetFeeCents: String(packetFees._sum.amountCents ?? 0n),
         rewardsPaidCents: String(rewardsPaid._sum.amountCents ?? 0n),
         rebatesPaidCents: String(rebatesPaid._sum.amountCents ?? 0n),
+        profitSharesPaidCents: String(profitSharesPaid._sum.amountCents ?? 0n),
+        netProfitCents: String(netProfitCents),
         depositsCents: String(deposits._sum.amountCents ?? 0n),
         depositsCount: deposits._count._all,
         withdrawalsCents: String(withdrawals._sum.amountCents ?? 0n),

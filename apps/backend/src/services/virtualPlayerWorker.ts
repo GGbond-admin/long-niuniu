@@ -17,6 +17,7 @@ import {
 } from './game.js';
 import { gameBus, type RoundTransitionEvent } from './gameBus.js';
 import { getGameSettings, parseSettingsSnapshot } from './gameSettings.js';
+import { claimGroupPacket } from './groupPacket.js';
 import { appendChat } from './roomHub.js';
 import {
   listEnabledVirtualsForRoom,
@@ -37,6 +38,16 @@ const DEFAULT_CHAT_PHRASES = [
   'one more',
   'steady',
   'haha',
+];
+
+const PACKET_THANKS_PHRASES = [
+  '谢谢老板',
+  '发财发财',
+  'thanks boss',
+  '大吉大利',
+  '老板大气',
+  '好运来咯',
+  '接住了哈哈',
 ];
 
 function delayKey(roundId: string, userId: string, action: string) {
@@ -296,9 +307,86 @@ async function actOnBetPhase(roomId: string, roundId: string) {
         amountCents = pickBetAmountCents(liveRange);
       }
 
-      echoPlayerAmount(roomId, profile.user, amountCents, isAllIn);
-      await placeBet(roundId, profile.userId, amountCents, isAllIn);
+      const acceptance = await placeBet(roundId, profile.userId, amountCents, isAllIn);
+      echoPlayerAmount(roomId, profile.user, acceptance.acceptedCents, isAllIn);
       await maybeChat(roomId, profile.user, profile.chatPhrases, profile.canChat);
+    });
+  }
+}
+
+/**
+ * 群红包发出后调度虚拟玩家抢包：错开延迟、偶尔跳过，更像真人；
+ * 领取前复查红包仍可抢、玩家仍启用且具备能力。
+ */
+export function scheduleVirtualGroupPacketClaims(params: {
+  roomId: string;
+  packetId: string;
+  senderId: string;
+}) {
+  void planGroupPacketClaims(params).catch((error) => {
+    console.error('[virtual-player] group packet planning failed', params.packetId, error);
+  });
+}
+
+async function planGroupPacketClaims(params: {
+  roomId: string;
+  packetId: string;
+  senderId: string;
+}) {
+  const { roomId, packetId, senderId } = params;
+  const virtuals = await listEnabledVirtualsForRoom(roomId);
+  const grabbers = virtuals.filter(
+    (profile) =>
+      profile.canClaimGroupPacket
+      && profile.user.roomMemberships.length
+      && profile.userId !== senderId,
+  );
+  if (!grabbers.length) return;
+
+  // 打乱顺序，避免每次都是同一批人先抢
+  for (let i = grabbers.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [grabbers[i], grabbers[j]] = [grabbers[j]!, grabbers[i]!];
+  }
+
+  let slot = 0;
+  for (const profile of grabbers) {
+    // 约 15% 本次不抢，更像真人
+    if (Math.random() < 0.15) continue;
+    const delayMs = Math.floor(
+      1_200 + slot * randBetween(600, 1_600) + randBetween(0, 2_500),
+    );
+    slot += 1;
+    schedule(delayKey(packetId, profile.userId, 'grab'), delayMs, async () => {
+      const [packet, current] = await Promise.all([
+        prisma.groupPacket.findUnique({
+          where: { id: packetId },
+          select: { status: true, remainingCount: true, expiresAt: true },
+        }),
+        prisma.virtualPlayer.findUnique({
+          where: { userId: profile.userId },
+          select: { enabled: true, canClaimGroupPacket: true, canChat: true },
+        }),
+      ]);
+      if (!packet || packet.status !== 'ACTIVE' || packet.remainingCount <= 0) return;
+      if (packet.expiresAt <= new Date()) return;
+      if (!current?.enabled || !current.canClaimGroupPacket) return;
+
+      await claimGroupPacket({ packetId, userId: profile.userId });
+
+      if (current.canChat && Math.random() < 0.3) {
+        const text =
+          PACKET_THANKS_PHRASES[Math.floor(Math.random() * PACKET_THANKS_PHRASES.length)]!;
+        appendChat(roomId, {
+          type: 'TEXT',
+          content: text,
+          from: {
+            uid: profile.user.uid,
+            nickname: profile.user.nickname ?? profile.user.uid,
+            avatarUrl: profile.user.avatarUrl,
+          },
+        });
+      }
     });
   }
 }
@@ -489,6 +577,25 @@ function recoverVirtualActions(attempt = 0) {
 }
 
 async function recoverInPlayRounds() {
+  // 重启后补抢仍在进行中的群红包
+  const activePackets = await prisma.groupPacket.findMany({
+    where: {
+      status: 'ACTIVE',
+      remainingCount: { gt: 0 },
+      expiresAt: { gt: new Date() },
+    },
+    select: { id: true, roomId: true, senderId: true },
+    orderBy: { createdAt: 'desc' },
+    take: 100,
+  });
+  for (const packet of activePackets) {
+    scheduleVirtualGroupPacketClaims({
+      roomId: packet.roomId,
+      packetId: packet.id,
+      senderId: packet.senderId,
+    });
+  }
+
   const [rounds, recentContinuationCandidates] = await Promise.all([
     prisma.round.findMany({
       where: {
@@ -591,13 +698,18 @@ export async function actAsVirtualPlayer(params: {
 
   if (params.action === 'bet') {
     if (!params.amountCents) throw new GameError('INVALID_AMOUNT');
-    echoPlayerAmount(
-      profile.roomId,
-      profile.user,
+    const acceptance = await placeBet(
+      round.id,
+      profile.userId,
       params.amountCents,
       Boolean(params.isAllIn),
     );
-    await placeBet(round.id, profile.userId, params.amountCents, Boolean(params.isAllIn));
+    echoPlayerAmount(
+      profile.roomId,
+      profile.user,
+      acceptance.acceptedCents,
+      Boolean(params.isAllIn),
+    );
     return { ok: true };
   }
 

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
+import { goBack } from '../lib/nav';
 import { api } from '../api';
 import type { Session } from '../App';
 import { IconChevronRight } from '../components/Icons';
@@ -27,6 +28,7 @@ export default function ProfileDetail({
   onNicknameChange?: (nickname: string) => void;
 }) {
   const navigate = useNavigate();
+  const location = useLocation();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
@@ -110,7 +112,7 @@ export default function ProfileDetail({
   return (
     <div className="page subpage profile-detail-page">
       <header className="subpage-header">
-        <button type="button" onClick={() => navigate(-1)} aria-label="返回">
+        <button type="button" onClick={() => goBack(navigate, location)} aria-label="返回">
           ‹
         </button>
         <div>

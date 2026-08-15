@@ -31,6 +31,26 @@ type ChatMsg = {
   at: string;
 };
 
+type BetAcceptanceNotice = {
+  requestedAmountCents: string;
+  liabilityBalanceCents: string;
+  maxAffordableCents: string;
+  roomMaxCents: string;
+  maxAcceptedCents: string;
+  maxMultiplier: number;
+  reservedCents: string;
+  adjusted: boolean;
+  adjustedBy: string[];
+};
+
+type PrivateBetNoticePayload = {
+  status: 'success' | 'failed' | 'unknown';
+  action: 'bet' | 'all_in';
+  amountCents: string;
+  acceptance?: BetAcceptanceNotice;
+  reason?: string;
+};
+
 type CountdownPayload = {
   mode?: 'bid' | 'bet' | 'claim' | 'lock';
   endsAt?: string;
@@ -109,14 +129,15 @@ type FeedItem =
       subtitle: string;
       seconds?: number | null;
       claimable?: boolean;
+      /** 红包已结束/过期：点击查看抢包名单而非领取 */
+      view?: boolean;
       demo?: boolean;
       waiting?: boolean;
       /** 作为真人聊天气泡展示（微信红包样式） */
       asChat?: boolean;
       name?: string;
       avatar?: string | null;
-    }
-  | { kind: 'score'; id: string; seqNo: number; lines: string[]; footer: string };
+    };
 
 const BANNER_ALT: Record<string, string> = {
   'bet-start': '开始下注',
@@ -126,6 +147,7 @@ const BANNER_ALT: Record<string, string> = {
 };
 
 const ASSISTANT_AVATAR = '/avatars/assistant.jpg';
+const GAME_PACKET_GREETING = '恭喜发财，大吉大利';
 const LEADERBOARD_EMBLEM = '/game-ui/leaderboard-emblem-128.png';
 const REWARDS_EMBLEM = '/game-ui/rewards-emblem-128.png';
 
@@ -144,6 +166,54 @@ const PACKET_ERROR_TEXT: Record<string, string> = {
 function packetErrorText(e: unknown): string {
   const raw = (e as Error).message || '';
   return PACKET_ERROR_TEXT[raw] ?? raw ?? '操作失败';
+}
+
+function parseBetAcceptanceNotice(value: unknown): BetAcceptanceNotice | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const row = value as Record<string, unknown>;
+  const stringKeys = [
+    'requestedAmountCents',
+    'liabilityBalanceCents',
+    'maxAffordableCents',
+    'roomMaxCents',
+    'maxAcceptedCents',
+    'reservedCents',
+  ] as const;
+  if (stringKeys.some((key) => typeof row[key] !== 'string')) return undefined;
+  if (
+    typeof row.maxMultiplier !== 'number' ||
+    typeof row.adjusted !== 'boolean' ||
+    !Array.isArray(row.adjustedBy)
+  ) {
+    return undefined;
+  }
+  return {
+    requestedAmountCents: row.requestedAmountCents as string,
+    liabilityBalanceCents: row.liabilityBalanceCents as string,
+    maxAffordableCents: row.maxAffordableCents as string,
+    roomMaxCents: row.roomMaxCents as string,
+    maxAcceptedCents: row.maxAcceptedCents as string,
+    reservedCents: row.reservedCents as string,
+    maxMultiplier: row.maxMultiplier,
+    adjusted: row.adjusted,
+    adjustedBy: row.adjustedBy.map(String),
+  };
+}
+
+function parsePendingBetCommand(value: string): {
+  action: 'bet' | 'all_in';
+  amountCents: string;
+} | null {
+  const match = value.trim().match(/^(sh\s*)?(\d+)(?:\.(\d{1,2}))?$/i);
+  if (!match) return null;
+  const whole = Number(match[2]);
+  const fraction = Number((match[3] ?? '').padEnd(2, '0'));
+  const cents = whole * 100 + fraction;
+  if (!Number.isSafeInteger(cents) || cents <= 0) return null;
+  return {
+    action: match[1] ? 'all_in' : 'bet',
+    amountCents: String(cents),
+  };
 }
 
 function parseUserPacketContent(raw: string): { id: string; greeting: string } {
@@ -535,7 +605,7 @@ const DEMO_FEED: FeedItem[] = [
   {
     kind: 'system',
     id: 'demo-claim-end',
-    text: '⏰ 抢包已结束，正在等待平台核对领取明细并公布成绩单。',
+    text: '⏰ 抢包已结束，正在等待平台核对领取明细并结算。',
     time: '21:43',
   },
   {
@@ -545,20 +615,9 @@ const DEMO_FEED: FeedItem[] = [
     time: '21:43',
   },
   {
-    kind: 'score',
-    id: 'demo-score',
-    seqNo: 1,
-    lines: [
-      '@小美 抢到 2.80 · 庄家 · 10点',
-      '@阿强 抢到 1.22 · 下注 25 · 对子 · 赢 ×12',
-      '@阿杰 抢到 0.31 · 梭哈 200 · 自爆 · 输',
-    ],
-    footer: '庄家汇总：抽水后盈利 RM 168.50 · 上庄费/服务费/代包费已扣',
-  },
-  {
     kind: 'system',
     id: 'demo-next',
-    text: '📣 下一局准备中。上方为演示流程：竞标 → @宣布庄家 → 下注 → 小助手发包 → 抢包 → 成绩单。',
+    text: '📣 下一局准备中。上方为演示流程：竞标 → @宣布庄家 → 下注 → 小助手发包 → 抢包 → 结算。',
     time: '21:44',
   },
 ];
@@ -592,18 +651,72 @@ function fillRemaining(template: string, remaining: number): string {
   return template.replace(/\{\{\s*remaining\s*\}\}/g, String(remaining));
 }
 
+const SCORE_HAND_TEXT: Record<string, string> = {
+  BAOZI: '豹子',
+  MANNIU: '满牛',
+  FANSHUN: '反顺',
+  SHUNZI: '顺子',
+  DUIZI: '对子',
+  JINNIU: '金牛',
+  MIANSI: '免死',
+  NORMAL: '普通',
+};
+
+function scoreRm(cents: unknown): string {
+  const n = Number(cents ?? 0);
+  return Number.isFinite(n) ? (n / 100).toFixed(2) : '0.00';
+}
+
+function scoreSignedRm(cents: unknown): string {
+  const n = Number(cents ?? 0);
+  return `${n >= 0 ? '+' : '-'}RM ${(Math.abs(n) / 100).toFixed(2)}`;
+}
+
+function scoreHandText(type: unknown, points: unknown): string {
+  if (type === 'NORMAL') return `${points}点`;
+  return SCORE_HAND_TEXT[String(type)] ?? String(type ?? '');
+}
+
 function scoreLines(board: RoomState['lastScoreboard']): string[] {
   if (!board) return [];
-  if (Array.isArray(board.playerLines)) return board.playerLines.map((line) => String(line));
   if (typeof board.playerLines === 'string') return board.playerLines.split('\n');
-  return [JSON.stringify(board.playerLines)];
+  if (!Array.isArray(board.playerLines)) return [];
+  return board.playerLines.map((raw) => {
+    if (typeof raw === 'string') return raw;
+    const line = (raw ?? {}) as Record<string, unknown>;
+    const name = String(line.nickname || (line.uid ? `UID ${line.uid}` : '玩家'));
+    const multiplier = Number(line.multiplier ?? 0);
+    const outcome =
+      line.outcome === 'PLAYER_WIN'
+        ? `赢 ${scoreSignedRm(line.netCents)}`
+        : line.outcome === 'BANKER_WIN'
+          ? `输 ${scoreSignedRm(line.netCents)}${multiplier > 1 ? `（庄家牌型 ×${multiplier}）` : ''}`
+          : '平';
+    const shortfall = Number(line.shortfallCents ?? 0);
+    return (
+      `${line.isBust ? '💥 ' : ''}${name} · 抢 RM ${scoreRm(line.claimCents)} · ` +
+      `${line.isAllIn ? '梭哈' : '下注'} RM ${scoreRm(line.betCents)} · ` +
+      `${scoreHandText(line.handType, line.points)} → ${outcome}` +
+      `${shortfall > 0 ? `（免赔 RM ${scoreRm(shortfall)}）` : ''} · ` +
+      `积分 RM ${scoreRm(line.balanceBeforeCents)} → RM ${scoreRm(line.balanceAfterCents)}`
+    );
+  });
 }
 
 function scoreFooter(board: RoomState['lastScoreboard']): string {
   if (!board) return '';
   if (typeof board.bankerSummary === 'string') return board.bankerSummary;
-  if (board.bankerSummary) return JSON.stringify(board.bankerSummary);
-  return '';
+  const banker = board.bankerSummary as Record<string, unknown> | null;
+  if (!banker || typeof banker !== 'object') return '';
+  const fees = (banker.fees ?? {}) as Record<string, unknown>;
+  const name = String(banker.nickname || (banker.uid ? `UID ${banker.uid}` : '庄家'));
+  return [
+    `${banker.isBust ? '💥 ' : ''}庄家 ${name} · 抢 RM ${scoreRm(banker.claimCents)} · ${scoreHandText(banker.handType, banker.points)}`,
+    `庄家盈利 ${scoreSignedRm(banker.grossCents ?? banker.netCents)}（已扣抽水）`,
+    `上庄费 -RM ${scoreRm(fees.seatFeeCents)} · 服务费 -RM ${scoreRm(fees.serviceFeeCents)} · 代包费 -RM ${scoreRm(fees.packetFeeCents)}`,
+    `庄家实际盈利 ${scoreSignedRm(banker.netCents)}`,
+    `上庄积分 RM ${scoreRm(banker.balanceBeforeCents)} · 盈利 ${scoreSignedRm(banker.netCents)} · 庄总积分 RM ${scoreRm(banker.balanceAfterCents)}`,
+  ].join('\n');
 }
 
 type PlayLocationState = {
@@ -623,8 +736,8 @@ export default function GameRoom() {
   const navigate = useNavigate();
   const location = useLocation();
   const [searchParams] = useSearchParams();
-  /** 默认展示演示流；地址加 ?demo=0 可关闭 */
-  const showDemoFeed = searchParams.get('demo') !== '0';
+  /** 演示流仅供内部预览；地址加 ?demo=1 显式开启 */
+  const showDemoFeed = searchParams.get('demo') === '1';
   const [state, setState] = useState<RoomState | null>(null);
   const [chat, setChat] = useState<ChatMsg[]>([]);
   const [draft, setDraft] = useState('');
@@ -636,8 +749,17 @@ export default function GameRoom() {
     avatarUrl?: string | null;
   } | null>(null);
   const [loading, setLoading] = useState(true);
+  /** 实时连接状态：断线后自动重连，并在顶栏明确提示；kicked = 被移出房间等终态，不再重连 */
+  const [connState, setConnState] = useState<
+    'connecting' | 'online' | 'reconnecting' | 'kicked'
+  >('connecting');
+  const reconnectNowRef = useRef<() => void>(() => {});
   const [stickers, setStickers] = useState<Array<{ id: string; name: string; url: string }>>([]);
   const [diceSent, setDiceSent] = useState(false);
+  const [betPending, setBetPending] = useState(false);
+  const [betNotice, setBetNotice] = useState<
+    (PrivateBetNoticePayload & { id: number }) | null
+  >(null);
   /** 新到达的骰子消息在聊天里播放转动 */
   const [animatedDiceIds, setAnimatedDiceIds] = useState<Record<string, boolean>>({});
   /** packetId -> 已领金额（分）；'GONE' 表示已抢光/过期 */
@@ -703,6 +825,10 @@ export default function GameRoom() {
   const [rpBusy, setRpBusy] = useState(false);
   const streamRef = useRef<HTMLDivElement>(null);
   const socketRef = useRef<WebSocket | null>(null);
+  const betPendingRef = useRef(false);
+  const betPendingTimerRef = useRef<number | null>(null);
+  const betNoticeTimerRef = useRef<number | null>(null);
+  const privateBetNoticeIdRef = useRef(0);
   const [tipNotice, setTipNotice] = useState<{
     id: number;
     nickname: string;
@@ -714,6 +840,45 @@ export default function GameRoom() {
   const stickToBottomRef = useRef(true);
   const didInitialScrollRef = useRef(false);
   const [channelOpen, setChannelOpen] = useState(false);
+
+  function clearPendingBet() {
+    betPendingRef.current = false;
+    setBetPending(false);
+    if (betPendingTimerRef.current !== null) {
+      window.clearTimeout(betPendingTimerRef.current);
+      betPendingTimerRef.current = null;
+    }
+  }
+
+  function pushPrivateBetNotice(notice: PrivateBetNoticePayload) {
+    privateBetNoticeIdRef.current += 1;
+    const id = privateBetNoticeIdRef.current;
+    if (betNoticeTimerRef.current !== null) {
+      window.clearTimeout(betNoticeTimerRef.current);
+      betNoticeTimerRef.current = null;
+    }
+    setBetNotice({ ...notice, id });
+    const dismissMs =
+      notice.status === 'success' && notice.acceptance?.adjusted
+        ? 7_000
+        : notice.status === 'success'
+          ? 2_200
+          : notice.status === 'failed'
+            ? 3_200
+            : 4_000;
+    betNoticeTimerRef.current = window.setTimeout(() => {
+      setBetNotice((current) => (current?.id === id ? null : current));
+      betNoticeTimerRef.current = null;
+    }, dismissMs);
+  }
+
+  function dismissPrivateBetNotice() {
+    if (betNoticeTimerRef.current !== null) {
+      window.clearTimeout(betNoticeTimerRef.current);
+      betNoticeTimerRef.current = null;
+    }
+    setBetNotice(null);
+  }
 
   // 倒计时必须跟当前阶段绑定，避免沿用上阶段时间戳造成「还有 N 秒」的假象
   const phase = state?.round?.phase;
@@ -799,7 +964,7 @@ export default function GameRoom() {
         id: 'pin-tip',
         title: '至尊牛牛小通告',
         body: showDemoFeed
-          ? '演示流程预览中：竞标 → 宣布庄家 → 下注 → 抢包 → 成绩单。地址加 ?demo=0 可关闭演示。点击查看详情。'
+          ? '演示流程预览中（仅内部预览模式可见）：竞标 → 宣布庄家 → 下注 → 抢包 → 结算。'
           : liveBusy
             ? '请根据当前阶段完成竞标 / 下注 / 抢包。抢红包阶段请专注领取，勿退出页面。'
             : '至尊牛牛火热开局中，凑齐人数后自动开局。点击查看群内通告。',
@@ -906,6 +1071,18 @@ export default function GameRoom() {
           packet.roundId === state?.round?.id && state?.round?.phase === 'SENDING_PACKET';
         const canOpen =
           isCurrent && state?.round?.phase === 'CLAIMING' && state?.me.canClaim === true;
+        // 内部红包抢过后仍可点开查看手气名单
+        const canView =
+          isCurrent &&
+          state?.round?.packetChannel === 'INTERNAL' &&
+          !!state?.me.claimedAmountCents &&
+          (state?.round?.phase === 'CLAIMING' || state?.round?.phase === 'CLAIM_EXPIRED');
+        // 红包结束/过期后所有人都可点开回看抢包名单（微信式）
+        const viewEnded =
+          !canOpen &&
+          !canView &&
+          !isPublishingCurrentRound &&
+          (!isCurrent || state?.round?.phase === 'CLAIM_EXPIRED');
         if (isCurrent) hasCurrentGamePacket = true;
         items.push({
           kind: 'packet',
@@ -914,15 +1091,18 @@ export default function GameRoom() {
           title: packet.greeting,
           subtitle: canOpen
             ? '点击领取'
-            : isCurrent && state?.round?.phase === 'CLAIM_EXPIRED'
-              ? '红包已过期'
-              : isCurrent
-                ? '未参与本局，无法领取'
-                : isPublishingCurrentRound
-                  ? '红包已发出，等待开抢'
-                  : '红包已结束',
+            : canView
+              ? `已抢到 RM ${rm(state!.me.claimedAmountCents!)}，点击查看`
+              : isCurrent && state?.round?.phase === 'CLAIM_EXPIRED'
+                ? '红包已过期，点击查看'
+                : isCurrent
+                  ? '未参与本局，无法领取'
+                  : isPublishingCurrentRound
+                    ? '红包已发出，等待开抢'
+                    : '红包已结束，点击查看',
           seconds: canOpen ? seconds : null,
-          claimable: canOpen,
+          claimable: canOpen || canView,
+          view: viewEnded,
           waiting: isPublishingCurrentRound,
           demo: false,
           asChat: true,
@@ -976,6 +1156,9 @@ export default function GameRoom() {
     ) {
       const canOpen =
         state.round.phase === 'CLAIMING' && state.me.canClaim;
+      const canView =
+        state.round.packetChannel === 'INTERNAL' && !!state.me.claimedAmountCents;
+      const viewEnded = !canOpen && !canView && state.round.phase === 'CLAIM_EXPIRED';
       const fallbackPacket: FeedItem = {
         kind: 'packet',
         id: `packet-${state.round.packetId}`,
@@ -983,11 +1166,14 @@ export default function GameRoom() {
         title: '恭喜发财，大吉大利',
         subtitle: canOpen
           ? '点击领取'
-          : state.round.phase === 'CLAIM_EXPIRED'
-            ? '红包已过期'
-            : '未参与本局，无法领取',
+          : canView
+            ? `已抢到 RM ${rm(state.me.claimedAmountCents!)}，点击查看`
+            : state.round.phase === 'CLAIM_EXPIRED'
+              ? '红包已过期，点击查看'
+              : '未参与本局，无法领取',
         seconds: canOpen ? seconds : null,
-        claimable: canOpen,
+        claimable: canOpen || canView,
+        view: viewEnded,
         demo: false,
         asChat: true,
         name: '小助手',
@@ -1009,15 +1195,6 @@ export default function GameRoom() {
       else items.push(fallbackPacket);
     }
 
-    if (state?.lastScoreboard) {
-      items.push({
-        kind: 'score',
-        id: `score-${state.lastScoreboard.seqNo}`,
-        seqNo: state.lastScoreboard.seqNo,
-        lines: scoreLines(state.lastScoreboard),
-        footer: scoreFooter(state.lastScoreboard),
-      });
-    }
     return items;
   }, [state, chat, myUid, seconds, nowTick, showDemoFeed, liveBusy]);
 
@@ -1034,10 +1211,15 @@ export default function GameRoom() {
     let cancelled = false;
     let socket: WebSocket | null = null;
     let refreshTimer: number | null = null;
+    let reconnectTimer: number | null = null;
+    let reconnectAttempts = 0;
+    setConnState('connecting');
     stickToBottomRef.current = true;
     didInitialScrollRef.current = false;
     setChannelOpen(false);
     setChat([]);
+    clearPendingBet();
+    dismissPrivateBetNotice();
     const storedClaims = readStoredPacketClaims(roomId);
     packetClaimsRef.current = storedClaims;
     setPacketClaims(storedClaims);
@@ -1051,6 +1233,12 @@ export default function GameRoom() {
       }, 250);
     };
 
+    // 回到前台时若连接已断开，立即重连而不是等退避计时
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') reconnectNowRef.current();
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+
     (async () => {
       try {
         const [me, joined] = await Promise.all([api.me(), api.joinRoom(roomId)]);
@@ -1063,12 +1251,9 @@ export default function GameRoom() {
         setState(joined);
         setError('');
 
-        const auth = getToken();
-        if (!auth) throw new Error('未登录');
-        socket = new WebSocket(roomWsUrl(roomId, auth));
-        socketRef.current = socket;
+        if (!getToken()) throw new Error('未登录');
 
-        socket.onmessage = (event) => {
+        const handleSocketMessage = (event: MessageEvent) => {
           try {
             const payload = JSON.parse(String(event.data)) as {
               type?: string;
@@ -1078,6 +1263,10 @@ export default function GameRoom() {
               online?: number;
               nickname?: string;
               amountCents?: string;
+              status?: 'success' | 'failed';
+              action?: 'bet' | 'all_in';
+              acceptance?: unknown;
+              reason?: string;
               /** tip_thanks 附带祝福语 */
               tipMessage?: string;
               avatarUrl?: string | null;
@@ -1171,6 +1360,22 @@ export default function GameRoom() {
                 if (!exists) return [...prev.slice(-99), updated];
                 return prev.map((item) => (item.id === updated.id ? { ...item, ...updated } : item));
               });
+            } else if (
+              payload.type === 'bet_confirmation' &&
+              (payload.status === 'success' || payload.status === 'failed') &&
+              (payload.action === 'bet' || payload.action === 'all_in') &&
+              typeof payload.amountCents === 'string'
+            ) {
+              clearPendingBet();
+              setError('');
+              pushPrivateBetNotice({
+                status: payload.status,
+                action: payload.action,
+                amountCents: payload.amountCents,
+                acceptance: parseBetAcceptanceNotice(payload.acceptance),
+                reason: typeof payload.reason === 'string' ? payload.reason : undefined,
+              });
+              scheduleRefresh();
             } else if (payload.type === 'profile_update' && payload.user?.uid) {
               const profile = payload.user;
               setChat((prev) =>
@@ -1195,6 +1400,7 @@ export default function GameRoom() {
               }
               scheduleRefresh();
             } else if (payload.type === 'chat_error' && typeof payload.message === 'string') {
+              clearPendingBet();
               setError(payload.message);
               setDiceSent(false);
               // 指令被拒时立刻同步阶段，避免顶栏仍显示「竞标中」
@@ -1233,19 +1439,69 @@ export default function GameRoom() {
             // ignore
           }
         };
-        socket.onerror = () => setError('实时连接异常，可点右上角刷新状态');
-        socket.onclose = (event) => {
+        const connectSocket = () => {
           if (cancelled) return;
-          if (event.code === 4401 || event.reason === 'DEVICE_SESSION_EXPIRED') {
-            invalidateDeviceSession(
-              event.reason === 'DEVICE_SESSION_EXPIRED'
-                ? event.reason
-                : 'DEVICE_SESSION_EXPIRED',
+          if (reconnectTimer) {
+            window.clearTimeout(reconnectTimer);
+            reconnectTimer = null;
+          }
+          const auth = getToken();
+          if (!auth) return;
+          const ws = new WebSocket(roomWsUrl(roomId, auth));
+          socket = ws;
+          socketRef.current = ws;
+          ws.onopen = () => {
+            if (cancelled) return;
+            reconnectAttempts = 0;
+            setConnState('online');
+            // 重连成功后立即同步一次状态，补回断线期间错过的对局进展
+            scheduleRefresh();
+          };
+          ws.onmessage = handleSocketMessage;
+          ws.onclose = (event) => {
+            if (cancelled) return;
+            if (socketRef.current === ws) socketRef.current = null;
+            if (event.code === 4401 || event.reason === 'DEVICE_SESSION_EXPIRED') {
+              invalidateDeviceSession(
+                event.reason === 'DEVICE_SESSION_EXPIRED'
+                  ? event.reason
+                  : 'DEVICE_SESSION_EXPIRED',
+              );
+              return;
+            }
+            // 被移出房间 / 房间不可用属于终态：重连只会被立刻再次关闭，
+            // 停止重试并明确提示，避免顶栏永远「重连中…」
+            if (event.reason === 'NOT_IN_ROOM' || event.reason === 'GAME_NOT_SUPPORTED') {
+              setConnState('kicked');
+              setError(
+                event.reason === 'NOT_IN_ROOM'
+                  ? '您已不在互动群内，请返回后重新进入房间'
+                  : '该房间已不可用，请返回大厅',
+              );
+              return;
+            }
+            // 断线自动重连：指数退避，最长 15 秒重试一次
+            setConnState('reconnecting');
+            reconnectAttempts += 1;
+            const delay = Math.min(
+              15_000,
+              1_000 * 2 ** Math.min(reconnectAttempts - 1, 4),
             );
+            reconnectTimer = window.setTimeout(connectSocket, delay);
+          };
+        };
+        reconnectNowRef.current = () => {
+          if (
+            socket &&
+            (socket.readyState === WebSocket.OPEN ||
+              socket.readyState === WebSocket.CONNECTING)
+          ) {
             return;
           }
-          setError('实时连接已断开，请重新进入房间');
+          reconnectAttempts = 0;
+          connectSocket();
         };
+        connectSocket();
       } catch (e) {
         const code = (e as Error & { code?: string }).code;
         if (code === 'KYC_REQUIRED') {
@@ -1261,8 +1517,13 @@ export default function GameRoom() {
     return () => {
       cancelled = true;
       if (refreshTimer) window.clearTimeout(refreshTimer);
+      if (reconnectTimer) window.clearTimeout(reconnectTimer);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+      reconnectNowRef.current = () => {};
       socket?.close();
       socketRef.current = null;
+      clearPendingBet();
+      dismissPrivateBetNotice();
       // 不在卸载时 leaveRoom：React 重挂载/切页会把成员打成 LEFT，
       // 导致竞标失败且凑不齐开局人数。主动返回时再离房。
     };
@@ -1404,22 +1665,63 @@ export default function GameRoom() {
     }
   }
 
+  /** 连接未就绪时给出可见提示，避免玩家以为消息/出价已发出 */
+  function ensureSocketReady(): boolean {
+    if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) return true;
+    setError('实时连接已断开，正在自动重连，请稍后再试');
+    reconnectNowRef.current();
+    return false;
+  }
+
   function sendChat() {
     const content = draft.trim();
-    if (!content || !socketRef.current || socketRef.current.readyState !== WebSocket.OPEN) return;
+    if (!content) return;
+    if (!ensureSocketReady()) return;
+    const pendingBet = phase === 'BETTING' ? parsePendingBetCommand(content) : null;
+    if (pendingBet && betPendingRef.current) return;
+
     setError('');
-    socketRef.current.send(JSON.stringify({ type: 'chat', content }));
+    socketRef.current!.send(JSON.stringify({ type: 'chat', content }));
     setDraft('');
+    if (pendingBet) {
+      betPendingRef.current = true;
+      setBetPending(true);
+      if (betPendingTimerRef.current !== null) {
+        window.clearTimeout(betPendingTimerRef.current);
+      }
+      betPendingTimerRef.current = window.setTimeout(() => {
+        clearPendingBet();
+        pushPrivateBetNotice({
+          status: 'unknown',
+          action: pendingBet.action,
+          amountCents: pendingBet.amountCents,
+          reason: '暂未收到服务器确认，请刷新核对后再操作，避免重复下注',
+        });
+      }, 10_000);
+    }
   }
 
   function leaveAndGoBack() {
+    // 对局进行中且本人已参与（坐庄/已下注）时先确认，避免误触退出
+    const activePhase =
+      !!phase && !['WAITING', 'FINISHED', 'CANCELLED'].includes(phase);
+    const involved = !!state?.me.isBanker || !!state?.me.bet;
+    if (
+      activePhase &&
+      involved &&
+      !window.confirm('对局进行中，离开不会撤销您的下注/坐庄。确定要离开吗？')
+    ) {
+      return;
+    }
     if (roomId) void api.leaveRoom(roomId).catch(() => undefined);
-    navigate(-1);
+    // 深链直接进房时没有上一页历史，navigate(-1) 会退出小程序
+    if (location.key !== 'default') navigate(-1);
+    else navigate(roomId ? `/game/${roomId}` : '/', { replace: true });
   }
 
   function sendSticker(stickerId: string) {
-    if (!socketRef.current || socketRef.current.readyState !== WebSocket.OPEN) return;
-    socketRef.current.send(JSON.stringify({ type: 'sticker', stickerId }));
+    if (!ensureSocketReady()) return;
+    socketRef.current!.send(JSON.stringify({ type: 'sticker', stickerId }));
   }
 
   /** 首次领取才播放短动效；已领取/已结束的红包直接打开领取详情。 */
@@ -1525,21 +1827,108 @@ export default function GameRoom() {
     }
   }
 
+  /** 内部红包结果弹窗数据：复用群红包样式，展示我的金额与全部领取名单 */
+  function gamePacketModalData(snapshot: RoomState | null, mineCents?: string) {
+    const round = snapshot?.round;
+    const claims = (round?.claims ?? []).map((claim) => ({
+      uid: claim.uid,
+      nickname: claim.nickname,
+      avatarUrl: claim.avatarUrl,
+      amountCents: claim.amountCents,
+      at: claim.at,
+    }));
+    const count = round?.participantCount ?? 0;
+    return {
+      packetId: round?.packetId ?? 'game-packet',
+      greeting: GAME_PACKET_GREETING,
+      sender: { name: '小助手', avatar: ASSISTANT_AVATAR },
+      amountCents: mineCents,
+      claims,
+      total: round?.packetTotalCents ?? '0',
+      count,
+      remaining: Math.max(0, count - claims.length),
+    };
+  }
+
+  /** 红包结束后点开查看抢包/认额名单（微信式手气榜，所有人可看） */
+  async function viewGamePacket(packetId: string) {
+    if (rpBusy) return;
+    setRpBusy(true);
+    setError('');
+    try {
+      const detail = await api.gamePacket(packetId);
+      const mine = detail.claims.find((claimEntry) => claimEntry.uid === myUid);
+      setRpModal({
+        packetId,
+        greeting: GAME_PACKET_GREETING,
+        sender: { name: '小助手', avatar: ASSISTANT_AVATAR },
+        amountCents: mine?.amountCents,
+        claims: detail.claims,
+        total: detail.totalCents,
+        count: detail.participantCount,
+        remaining: Math.max(0, detail.participantCount - detail.claims.length),
+      });
+    } catch {
+      setError('红包数据加载失败，请稍后再试');
+    } finally {
+      setRpBusy(false);
+    }
+  }
+
   async function claim(packetId?: string) {
     const activePacketId = state?.round?.packetId;
     if (!activePacketId || (packetId && packetId !== activePacketId)) {
+      // 已结束的红包点开直接看名单，不再报错
+      if (packetId) return viewGamePacket(packetId);
       setError('红包已结束');
       return;
     }
+    const isInternal = state.round?.packetChannel === 'INTERNAL';
     if (!state.me.canClaim) {
+      // 内部红包：已抢过的点开直接看结果
+      if (isInternal && state.me.claimedAmountCents) {
+        setRpModal(gamePacketModalData(state, state.me.claimedAmountCents));
+        return;
+      }
       setError('仅本局庄家与已下注闲家可领取红包');
       return;
     }
     setBusy(true);
     setError('');
     try {
-      const { url } = await api.claimPacket(activePacketId);
-      openExternalLink(url);
+      if (!isInternal) {
+        const { url } = await api.claimPacket(activePacketId);
+        if (url) openExternalLink(url);
+        return;
+      }
+
+      // 内部红包：小助手直发，金额随机拆分并即时入余额
+      setRpOpening({
+        packetId: activePacketId,
+        greeting: GAME_PACKET_GREETING,
+        sender: { name: '小助手', avatar: ASSISTANT_AVATAR },
+      });
+      const openingStartedAt = Date.now();
+      let claimedAmount: string;
+      try {
+        const result = await api.claimPacket(activePacketId);
+        claimedAmount = result.amountCents ?? '0';
+      } catch (claimError) {
+        setRpOpening(null);
+        const code = (claimError as Error).message;
+        if (code === 'ALREADY_CLAIMED' && state.me.claimedAmountCents) {
+          setRpModal(gamePacketModalData(state, state.me.claimedAmountCents));
+          return;
+        }
+        setError(packetErrorText(claimError));
+        return;
+      }
+      const latest = roomId ? await api.roomState(roomId).catch(() => null) : null;
+      if (latest) setState(latest);
+      const remainingMs = Math.max(0, 380 - (Date.now() - openingStartedAt));
+      await new Promise((resolve) => window.setTimeout(resolve, remainingMs));
+      setRpOpening(null);
+      setRpModal(gamePacketModalData(latest ?? state, claimedAmount));
     } catch (e) {
       const err = e as Error & { code?: string };
       if (err.code === 'NOT_ELIGIBLE_TO_CLAIM' || err.message.includes('NOT_ELIGIBLE')) {
@@ -1548,6 +1937,7 @@ export default function GameRoom() {
         setError(err.message || '领取失败');
       }
     } finally {
+      setRpOpening(null);
       setBusy(false);
     }
   }
@@ -1568,8 +1958,8 @@ export default function GameRoom() {
     ) {
       return;
     }
-    if (!socketRef.current || socketRef.current.readyState !== WebSocket.OPEN) return;
-    socketRef.current.send(JSON.stringify({ type: 'dice' }));
+    if (!ensureSocketReady()) return;
+    socketRef.current!.send(JSON.stringify({ type: 'dice' }));
     setDiceSent(true);
     requestAnimationFrame(() => {
       const el = streamRef.current;
@@ -1577,7 +1967,9 @@ export default function GameRoom() {
     });
   }
 
-  const composerHint = chatMuted
+  const composerHint = betPending
+    ? '下注确认中，请勿重复发送'
+    : chatMuted
     ? '抢包中，暂不可发言'
     : canBid
       ? '竞庄金额，如 8800'
@@ -1632,15 +2024,29 @@ export default function GameRoom() {
             <strong>
               {state?.room.interactionGroupTitle ?? state?.room.title ?? '至尊牛牛互动群'}
             </strong>
-            <small>
-              <i /> 互动中
+            <small className={connState === 'online' ? undefined : 'offline'}>
+              <i />{' '}
+              {connState === 'online'
+                ? '互动中'
+                : connState === 'connecting'
+                  ? '连接中…'
+                  : connState === 'kicked'
+                    ? '已断开'
+                    : '重连中…'}
             </small>
           </div>
           <div className="game-room-header-actions" aria-label="牌桌操作">
             <button
               className="game-room-refresh"
               type="button"
-              onClick={() => void refresh()}
+              onClick={() => {
+                // 刷新同时检查连接：断开时立即重建 WebSocket；
+                // 被移出房间的场景下 refresh() 会重新 join，成功后再重连一次即可恢复
+                reconnectNowRef.current();
+                void refresh()
+                  .then(() => reconnectNowRef.current())
+                  .catch(() => setError('刷新失败，请检查网络后重试'));
+              }}
               aria-label="刷新牌桌"
               title="刷新"
             >
@@ -1902,6 +2308,8 @@ export default function GameRoom() {
               const senderName = item.name ?? '小助手';
               const interactive = !!item.asChat && !item.demo;
               const dimmed = !!item.waiting || !item.claimable;
+              const clickable =
+                !item.waiting && (!!item.claimable || (!!item.view && !!item.packetId));
               return (
                 <div className="feed-chat theirs" key={item.id}>
                   <ChatAvatar url={item.avatar ?? ASSISTANT_AVATAR} name={senderName} />
@@ -1911,8 +2319,12 @@ export default function GameRoom() {
                       <button
                         type="button"
                         className={`wx-rp wx-rp-niuniu ${dimmed ? 'opened' : ''}`}
-                        disabled={busy || dimmed}
-                        onClick={() => void claim(item.packetId)}
+                        disabled={busy || rpBusy || !clickable}
+                        onClick={() =>
+                          item.view && item.packetId
+                            ? void viewGamePacket(item.packetId)
+                            : void claim(item.packetId)
+                        }
                       >
                         <div className="wx-rp-body">
                           <span className="wx-rp-icon" aria-hidden />
@@ -1947,25 +2359,15 @@ export default function GameRoom() {
                 </div>
               );
             }
-            return (
-              <article className="feed-score" key={item.id}>
-                <header>
-                  <strong>第 {item.seqNo} 局成绩单</strong>
-                  <span>系统结算</span>
-                </header>
-                <ul>
-                  {item.lines.map((line) => (
-                    <li key={line}>{line}</li>
-                  ))}
-                </ul>
-                {item.footer && <footer>{item.footer}</footer>}
-              </article>
-            );
+            return null;
             })}
         </div>
       </div>
 
       <div className="game-room-footer">
+        {betNotice && (
+          <BetResultToast notice={betNotice} onClose={dismissPrivateBetNotice} />
+        )}
         {error && <div className="chat-error-bar">{error}</div>}
 
         {continuation?.mine && continuationSeconds !== null && continuationSeconds > 0 && (
@@ -1988,6 +2390,7 @@ export default function GameRoom() {
           onChange={setDraft}
           onSend={sendChat}
           disabled={chatMuted}
+          busy={betPending}
           placeholder={composerHint}
           stickers={stickers}
           onSendSticker={sendSticker}
@@ -2080,6 +2483,71 @@ export default function GameRoom() {
           <RedPacketModal data={rpModal} onClose={() => setRpModal(null)} />,
           document.body,
         )}
+    </div>
+  );
+}
+
+function BetResultToast({
+  notice,
+  onClose,
+}: {
+  notice: PrivateBetNoticePayload;
+  onClose: () => void;
+}) {
+  const success = notice.status === 'success';
+  const unknown = notice.status === 'unknown';
+  const acceptance = notice.acceptance;
+  const adjusted = success && acceptance?.adjusted === true;
+  const actionName = notice.action === 'all_in' ? '梭哈' : '下注';
+  const title = adjusted
+    ? `${actionName}已自动调整`
+    : success
+      ? `${actionName}成功`
+      : unknown
+        ? '确认超时'
+        : `${actionName}失败`;
+  const detail =
+    success
+      ? '已记录，请等待本局流程'
+      : notice.reason || (unknown ? '请刷新核对后再操作' : '操作未完成');
+
+  return (
+    <div
+      className={`bet-result-toast ${notice.status}${adjusted ? ' adjusted' : ''}`}
+      role="status"
+      aria-live="polite"
+      aria-atomic="true"
+    >
+      <span className="bet-result-toast-mark" aria-hidden>
+        {adjusted ? '↘' : success ? '✓' : unknown ? '…' : '!'}
+      </span>
+      <div className="bet-result-toast-copy">
+        <strong>
+          {title}<i>｜</i>RM{rm(notice.amountCents)}
+        </strong>
+        {adjusted && acceptance ? (
+          <div className="bet-adjustment-detail">
+            <span>
+              输入 <b>RM{rm(acceptance.requestedAmountCents)}</b>
+              <i>当前余额 RM{rm(acceptance.liabilityBalanceCents)}</i>
+            </span>
+            <span>
+              {acceptance.maxMultiplier} 倍余额上限{' '}
+              <b>RM{rm(acceptance.maxAffordableCents)}</b>
+              <i>本局最高 RM{rm(acceptance.maxAcceptedCents)}</i>
+            </span>
+            <span>
+              实际接受 <b>RM{rm(notice.amountCents)}</b>
+              <i>最大赔付已预留 RM{rm(acceptance.reservedCents)}</i>
+            </span>
+          </div>
+        ) : (
+          <small>{detail}</small>
+        )}
+      </div>
+      <button type="button" className="bet-result-toast-close" aria-label="关闭" onClick={onClose}>
+        ×
+      </button>
     </div>
   );
 }

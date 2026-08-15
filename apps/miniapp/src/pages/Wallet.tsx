@@ -20,9 +20,11 @@ function needsKyc(status: string) {
 export default function Wallet({
   kycStatus,
   active = true,
+  onGoLobby,
 }: {
   kycStatus: string;
   active?: boolean;
+  onGoLobby?: () => void;
 }) {
   const navigate = useNavigate();
   const approved = kycStatus === 'APPROVED';
@@ -32,13 +34,6 @@ export default function Wallet({
   const [message, setMessage] = useState('');
   const [loadError, setLoadError] = useState('');
 
-  useEffect(() => {
-    if (!active) return;
-    if (needsKyc(kycStatus)) {
-      navigate('/kyc', { replace: true });
-    }
-  }, [active, kycStatus, navigate]);
-
   const load = useCallback(async () => {
     if (!approved) return;
     try {
@@ -46,7 +41,7 @@ export default function Wallet({
       setWallet(nextWallet);
       setLoadError('');
     } catch {
-      setLoadError('余额刷新失败，当前显示的是上次成功加载的数据。');
+      setLoadError('余额加载失败');
     }
   }, [approved]);
 
@@ -66,8 +61,29 @@ export default function Wallet({
     };
   }, [active, approved, load]);
 
+  // 未实名不再自动跳转 /kyc：自动跳转会和「返回」形成死循环
+  //（返回主页 → 钱包 Tab 又立刻弹回实名页），改为页内引导。
   if (needsKyc(kycStatus)) {
-    return <div className="page loading">正在前往实名认证…</div>;
+    return (
+      <div className="page wallet-page">
+        <PageHeader title="钱包" subtitle="需要实名认证" />
+        <section className="panel panel-lg" style={{ padding: 20 }}>
+          <div className="inline-alert" style={{ marginBottom: 0 }}>
+            {kycStatus === 'REJECTED'
+              ? '实名认证未通过，请重新提交资料后再使用钱包（充值、提现、余额明细）。'
+              : '为保障资金安全，使用钱包（充值、提现、余额明细）前需完成实名认证，约 1 分钟。'}
+          </div>
+          <button
+            className="primary-action"
+            type="button"
+            style={{ marginTop: 16 }}
+            onClick={() => navigate('/kyc')}
+          >
+            {kycStatus === 'REJECTED' ? '重新提交实名' : '前往实名认证'}
+          </button>
+        </section>
+      </div>
+    );
   }
 
   if (pending) {
@@ -82,7 +98,7 @@ export default function Wallet({
             className="primary-action"
             type="button"
             style={{ marginTop: 16 }}
-            onClick={() => navigate('/', { replace: true })}
+            onClick={() => (onGoLobby ? onGoLobby() : navigate('/', { replace: true }))}
           >
             返回大厅
           </button>
@@ -91,6 +107,7 @@ export default function Wallet({
     );
   }
 
+  const loadFailed = wallet === null && Boolean(loadError);
   const total = wallet
     ? BigInt(wallet.balance.availableCents) +
       BigInt(wallet.balance.freezeBankerCents) +
@@ -101,6 +118,12 @@ export default function Wallet({
     ? BigInt(wallet.balance.freezeBankerCents) + BigInt(wallet.balance.freezeBetCents)
     : 0n;
   const withdrawFrozen = wallet ? BigInt(wallet.balance.freezeWithdrawCents) : 0n;
+
+  function showAmount(value: bigint | string | number, mask: string) {
+    if (hidden) return mask;
+    if (!wallet) return '——';
+    return rm(value);
+  }
 
   function goFlow(path: '/wallet/deposit' | '/wallet/withdraw') {
     setMessage('');
@@ -119,24 +142,41 @@ export default function Wallet({
         }
       />
 
-      <section className="panel panel-lg balance-card wallet-balance">
-        <span className="balance-label">总资产（RM）</span>
-        <strong className="balance-amount">{hidden ? '••••••' : rm(total)}</strong>
-        <div className="balance-grid">
-          <div>
-            <small>可用</small>
-            <b>{hidden ? '••••' : rm(wallet?.balance.availableCents ?? 0)}</b>
+      {loadFailed ? (
+        <section className="panel panel-lg balance-card wallet-balance">
+          <span className="balance-label">总资产（RM）</span>
+          <div className="inline-alert error" style={{ marginBottom: 0 }}>
+            余额加载失败，请检查网络后重试。
           </div>
-          <div>
-            <small>游戏冻结</small>
-            <b>{hidden ? '••••' : rm(frozen)}</b>
+          <button
+            className="primary-action"
+            type="button"
+            style={{ marginTop: 12 }}
+            onClick={() => void load()}
+          >
+            重试
+          </button>
+        </section>
+      ) : (
+        <section className="panel panel-lg balance-card wallet-balance">
+          <span className="balance-label">总资产（RM）</span>
+          <strong className="balance-amount">{showAmount(total, '••••••')}</strong>
+          <div className="balance-grid">
+            <div>
+              <small>可用</small>
+              <b>{showAmount(wallet?.balance.availableCents ?? 0, '••••')}</b>
+            </div>
+            <div>
+              <small>游戏冻结</small>
+              <b>{showAmount(frozen, '••••')}</b>
+            </div>
+            <div>
+              <small>提现中</small>
+              <b>{showAmount(withdrawFrozen, '••••')}</b>
+            </div>
           </div>
-          <div>
-            <small>提现中</small>
-            <b>{hidden ? '••••' : rm(withdrawFrozen)}</b>
-          </div>
-        </div>
-      </section>
+        </section>
+      )}
 
       <div className="wallet-actions">
         <button className="wallet-action" type="button" onClick={() => goFlow('/wallet/deposit')}>
@@ -159,7 +199,9 @@ export default function Wallet({
         </button>
       </div>
 
-      {loadError && <div className="inline-alert error">{loadError}</div>}
+      {loadError && wallet && (
+        <div className="inline-alert error">余额刷新失败，当前显示的是上次成功加载的数据。</div>
+      )}
 
       {message && (
         <div className="inline-alert" style={{ marginBottom: 16 }}>

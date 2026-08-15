@@ -5,7 +5,8 @@ import { blindIndex, encryptSecret, kycSearchHashes, normalizeIdentity } from '.
 import { serializable } from '../lib/transaction.js';
 
 const bindInviterSchema = z.object({ inviterUid: z.string().regex(/^\d{6,20}$/) });
-const bindDeviceSchema = z.object({ deviceId: z.string().min(8).max(128) });
+// 上限与登录接口的 deviceId 校验保持一致（256），避免同一标识登录能过、绑定被拒
+const bindDeviceSchema = z.object({ deviceId: z.string().min(8).max(256) });
 /** 实名只收姓名 + DuitNow；银行卡改由提现账户独立添加。 */
 const kycSchema = z.object({
   realName: z.string().min(2).max(64),

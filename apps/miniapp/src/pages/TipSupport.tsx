@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { api } from '../api';
+import { goBack } from '../lib/nav';
 import { BackIcon } from '../components/MoneyIcons';
 import { completeRequest, pendingRequestId } from '../lib/idempotency';
 
@@ -16,9 +17,11 @@ const TIP_ERROR: Record<string, string> = {
 export default function TipSupport({ ownerUid }: { ownerUid: string }) {
   const { roomId = '' } = useParams();
   const navigate = useNavigate();
+  const location = useLocation();
   const [amount, setAmount] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [confirmOpen, setConfirmOpen] = useState(false);
 
   const displayAmount = useMemo(() => {
     const n = Number(amount);
@@ -50,17 +53,26 @@ export default function TipSupport({ ownerUid }: { ownerUid: string }) {
         },
       });
     } catch (e) {
-      const code = (e as Error).message;
+      const code = (e as Error & { code?: string }).code ?? (e as Error).message;
       setError(TIP_ERROR[code] ?? code ?? '转账失败');
     } finally {
       setBusy(false);
     }
   }
 
+  function requestConfirm() {
+    if (!amount) {
+      setError('请输入转账金额');
+      return;
+    }
+    setError('');
+    setConfirmOpen(true);
+  }
+
   return (
     <div className="tip-page">
       <header className="tip-page-nav">
-        <button type="button" className="tip-page-back" onClick={() => navigate(-1)} aria-label="返回">
+        <button type="button" className="tip-page-back" onClick={() => goBack(navigate, location, roomId ? `/game/${roomId}/play` : '/')} aria-label="返回">
           <BackIcon />
         </button>
         <h1>打赏客服</h1>
@@ -92,6 +104,9 @@ export default function TipSupport({ ownerUid }: { ownerUid: string }) {
               autoFocus
             />
           </label>
+          <p className="tip-page-note" style={{ marginTop: 8, textAlign: 'left' }}>
+            单笔 RM1 – RM5,000
+          </p>
         </div>
 
         <div className="tip-page-presets">
@@ -117,13 +132,51 @@ export default function TipSupport({ ownerUid }: { ownerUid: string }) {
           type="button"
           className="tip-page-cta"
           disabled={busy || !amount}
-          onClick={() => void submit()}
+          onClick={requestConfirm}
         >
           {busy ? '处理中…' : `确认打赏 RM ${displayAmount}`}
         </button>
 
         <p className="tip-page-note">金额将从可用余额扣除，打赏成功后会在群内显示。</p>
       </div>
+
+      {confirmOpen && (
+        <div className="withdraw-sheet" role="dialog" aria-modal="true" aria-label="确认打赏">
+          <button
+            type="button"
+            className="withdraw-sheet-backdrop"
+            aria-label="关闭"
+            onClick={() => setConfirmOpen(false)}
+          />
+          <div className="withdraw-sheet-panel">
+            <div className="withdraw-sheet-handle" />
+            <div className="withdraw-sheet-head">
+              <div>
+                <strong>确认打赏 RM {displayAmount}</strong>
+                <p>金额将从可用余额扣除，确认后立即支付。</p>
+              </div>
+            </div>
+            <button
+              type="button"
+              className="tip-page-cta"
+              disabled={busy}
+              onClick={() => {
+                setConfirmOpen(false);
+                void submit();
+              }}
+            >
+              确认支付
+            </button>
+            <button
+              type="button"
+              className="withdraw-sheet-cancel"
+              onClick={() => setConfirmOpen(false)}
+            >
+              取消
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

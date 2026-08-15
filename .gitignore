@@ -9,3 +9,4 @@ coverage/
 .turbo/
 uploads/
 .tmp-frames/
+tmp-*.png

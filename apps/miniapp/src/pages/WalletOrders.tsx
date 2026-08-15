@@ -1,11 +1,13 @@
 import { useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { api, rm } from '../api';
+import { backToTab } from '../lib/nav';
 
 type Orders = Awaited<ReturnType<typeof api.walletOrders>>;
 
 export default function WalletOrders() {
   const navigate = useNavigate();
+  const location = useLocation();
   const [orders, setOrders] = useState<Orders | null>(null);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
@@ -28,14 +30,7 @@ export default function WalletOrders() {
       <header className="subpage-header">
         <button
           type="button"
-          onClick={() => {
-            try {
-              sessionStorage.setItem('miniapp-tab', 'wallet');
-            } catch {
-              // ignore
-            }
-            navigate('/');
-          }}
+          onClick={() => backToTab(navigate, location, 'wallet')}
           aria-label="返回"
         >
           ‹
