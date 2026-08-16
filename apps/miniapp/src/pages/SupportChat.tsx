@@ -10,7 +10,6 @@ export default function SupportChat() {
   const navigate = useNavigate();
   const [messages, setMessages] = useState<Message[]>([]);
   const [stickers, setStickers] = useState<Sticker[]>([]);
-  const [text, setText] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [ready, setReady] = useState(false);
@@ -63,18 +62,19 @@ export default function SupportChat() {
     });
   }, [messages, ready]);
 
-  async function sendText() {
-    const content = text.trim();
-    if (!content) return;
+  /** 返回 false 表示发送失败，输入框保留内容 */
+  async function sendText(content: string): Promise<boolean> {
+    if (!content) return false;
     setBusy(true);
     setError('');
     try {
       await api.sendChat({ type: 'TEXT', content });
-      setText('');
       forceScrollRef.current = true;
       await load();
+      return true;
     } catch (err) {
       setError((err as Error).message || '发送失败，请重试');
+      return false;
     } finally {
       setBusy(false);
     }
@@ -150,9 +150,7 @@ export default function SupportChat() {
       <footer className="chat-screen-footer">
         {error && messages.length > 0 && <div className="chat-error-bar">{error}</div>}
         <ChatComposer
-          value={text}
-          onChange={setText}
-          onSend={() => void sendText()}
+          onSend={sendText}
           busy={busy}
           placeholder="输入消息…"
           stickers={stickers}

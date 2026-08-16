@@ -135,6 +135,8 @@ model Device {
   authVersion Int          @default(1) @map("auth_version")
   boundAt     DateTime     @default(now()) @map("bound_at")
   status      DeviceStatus @default(ACTIVE)
+  /** 最近一次玩家自助换绑时间：7 天内限一次，且换绑后 24 小时暂停提现 */
+  lastSelfRebindAt DateTime? @map("last_self_rebind_at")
   user        User         @relation(fields: [userId], references: [id])
 
   @@index([deviceId])

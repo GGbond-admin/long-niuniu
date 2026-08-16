@@ -10,9 +10,12 @@ function escapeHtml(value: unknown): string {
 }
 
 function mention(line: Record<string, unknown>): string {
+  // 成绩单 @ 优先显示玩家昵称，避免暴露 Telegram 用户名或 UID
+  const nickname = typeof line.nickname === 'string' ? line.nickname.trim() : '';
+  if (nickname) return `@${escapeHtml(nickname)}`;
   const username = line.tgUsername;
   if (typeof username === 'string' && username) return `@${escapeHtml(username)}`;
-  return escapeHtml(line.nickname || `UID ${line.uid}`);
+  return `@${escapeHtml(`UID${line.uid}`)}`;
 }
 
 function handLabel(type: unknown, points: unknown): string {

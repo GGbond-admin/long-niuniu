@@ -302,6 +302,12 @@ export async function startRound(roundId: string, force = false, actorId?: strin
   });
 }
 
+/**
+ * 竞标防狙击：最后 5 秒内出现新的最高价时，把剩余时间拉回 5 秒，
+ * 直到无人再加价为止，最高有效价者上庄。
+ */
+const BID_EXTENSION_WINDOW_MS = 5_000;
+
 export async function placeBankerBid(roundId: string, userId: string, amountCents: bigint) {
   if (amountCents <= 0n) throw new GameError('INVALID_AMOUNT');
   return serializable(async (tx) => {
@@ -326,13 +332,42 @@ export async function placeBankerBid(roundId: string, userId: string, amountCent
     if (user.wallet.availableCents < amountCents + BigInt(baseFees)) {
       throw new GameError('INSUFFICIENT_BALANCE');
     }
+    // 收官前 5 秒内若出现新的最高价，则把倒计时重置为 5 秒，给他人反超空间
+    const now = Date.now();
+    let extendedEndsAt: Date | null = null;
+    if (round.bidEndsAt.getTime() - now <= BID_EXTENSION_WINDOW_MS) {
+      const topBid = await tx.bankerBid.findFirst({
+        where: { roundId },
+        orderBy: [{ amountCents: 'desc' }, { createdAt: 'asc' }],
+        select: { amountCents: true },
+      });
+      if (!topBid || amountCents > topBid.amountCents) {
+        extendedEndsAt = new Date(now + BID_EXTENSION_WINDOW_MS);
+      }
+    }
     const bid = await tx.bankerBid.upsert({
       where: { roundId_userId: { roundId, userId } },
       create: { roundId, userId, amountCents },
       update: { amountCents, won: false, createdAt: new Date() },
     });
+    if (extendedEndsAt) {
+      await tx.round.update({
+        where: { id: roundId },
+        data: { bidEndsAt: extendedEndsAt, version: { increment: 1 } },
+      });
+      await event(
+        tx,
+        roundId,
+        'BID_TIME_EXTENDED',
+        {
+          bidEndsAt: extendedEndsAt.toISOString(),
+          amountCents: String(amountCents),
+        },
+        userId,
+      );
+    }
     await event(tx, roundId, 'BANKER_BID_PLACED', { amountCents: String(amountCents) }, userId);
-    return bid;
+    return { ...bid, extendedEndsAt };
   });
 }
 
@@ -2185,4 +2220,21 @@ export async function currentRoundForRoom(roomId: string) {
     orderBy: { seqNo: 'desc' },
     include: roundInclude,
   });
+}
+
+/** 聊天禁言等热路径只需阶段，不应加载整局 bids / bets / claims。 */
+export async function currentRoundPhaseForRoom(
+  roomId: string,
+): Promise<RoundPhase | null> {
+  const rounds = await prisma.round.findMany({
+    where: { roomId, phase: { in: ACTIVE_PHASES } },
+    orderBy: { seqNo: 'desc' },
+    select: { phase: true },
+    take: 2,
+  });
+  return (
+    rounds.find((round) => round.phase !== RoundPhase.WAITING)?.phase ??
+    rounds[0]?.phase ??
+    null
+  );
 }

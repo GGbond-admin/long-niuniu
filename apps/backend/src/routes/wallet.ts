@@ -541,6 +541,23 @@ export async function walletRoutes(app: FastifyInstance) {
       return reply.code(400).send({ error: 'BELOW_MIN_WITHDRAW', minCents: String(minCents) });
     }
 
+    // 自助换绑设备后 24 小时暂停提现：盗号者即使知道支付密码也无法立即转走资金
+    const device = await prisma.device.findUnique({
+      where: { userId },
+      select: { lastSelfRebindAt: true },
+    });
+    if (
+      device?.lastSelfRebindAt &&
+      Date.now() - device.lastSelfRebindAt.getTime() < 24 * 60 * 60 * 1000
+    ) {
+      const unlockedAt = new Date(device.lastSelfRebindAt.getTime() + 24 * 60 * 60 * 1000);
+      return reply.code(403).send({
+        error: 'WITHDRAW_LOCKED_AFTER_REBIND',
+        message: '设备换绑后 24 小时内暂停提现，以保障资金安全',
+        unlockedAt: unlockedAt.toISOString(),
+      });
+    }
+
     const paymentPinVersion = await verifyPaymentPin(userId, body.paymentPin);
     await ensureKycWithdrawAccounts(userId);
     const day = malaysiaDay();

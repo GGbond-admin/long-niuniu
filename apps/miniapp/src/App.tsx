@@ -6,7 +6,15 @@ import {
   getToken,
   setToken,
 } from './api';
-import { getBotUsername, getDeviceId, getInitData, getRefUid, openTgLink, tg } from './telegram';
+import {
+  getBotUsername,
+  getDeviceId,
+  getInitData,
+  getRefUid,
+  initTelegramFullscreen,
+  openTgLink,
+  tg,
+} from './telegram';
 import { getCachedSession, setCachedSession, type Session } from './sessionStore';
 import BindInviter from './pages/BindInviter';
 import BindDevice from './pages/BindDevice';
@@ -76,14 +84,31 @@ export default function App() {
   const [error, setError] = useState('');
   // 设备不匹配时被挡在登录外，进不了站内客服，需要给出 Bot 私聊出口
   const [errorNeedsSupport, setErrorNeedsSupport] = useState(false);
+  // DEVICE_MISMATCH 时允许凭支付密码自助换绑到本机
+  const [canSelfRebind, setCanSelfRebind] = useState(false);
   const navigate = useNavigate();
   const location = useLocation();
   const bootRef = useRef(false);
 
   useEffect(() => {
     let reloading = false;
-    const recoverDeviceSession = () => {
+    const recoverDeviceSession = (event: Event) => {
       if (reloading) return;
+      const code = (event as CustomEvent<{ code?: string }>).detail?.code;
+      // 设备被后台解绑：token 对绑定流程仍有效，直接引导重新绑定，避免刷新循环
+      if (code === 'DEVICE_REBIND_REQUIRED') {
+        setSession((current) => {
+          if (!current) return current;
+          const next = {
+            ...current,
+            onboarding: { ...current.onboarding, deviceBound: false },
+          };
+          setCachedSession(next);
+          return next;
+        });
+        navigate('/bind-device', { replace: true });
+        return;
+      }
       // 旧机/存储异常时反复 DEVICE_* 会把页面刷成死循环；短窗口内只提示一次
       const stampKey = 'nn_device_recover_at';
       const now = Date.now();
@@ -109,13 +134,14 @@ export default function App() {
     window.addEventListener(DEVICE_SESSION_INVALID_EVENT, recoverDeviceSession);
     return () =>
       window.removeEventListener(DEVICE_SESSION_INVALID_EVENT, recoverDeviceSession);
-  }, []);
+  }, [navigate]);
 
   useEffect(() => {
     const app = tg();
     app?.ready();
     app?.expand();
     app?.disableVerticalSwipes?.();
+    initTelegramFullscreen();
 
     // Fast Refresh / 严格模式重挂载时不要重复打登录并把界面打回「加载中…」
     if (bootRef.current && getCachedSession() && getToken()) return;
@@ -152,11 +178,12 @@ export default function App() {
       .catch(async (e) => {
         const code = (e as { code?: string }).code;
         if (code === 'DEVICE_MISMATCH') {
-          // 也可能是本机缓存被清导致设备标识变化，此时用户没有任何入口能进客服
+          // 也可能是本机缓存被清导致设备标识变化；提供支付密码自助换绑 + 客服兜底
           setError(
-            '此账号已绑定其他设备。若您正在使用原设备，可能是本机缓存被清除，请联系客服核验后重新绑定',
+            '此账号已绑定其他设备。若您正在使用原设备，可能是本机缓存被清除',
           );
           setErrorNeedsSupport(true);
+          setCanSelfRebind(true);
           return;
         }
         // 登录失败时不能默默沿用本地缓存：token 可能已过期，后续操作会莫名失败。
@@ -257,6 +284,7 @@ export default function App() {
       <div className="loading">
         <div>
           <p style={{ marginBottom: 14 }}>{error}</p>
+          {canSelfRebind && <SelfRebindForm />}
           <button
             className="primary-action"
             type="button"
@@ -397,5 +425,96 @@ export default function App() {
       </Routes>
       <SupportInboxToast />
     </>
+  );
+}
+
+/**
+ * 登录被 DEVICE_MISMATCH 挡住时的自助换绑：Telegram 身份 + 支付密码双验证。
+ * 成功后旧设备全部下线、换绑后 24 小时暂停提现；7 天内限一次。
+ */
+function SelfRebindForm() {
+  const [open, setOpen] = useState(false);
+  const [pin, setPin] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+
+  async function submit() {
+    if (busy || pin.length !== 6) return;
+    setBusy(true);
+    setErr('');
+    try {
+      await api.deviceRebind(
+        getInitData() ?? '',
+        getDeviceId(),
+        pin,
+        getBotUsername() ?? undefined,
+      );
+      // 清掉设备恢复保护戳，避免刷新后误判为死循环
+      try {
+        sessionStorage.removeItem('nn_device_recover_at');
+      } catch {
+        // ignore storage errors
+      }
+      window.location.reload();
+    } catch (e) {
+      setErr((e as Error).message || '换绑失败，请重试');
+      setPin('');
+      setBusy(false);
+    }
+  }
+
+  if (!open) {
+    return (
+      <button
+        className="primary-action"
+        type="button"
+        style={{ marginBottom: 10 }}
+        onClick={() => setOpen(true)}
+      >
+        我是本人，自助换绑到本机
+      </button>
+    );
+  }
+  return (
+    <div style={{ marginBottom: 14, textAlign: 'left' }}>
+      <p style={{ fontSize: 13, marginBottom: 8 }}>
+        输入支付密码验证身份后，账号将换绑到当前设备（旧设备自动退出，换绑后 24
+        小时内暂停提现）：
+      </p>
+      <input
+        type="password"
+        inputMode="numeric"
+        autoComplete="off"
+        maxLength={6}
+        placeholder="6 位支付密码"
+        value={pin}
+        onChange={(event) => setPin(event.target.value.replace(/\D/g, '').slice(0, 6))}
+        style={{
+          width: '100%',
+          boxSizing: 'border-box',
+          padding: '12px 14px',
+          borderRadius: 12,
+          border: '1px solid rgba(232,213,168,.3)',
+          background: 'rgba(255,255,255,.06)',
+          color: 'inherit',
+          fontSize: 18,
+          letterSpacing: '0.4em',
+          textAlign: 'center',
+          marginBottom: 8,
+        }}
+      />
+      {err && (
+        <p style={{ color: '#e66', fontSize: 12, marginBottom: 8 }}>{err}</p>
+      )}
+      <button
+        className="primary-action"
+        type="button"
+        disabled={busy || pin.length !== 6}
+        onClick={() => void submit()}
+        style={{ marginBottom: 10 }}
+      >
+        {busy ? '验证中…' : '确认换绑'}
+      </button>
+    </div>
   );
 }

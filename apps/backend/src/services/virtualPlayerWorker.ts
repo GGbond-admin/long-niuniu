@@ -223,12 +223,13 @@ async function actOnBidPhase(roomId: string, roundId: string) {
       if (amount > maxBid) amount = maxBid;
 
       echoPlayerAmount(roomId, profile.user, amount);
-      await placeBankerBid(roundId, profile.userId, amount);
+      const bid = await placeBankerBid(roundId, profile.userId, amount);
       await announceBidPlaced({
         roomId,
         roundId,
         userId: profile.userId,
         amountCents: amount,
+        extendedEndsAt: bid?.extendedEndsAt ?? null,
       });
       await maybeChat(roomId, profile.user, profile.chatPhrases, profile.canChat);
     });
@@ -686,12 +687,13 @@ export async function actAsVirtualPlayer(params: {
   if (params.action === 'bid') {
     if (!params.amountCents) throw new GameError('INVALID_AMOUNT');
     echoPlayerAmount(profile.roomId, profile.user, params.amountCents);
-    await placeBankerBid(round.id, profile.userId, params.amountCents);
+    const bid = await placeBankerBid(round.id, profile.userId, params.amountCents);
     await announceBidPlaced({
       roomId: profile.roomId,
       roundId: round.id,
       userId: profile.userId,
       amountCents: params.amountCents,
+      extendedEndsAt: bid?.extendedEndsAt ?? null,
     });
     return { ok: true };
   }

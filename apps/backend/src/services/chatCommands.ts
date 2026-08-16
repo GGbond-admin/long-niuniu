@@ -55,6 +55,8 @@ export type ChatCommandResult =
       echo: string;
       amountCents?: string;
       acceptance?: BetAcceptanceDetails;
+      /** 竞标防狙击：最后 5 秒新高价触发的新截止时间 */
+      bidExtendedEndsAt?: Date;
     }
   | {
       kind: 'error';
@@ -269,9 +271,11 @@ export async function throwBankerDice(params: {
   const announce = stripHtml(
     renderMessage(templates.bankerDice, {
       seqNo: round.seqNo,
-      banker: banker?.tgUsername
-        ? `@${banker.tgUsername}`
-        : (banker?.nickname ?? `UID ${banker?.uid ?? ''}`),
+      banker: banker?.nickname?.trim()
+        ? `@${banker.nickname.trim()}`
+        : banker?.tgUsername
+          ? `@${banker.tgUsername}`
+          : `@UID${banker?.uid ?? ''}`,
       dice: dice.join('·'),
     }),
   );
@@ -403,6 +407,17 @@ function parseAmountToken(raw: string): string | null {
   return value;
 }
 
+/** 普通文字无需加载整局；只有这些形态可能进入牌局指令处理。 */
+export function isRoomCommandCandidate(raw: string): boolean {
+  const text = raw.trim();
+  return (
+    /^\/重推$/i.test(text) ||
+    /^\/ChongTui$/i.test(text) ||
+    /^sh\s*\d+(?:\.\d{1,2})?$/i.test(text) ||
+    parseAmountToken(text) !== null
+  );
+}
+
 export async function handleRoomChatCommand(params: {
   roomId: string;
   userId: string;
@@ -489,8 +504,17 @@ export async function handleRoomChatCommand(params: {
 
   if (round.phase === RoundPhase.BANKER_BID) {
     try {
-      await placeBankerBid(round.id, params.userId, parseCommandAmountCents(amountToken));
-      return { kind: 'ok', action: 'bid', echo: amountToken };
+      const bid = await placeBankerBid(
+        round.id,
+        params.userId,
+        parseCommandAmountCents(amountToken),
+      );
+      return {
+        kind: 'ok',
+        action: 'bid',
+        echo: amountToken,
+        ...(bid?.extendedEndsAt ? { bidExtendedEndsAt: bid.extendedEndsAt } : {}),
+      };
     } catch (e) {
       return {
         kind: 'error',

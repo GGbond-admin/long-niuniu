@@ -73,7 +73,13 @@ export type CountdownPayload = {
 
 /** 多局 + 假人发言后仍保留足够历史；Redis 同步防进程重启清空 */
 const CHAT_HISTORY_LIMIT = 2_000;
+/** 玩家端只保留最近消息窗口，避免大群一次下发/渲染数千条记录 */
+const CLIENT_CHAT_HISTORY_LIMIT = 100;
+/** 管理观察端保留更长窗口，但同样禁止一次挂载完整 2,000 条。 */
+const OBSERVER_CHAT_HISTORY_LIMIT = 300;
 const CHAT_REDIS_TTL_SECONDS = 7 * 24 * 60 * 60;
+/** 慢客户端积压超过 1 MiB 时主动断开，让其重连后只补最近窗口。 */
+const MAX_SOCKET_BUFFER_BYTES = 1 * 1024 * 1024;
 
 const clientsByRoom = new Map<string, Set<RoomClient>>();
 const observersByRoom = new Map<string, Set<RoomObserver>>();
@@ -81,7 +87,8 @@ const chatHistoryByRoom = new Map<string, RoomChatMessage[]>();
 const gamePacketMessageInFlight = new Map<string, Promise<RoomChatMessage>>();
 const roundAnnouncementInFlight = new Map<string, Promise<void>>();
 const ROOM_BROADCAST_CHANNEL = 'niuniu:room:broadcast';
-const roomHubInstanceId = `${process.pid}:${randomUUID()}`;
+const roomHubInstanceNonce = randomUUID().replaceAll('-', '').slice(0, 10);
+const roomHubInstanceId = `${process.pid}:${roomHubInstanceNonce}`;
 let roomBroadcastSubscriber: Redis | null = null;
 let counter = 0;
 let wired = false;
@@ -90,10 +97,17 @@ function chatRedisKey(roomId: string) {
   return `room:chat:${roomId}`;
 }
 
-function send(client: { socket: WebSocket }, payload: unknown) {
-  if (client.socket.readyState === client.socket.OPEN) {
-    client.socket.send(JSON.stringify(payload));
+function sendRaw(socket: WebSocket, data: string) {
+  if (socket.readyState !== socket.OPEN) return;
+  if (socket.bufferedAmount > MAX_SOCKET_BUFFER_BYTES) {
+    socket.close(1013, 'SLOW_CLIENT');
+    return;
   }
+  socket.send(data);
+}
+
+function send(client: { socket: WebSocket }, payload: unknown) {
+  sendRaw(client.socket, JSON.stringify(payload));
 }
 
 export function broadcastToRoom(roomId: string, payload: unknown) {
@@ -104,7 +118,7 @@ export function broadcastToRoom(roomId: string, payload: unknown) {
   for (const group of [clients, observers]) {
     if (!group) continue;
     for (const client of group) {
-      if (client.socket.readyState === client.socket.OPEN) client.socket.send(data);
+      sendRaw(client.socket, data);
     }
   }
 }
@@ -140,12 +154,31 @@ export async function invalidateUserConnections(
   }
 }
 
-async function broadcastToRoomCluster(roomId: string, payload: unknown): Promise<void> {
+export async function broadcastToRoomCluster(
+  roomId: string,
+  payload: unknown,
+): Promise<void> {
   broadcastToRoom(roomId, payload);
   try {
     await redis().publish(
       ROOM_BROADCAST_CHANNEL,
       JSON.stringify({ origin: roomHubInstanceId, roomId, payload }),
+    );
+  } catch (error) {
+    if (env.nodeEnv === 'production') throw error;
+  }
+}
+
+async function broadcastToAllRoomsCluster(payload: unknown): Promise<void> {
+  broadcastToAllRooms(payload);
+  try {
+    await redis().publish(
+      ROOM_BROADCAST_CHANNEL,
+      JSON.stringify({
+        origin: roomHubInstanceId,
+        control: 'broadcast_all',
+        payload,
+      }),
     );
   } catch (error) {
     if (env.nodeEnv === 'production') throw error;
@@ -200,20 +233,21 @@ export async function broadcastUserProfileChanged(user: {
   );
 }
 
-/** 纯同步心跳：不触发任何对局业务监听器，同时给本机与其它实例补发历史。 */
+/** 纯同步心跳：只通知客户端拉取最新牌桌状态，不重复下发聊天历史。 */
 export async function rebroadcastRoomState(params: {
   roomId: string;
   roundId: string;
   phase: string;
+  /** 周期恢复心跳；客户端可随机错峰拉取状态，避免惊群。 */
+  heartbeat?: boolean;
 }): Promise<void> {
   await broadcastToRoomCluster(params.roomId, {
     type: 'round',
     roundId: params.roundId,
     from: params.phase,
     to: params.phase,
+    heartbeat: params.heartbeat === true,
   });
-  const messages = await loadChatHistory(params.roomId);
-  broadcastToRoom(params.roomId, { type: 'chat_history', messages });
 }
 
 async function startRoomBroadcastSubscriber(): Promise<void> {
@@ -239,17 +273,12 @@ async function startRoomBroadcastSubscriber(): Promise<void> {
         );
         return;
       }
+      if (event.control === 'broadcast_all') {
+        broadcastToAllRooms(event.payload);
+        return;
+      }
       if (typeof event.roomId !== 'string') return;
       broadcastToRoom(event.roomId, event.payload);
-      if (
-        event.payload &&
-        typeof event.payload === 'object' &&
-        (event.payload as { type?: string }).type === 'round'
-      ) {
-        void loadChatHistory(event.roomId).then((messages) => {
-          broadcastToRoom(event.roomId!, { type: 'chat_history', messages });
-        });
-      }
     } catch {
       // 忽略其它应用误发到同名频道的无效载荷。
     }
@@ -273,7 +302,7 @@ export function broadcastToRoomObservers(roomId: string, payload: unknown) {
   if (!observers) return;
   const data = JSON.stringify(payload);
   for (const observer of observers) {
-    if (observer.socket.readyState === observer.socket.OPEN) observer.socket.send(data);
+    sendRaw(observer.socket, data);
   }
 }
 
@@ -340,7 +369,8 @@ export function appendChat(
 ): RoomChatMessage {
   const full: RoomChatMessage = {
     ...message,
-    id: `m${Date.now().toString(36)}${(counter++ % 1000).toString(36)}`,
+    // 加入实例随机前缀，避免多进程在同一毫秒生成相同 ID 后被客户端错误去重。
+    id: `m${Date.now().toString(36)}${roomHubInstanceNonce}${(counter++).toString(36)}`,
     at: new Date().toISOString(),
   };
   const history = chatHistoryByRoom.get(roomId) ?? [];
@@ -484,9 +514,10 @@ export function ensureRoundAnnouncement(params: {
   const task = (async () => {
     try {
       const type = announcementEventType(params.to);
+      // TTL 需覆盖抢包阶段 3×2 秒的错峰延迟，避免播报中途锁过期
       const completed = await withRedisLock(
         `niuniu:round:${params.roundId}:announce:${params.to}`,
-        10_000,
+        20_000,
         async () => {
           const existing = await prisma.roundEvent.findFirst({
             where: { roundId: params.roundId, type },
@@ -504,6 +535,10 @@ export function ensureRoundAnnouncement(params: {
           for (let index = 0; index < messages.length; index += 1) {
             const message = messages[index]!;
             const messageId = `round:${params.roundId}:announce:${params.to}:${index}`;
+            if (message.delayMs && message.delayMs > 0) {
+              // 抢包等阶段的台词错峰发送，避免红包卡片立刻被顶出可视区
+              await new Promise((resolve) => setTimeout(resolve, message.delayMs));
+            }
             if (message.kind === 'banner') {
               await appendChatOnce(params.roomId, messageId, {
                 type: 'BANNER',
@@ -541,8 +576,9 @@ export function ensureRoundAnnouncement(params: {
       if (completed) return;
 
       // 另一实例正在播报时等待其完成标记，避免重复追加同一阶段话术。
-      for (let attempt = 0; attempt < 20; attempt += 1) {
-        await new Promise((resolve) => setTimeout(resolve, 50));
+      // 抢包阶段台词带 2 秒错峰延迟，等待窗口需覆盖整段播报时长。
+      for (let attempt = 0; attempt < 24; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 500));
         const existing = await prisma.roundEvent.findFirst({
           where: { roundId: params.roundId, type },
           select: { id: true },
@@ -702,6 +738,34 @@ export async function loadChatHistory(roomId: string): Promise<RoomChatMessage[]
   return hydrated;
 }
 
+/** 连接只读取最近窗口，避免每次进群都解析并补全 2,000 条长期历史。 */
+async function loadRecentChatHistory(
+  roomId: string,
+  limit: number,
+): Promise<RoomChatMessage[]> {
+  const memory = chatHistory(roomId).slice(-limit);
+  try {
+    const rows = await redis().lrange(chatRedisKey(roomId), -limit, -1);
+    const byId = new Map<string, RoomChatMessage>();
+    for (const row of rows) {
+      try {
+        const message = JSON.parse(row) as RoomChatMessage;
+        if (message?.id) byId.set(message.id, message);
+      } catch {
+        // 单条损坏不影响其余聊天窗口。
+      }
+    }
+    // 内存里可能有尚未异步落到 Redis 的最新消息，必须覆盖同 ID 的旧值。
+    for (const message of memory) byId.set(message.id, message);
+    const recent = [...byId.values()]
+      .sort((left, right) => left.at.localeCompare(right.at))
+      .slice(-limit);
+    return hydrateChatProfiles(recent);
+  } catch {
+    return hydrateChatProfiles(memory);
+  }
+}
+
 export function addClient(roomId: string, client: RoomClient) {
   let clients = clientsByRoom.get(roomId);
   if (!clients) {
@@ -709,7 +773,7 @@ export function addClient(roomId: string, client: RoomClient) {
     clientsByRoom.set(roomId, clients);
   }
   clients.add(client);
-  void loadChatHistory(roomId).then((messages) => {
+  void loadRecentChatHistory(roomId, CLIENT_CHAT_HISTORY_LIMIT).then((messages) => {
     if (client.socket.readyState === client.socket.OPEN) {
       send(client, { type: 'chat_history', messages });
     }
@@ -735,7 +799,7 @@ export function addObserver(roomId: string, observer: RoomObserver) {
     observersByRoom.set(roomId, observers);
   }
   observers.add(observer);
-  void loadChatHistory(roomId).then((messages) => {
+  void loadRecentChatHistory(roomId, OBSERVER_CHAT_HISTORY_LIMIT).then((messages) => {
     if (observer.socket.readyState === observer.socket.OPEN) {
       send(observer, { type: 'chat_history', messages });
     }
@@ -783,7 +847,7 @@ export function initRoomHub() {
       });
       if (!round) return;
       const isBanker = round.bankerId === payload.userId;
-      broadcastToRoom(round.roomId, {
+      await broadcastToRoomCluster(round.roomId, {
         type: 'claim',
         roundId: payload.roundId,
         isBanker,
@@ -798,7 +862,7 @@ export function initRoomHub() {
         select: { uid: true, nickname: true, avatarUrl: true },
       });
       if (!user) return;
-      broadcastToAllRooms({
+      await broadcastToAllRoomsCluster({
         type: 'reward',
         title: payload.title,
         amountCents: payload.amountCents,

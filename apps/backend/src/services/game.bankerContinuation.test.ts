@@ -121,6 +121,17 @@ const memory = vi.hoisted(() => {
   };
 
   const bankerBidApi = {
+    findFirst: async ({ where }: any) => {
+      const matches = [...bids.values()]
+        .filter((bid) => bid.roundId === where.roundId)
+        .sort((left, right) => {
+          if (left.amountCents !== right.amountCents) {
+            return left.amountCents > right.amountCents ? -1 : 1;
+          }
+          return left.createdAt.getTime() - right.createdAt.getTime();
+        });
+      return matches[0] ? { ...matches[0] } : null;
+    },
     upsert: async ({ where, create, update }: any) => {
       const existing = [...bids.values()].find(
         (bid) =>
@@ -346,6 +357,29 @@ describe('庄家竞拍与续庄完整循环', () => {
       phase: RoundPhase.BETTING,
       isContinued: true,
     });
+  });
+
+  it('最后 5 秒内出现新高价时倒计时重置为 5 秒，非新高或时间充裕则不延长', async () => {
+    const round = memory.rounds.get('round-1');
+    await placeBankerBid('round-1', 'player-b', 40_000n);
+
+    // 剩 3 秒时出现新高价 → 截止时间重置为 now + 5 秒
+    round.bidEndsAt = new Date(Date.now() + 3_000);
+    const higher = await placeBankerBid('round-1', 'banker-a', 90_000n);
+    expect(higher.extendedEndsAt?.getTime()).toBe(Date.now() + 5_000);
+    expect(memory.rounds.get('round-1').bidEndsAt.getTime()).toBe(Date.now() + 5_000);
+
+    // 剩 3 秒时出价但不是新高 → 不延长
+    round.bidEndsAt = new Date(Date.now() + 3_000);
+    const lower = await placeBankerBid('round-1', 'player-b', 50_000n);
+    expect(lower.extendedEndsAt).toBeNull();
+    expect(memory.rounds.get('round-1').bidEndsAt.getTime()).toBe(Date.now() + 3_000);
+
+    // 剩余时间超过 5 秒时的新高价 → 不延长
+    round.bidEndsAt = new Date(Date.now() + 20_000);
+    const early = await placeBankerBid('round-1', 'player-b', 120_000n);
+    expect(early.extendedEndsAt).toBeNull();
+    expect(memory.rounds.get('round-1').bidEndsAt.getTime()).toBe(Date.now() + 20_000);
   });
 
   it('截标时跳过已失去资格的最高出价者', async () => {

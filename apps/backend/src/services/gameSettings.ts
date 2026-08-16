@@ -48,7 +48,7 @@ export const DEFAULT_ROUND_CONFIG: RoundConfig = {
   /** 竞标出价窗口：全员可出价；结束后进入 3/2/1 最终确认再锁定庄家 */
   bidDurationSeconds: 30,
   betDurationSeconds: 50,
-  claimDurationSeconds: 30,
+  claimDurationSeconds: 40,
   continuationWindowSeconds: 15,
   bankerBidMinCents: 10_000,
   bankerBidMaxCents: 100_000_000,
@@ -172,7 +172,7 @@ export const DEFAULT_MESSAGE_TEMPLATES: MessageTemplates = {
   welcome:
     '欢迎进入【至尊牛牛】互动群\n\n这里不是旁观大厅，而是本局实时战场。\n请先完成实名与充值，凑齐人数后自动开局。\n准备好了，就留下做局。',
   bidStart:
-    '【第 {{seqNo}} 局 · 庄家竞标开启】\n\n全员可上庄，现在开始叫价！\n竞标时长：{{bidSeconds}} 秒\n最低出价：RM {{minBid}}\n\n直接发送金额即可出价；再次发送=改价。\n有人出价后我会实时 @ 播报，欢迎继续加价。\n最高有效价锁定庄家。',
+    '【第 {{seqNo}} 局 · 庄家竞标开启】\n\n全员可上庄，现在开始叫价！\n竞标时长：{{bidSeconds}} 秒\n最低出价：RM {{minBid}}\n\n直接发送金额即可出价；再次发送=改价。\n有人出价后我会实时 @ 播报，欢迎继续加价。\n最后 5 秒内出现更高价，倒计时自动重置为 5 秒，直到无人加价。\n最高有效价锁定庄家。',
   bidPlaced:
     '叫价更新！\n{{player}} 出价 RM {{amount}}\n\n当前最高：{{leader}} · RM {{high}}\n还有没有更高？直接发金额，错过就没了！',
   bidClosing:

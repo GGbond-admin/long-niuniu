@@ -8,6 +8,15 @@ export interface TgWebApp {
   openTelegramLink(url: string): void;
   openLink?(url: string, options?: { try_instant_view?: boolean }): void;
   colorScheme: 'light' | 'dark';
+  version?: string;
+  platform?: string;
+  isVersionAtLeast?(version: string): boolean;
+  /** Bot API 8.0+：真全屏（盖住状态栏与 Telegram 顶栏） */
+  requestFullscreen?(): void;
+  exitFullscreen?(): void;
+  isFullscreen?: boolean;
+  onEvent?(event: string, handler: () => void): void;
+  offEvent?(event: string, handler: () => void): void;
 }
 
 declare global {
@@ -18,6 +27,37 @@ declare global {
 
 export function tg(): TgWebApp | null {
   return window.Telegram?.WebApp ?? null;
+}
+
+/**
+ * 手机端进入即请求真全屏（Bot API 8.0+，Telegram 客户端 ≥ 11.0）。
+ * 桌面端保持普通展开：桌面 requestFullscreen 会弹成独立全屏窗口，体验反而差。
+ * 全屏状态同步到 body.tg-fullscreen，CSS 据此让出状态栏/系统按钮安全区。
+ */
+export function initTelegramFullscreen() {
+  const app = tg();
+  if (!app) return;
+
+  const syncClass = () => {
+    document.body.classList.toggle('tg-fullscreen', app.isFullscreen === true);
+  };
+  app.onEvent?.('fullscreenChanged', syncClass);
+  app.onEvent?.('fullscreenFailed', syncClass);
+  syncClass();
+
+  const isMobile = app.platform === 'android' || app.platform === 'android_x' || app.platform === 'ios';
+  let supported = false;
+  try {
+    supported = app.isVersionAtLeast?.('8.0') === true && typeof app.requestFullscreen === 'function';
+  } catch {
+    supported = false;
+  }
+  if (!isMobile || !supported || app.isFullscreen) return;
+  try {
+    app.requestFullscreen?.();
+  } catch {
+    // 老客户端/不支持的环境：保持 expand() 的效果即可
+  }
 }
 
 export function getInitData(): string {

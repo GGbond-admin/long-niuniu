@@ -16,7 +16,8 @@ export function getToken(): string | null {
 }
 
 export function invalidateDeviceSession(code = 'DEVICE_SESSION_EXPIRED'): void {
-  token = null;
+  // 设备待重绑时 token 对绑定流程仍有效，保留它让用户直接去绑定页，而不是刷新重登
+  if (code !== 'DEVICE_REBIND_REQUIRED') token = null;
   if (typeof window !== 'undefined') {
     window.dispatchEvent(
       new CustomEvent(DEVICE_SESSION_INVALID_EVENT, {
@@ -70,6 +71,29 @@ async function upload<T>(path: string, file: File): Promise<T> {
   return res.json();
 }
 
+const joinRoomRequests = new Map<string, Promise<RoomState>>();
+
+function joinRoom(roomId: string): Promise<RoomState> {
+  const key = `${token ?? 'anonymous'}:${roomId}`;
+  const existing = joinRoomRequests.get(key);
+  if (existing) return existing;
+
+  const pending = request<RoomState>(`/api/game/rooms/${roomId}/join`, {
+    method: 'POST',
+    body: '{}',
+  });
+  joinRoomRequests.set(key, pending);
+  void pending.then(
+    () => {
+      if (joinRoomRequests.get(key) === pending) joinRoomRequests.delete(key);
+    },
+    () => {
+      if (joinRoomRequests.get(key) === pending) joinRoomRequests.delete(key);
+    },
+  );
+  return pending;
+}
+
 export const api = {
   login: (initData: string, deviceId: string, botUsername?: string) =>
     request<{
@@ -81,6 +105,18 @@ export const api = {
     }>('/api/auth/login', {
       method: 'POST',
       body: JSON.stringify({ initData, deviceId, botUsername }),
+    }),
+
+  /** 自助换绑设备：Telegram 身份 + 支付密码双验证，7 天限一次 */
+  deviceRebind: (
+    initData: string,
+    deviceId: string,
+    paymentPin: string,
+    botUsername?: string,
+  ) =>
+    request<{ ok: boolean; alreadyBound?: boolean }>('/api/auth/device-rebind', {
+      method: 'POST',
+      body: JSON.stringify({ initData, deviceId, paymentPin, botUsername }),
     }),
 
   me: () =>
@@ -414,8 +450,7 @@ export const api = {
       }>;
     }>('/api/game/lobby'),
 
-  joinRoom: (roomId: string) =>
-    request<RoomState>(`/api/game/rooms/${roomId}/join`, { method: 'POST', body: '{}' }),
+  joinRoom,
   leaveRoom: (roomId: string) =>
     request<{ ok: boolean }>(`/api/game/rooms/${roomId}/leave`, { method: 'POST', body: '{}' }),
   roomState: (roomId: string) => request<RoomState>(`/api/game/rooms/${roomId}/state`),

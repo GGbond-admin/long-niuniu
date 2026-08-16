@@ -12,9 +12,11 @@ type PlusAction = {
 };
 
 type Props = {
-  value: string;
-  onChange: (value: string) => void;
-  onSend: () => void;
+  /**
+   * 发送回调：返回 false（或 resolve false）表示发送未成功，保留输入内容。
+   * 草稿状态由本组件内部维护，避免父级（整页）每次按键都重渲染。
+   */
+  onSend: (content: string) => boolean | void | Promise<boolean | void>;
   disabled?: boolean;
   busy?: boolean;
   placeholder?: string;
@@ -36,8 +38,6 @@ type Props = {
  * 表情插入输入框；贴纸直接发送。
  */
 export default function ChatComposer({
-  value,
-  onChange,
   onSend,
   disabled = false,
   busy = false,
@@ -50,6 +50,7 @@ export default function ChatComposer({
   maxLength = 200,
   toolsHighlight = false,
 }: Props) {
+  const [value, setValue] = useState('');
   const [panel, setPanel] = useState<'tools' | 'plus' | null>(null);
   const [toolTab, setToolTab] = useState<'dice' | 'emoji' | 'sticker'>(
     dicePanel ? defaultToolTab : 'emoji',
@@ -66,7 +67,7 @@ export default function ChatComposer({
       const end = el.selectionEnd ?? value.length;
       const next = `${value.slice(0, start)}${emoji}${value.slice(end)}`.slice(0, maxLength);
       const caret = Math.min(start + emoji.length, next.length);
-      onChange(next);
+      setValue(next);
       requestAnimationFrame(() => {
         try {
           el.setSelectionRange(caret, caret);
@@ -76,14 +77,22 @@ export default function ChatComposer({
       });
       return;
     }
-    onChange(`${value}${emoji}`.slice(0, maxLength));
+    setValue(`${value}${emoji}`.slice(0, maxLength));
   }
 
   function submit(event: FormEvent) {
     event.preventDefault();
-    if (disabled || busy || !value.trim()) return;
-    onSend();
+    const content = value.trim();
+    if (disabled || busy || !content) return;
     setPanel(null);
+    const result = onSend(content);
+    if (result instanceof Promise) {
+      void result.then((ok) => {
+        if (ok !== false) setValue('');
+      });
+      return;
+    }
+    if (result !== false) setValue('');
   }
 
   function toggleTools() {
@@ -111,7 +120,7 @@ export default function ChatComposer({
         <input
           ref={inputRef}
           value={value}
-          onChange={(e) => onChange(e.target.value.slice(0, maxLength))}
+          onChange={(e) => setValue(e.target.value.slice(0, maxLength))}
           placeholder={placeholder}
           disabled={disabled}
           maxLength={maxLength}

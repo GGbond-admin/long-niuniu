@@ -67,7 +67,8 @@ type FeedItem =
       id: string;
       /** lock：大号数字；其余：与顶栏同步的实时文案 */
       lockEmoji?: string;
-      text?: string;
+      endsAt?: string | null;
+      template?: string;
       time?: string;
     }
   | {
@@ -127,7 +128,8 @@ type FeedItem =
       packetId?: string;
       title: string;
       subtitle: string;
-      seconds?: number | null;
+      endsAt?: string | null;
+      staticSeconds?: number | null;
       claimable?: boolean;
       /** 红包已结束/过期：点击查看抢包名单而非领取 */
       view?: boolean;
@@ -150,6 +152,8 @@ const ASSISTANT_AVATAR = '/avatars/assistant.jpg';
 const GAME_PACKET_GREETING = '恭喜发财，大吉大利';
 const LEADERBOARD_EMBLEM = '/game-ui/leaderboard-emblem-128.png';
 const REWARDS_EMBLEM = '/game-ui/rewards-emblem-128.png';
+/** 大群只渲染最近消息窗口，历史由后端持久化，重连时再取最近一段。 */
+const CLIENT_CHAT_LIMIT = 100;
 
 const PACKET_ERROR_TEXT: Record<string, string> = {
   PACKET_EMPTY: '来晚啦，红包已被抢光',
@@ -577,7 +581,7 @@ const DEMO_FEED: FeedItem[] = [
     id: 'demo-packet-live',
     title: '恭喜发财，大吉大利',
     subtitle: '点击领取',
-    seconds: 28,
+    staticSeconds: 28,
     claimable: true,
     demo: true,
     asChat: true,
@@ -622,14 +626,22 @@ const DEMO_FEED: FeedItem[] = [
   },
 ];
 
-/** 每秒刷新一次，供顶栏与聊天倒计时共用，避免两端时间错位 */
-function useNowTick() {
+/** 倒计时封装在最小子组件内，避免每秒重渲染整页聊天记录。 */
+function useRemainingSeconds(target: string | null | undefined): number | null {
   const [now, setNow] = useState(Date.now());
   useEffect(() => {
-    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
+    const targetMs = target ? new Date(target).getTime() : Number.NaN;
+    const tick = () => setNow(Date.now());
+    tick();
+    if (!Number.isFinite(targetMs) || targetMs <= Date.now()) return;
+    const timer = window.setInterval(() => {
+      const current = Date.now();
+      setNow(current);
+      if (current >= targetMs) window.clearInterval(timer);
+    }, 1_000);
     return () => window.clearInterval(timer);
-  }, []);
-  return now;
+  }, [target]);
+  return remainingSeconds(target, now);
 }
 
 function remainingSeconds(target: string | null | undefined, now: number): number | null {
@@ -649,6 +661,55 @@ function parseCountdownPayload(raw: string): CountdownPayload | null {
 
 function fillRemaining(template: string, remaining: number): string {
   return template.replace(/\{\{\s*remaining\s*\}\}/g, String(remaining));
+}
+
+function RemainingValue({ endsAt }: { endsAt: string }) {
+  return <>{useRemainingSeconds(endsAt) ?? '—'}</>;
+}
+
+function RemainingCopy({
+  endsAt,
+  template,
+}: {
+  endsAt?: string | null;
+  template: string;
+}) {
+  const remaining = useRemainingSeconds(endsAt) ?? 0;
+  return <>{fillRemaining(template, remaining)}</>;
+}
+
+function PacketSubtitle({
+  subtitle,
+  endsAt,
+  staticSeconds,
+}: {
+  subtitle: string;
+  endsAt?: string | null;
+  staticSeconds?: number | null;
+}) {
+  const remaining = useRemainingSeconds(endsAt);
+  const seconds = remaining ?? staticSeconds;
+  return <>{typeof seconds === 'number' ? `${subtitle} · ${seconds}s` : subtitle}</>;
+}
+
+function ContinuationConfirm({
+  deadline,
+  busy,
+  onConfirm,
+}: {
+  deadline: string;
+  busy: boolean;
+  onConfirm: () => void;
+}) {
+  const seconds = useRemainingSeconds(deadline);
+  if (seconds === null || seconds <= 0) return null;
+  return (
+    <div className="game-room-actions compact">
+      <button className="primary-action" type="button" disabled={busy} onClick={onConfirm}>
+        续庄确认（{seconds}s）
+      </button>
+    </div>
+  );
 }
 
 const SCORE_HAND_TEXT: Record<string, string> = {
@@ -740,7 +801,6 @@ export default function GameRoom() {
   const showDemoFeed = searchParams.get('demo') === '1';
   const [state, setState] = useState<RoomState | null>(null);
   const [chat, setChat] = useState<ChatMsg[]>([]);
-  const [draft, setDraft] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [myUid, setMyUid] = useState('');
@@ -825,6 +885,7 @@ export default function GameRoom() {
   const [rpBusy, setRpBusy] = useState(false);
   const streamRef = useRef<HTMLDivElement>(null);
   const socketRef = useRef<WebSocket | null>(null);
+  const didReceiveHistoryRef = useRef(false);
   const betPendingRef = useRef(false);
   const betPendingTimerRef = useRef<number | null>(null);
   const betNoticeTimerRef = useRef<number | null>(null);
@@ -840,6 +901,14 @@ export default function GameRoom() {
   const stickToBottomRef = useRef(true);
   const didInitialScrollRef = useRef(false);
   const [channelOpen, setChannelOpen] = useState(false);
+  /** 上翻看历史期间有新消息：不强拉回底部，浮出「有新消息」按钮 */
+  const [newBelow, setNewBelow] = useState(false);
+  const newBelowRef = useRef(false);
+  function markNewBelow(value: boolean) {
+    if (newBelowRef.current === value) return;
+    newBelowRef.current = value;
+    setNewBelow(value);
+  }
 
   function clearPendingBet() {
     betPendingRef.current = false;
@@ -882,7 +951,6 @@ export default function GameRoom() {
 
   // 倒计时必须跟当前阶段绑定，避免沿用上阶段时间戳造成「还有 N 秒」的假象
   const phase = state?.round?.phase;
-  const nowTick = useNowTick();
   const deadline = (() => {
     const round = state?.round;
     if (!round) return null;
@@ -891,9 +959,7 @@ export default function GameRoom() {
     if (round.phase === 'CLAIMING') return round.claimEndsAt ?? null;
     return null;
   })();
-  const seconds = remainingSeconds(deadline, nowTick);
   const continuation = state?.continuation;
-  const continuationSeconds = remainingSeconds(continuation?.deadline, nowTick);
   const packetDiceDone =
     phase === 'SENDING_PACKET' && (!!state?.round?.diceThrown || diceSent);
   const phaseLabel =
@@ -905,8 +971,8 @@ export default function GameRoom() {
           : '等待庄家投骰'
       : phases[phase ?? 'WAITING'] ?? '等待开局';
   const phaseAside =
-    seconds !== null
-      ? { value: String(seconds), label: '秒' }
+    deadline
+      ? { value: <RemainingValue endsAt={deadline} />, label: '秒' }
       : phase === 'SENDING_PACKET'
         ? packetDiceDone
           ? { value: '准备', label: '发包' }
@@ -1014,8 +1080,7 @@ export default function GameRoom() {
             time: formatTime(msg.at),
           });
         } else {
-          const endsAt = payload?.endsAt ?? null;
-          const remaining = remainingSeconds(endsAt, nowTick) ?? seconds ?? 0;
+          const endsAt = payload?.endsAt ?? deadline;
           const template =
             payload?.template ||
             (payload?.mode === 'bid'
@@ -1026,7 +1091,8 @@ export default function GameRoom() {
           items.push({
             kind: 'countdown',
             id: msg.id,
-            text: fillRemaining(stripAssistHtml(template), remaining),
+            endsAt,
+            template: stripAssistHtml(template),
             time: formatTime(msg.at),
           });
         }
@@ -1100,7 +1166,7 @@ export default function GameRoom() {
                   : isPublishingCurrentRound
                     ? '红包已发出，等待开抢'
                     : '红包已结束，点击查看',
-          seconds: canOpen ? seconds : null,
+          endsAt: canOpen ? deadline : null,
           claimable: canOpen || canView,
           view: viewEnded,
           waiting: isPublishingCurrentRound,
@@ -1171,7 +1237,7 @@ export default function GameRoom() {
             : state.round.phase === 'CLAIM_EXPIRED'
               ? '红包已过期，点击查看'
               : '未参与本局，无法领取',
-        seconds: canOpen ? seconds : null,
+        endsAt: canOpen ? deadline : null,
         claimable: canOpen || canView,
         view: viewEnded,
         demo: false,
@@ -1196,11 +1262,24 @@ export default function GameRoom() {
     }
 
     return items;
-  }, [state, chat, myUid, seconds, nowTick, showDemoFeed, liveBusy]);
+  }, [state, chat, myUid, showDemoFeed, liveBusy, deadline]);
+
+  // 消息窗口满 100 条后每来一条就挤掉最旧一条，feed.length 恒定；
+  // 贴底必须以「末条身份」为触发条件，否则新消息会停在输入栏下方看不见。
+  const feedTailId = feed.length > 0 ? feed[feed.length - 1]!.id : '';
 
   async function refresh() {
     if (!roomId) return;
-    // 刷新时重新 join，避免短暂离房后成员变成 LEFT 导致竞标/下注被拒
+    // 被动刷新只读状态即可；join（带成员写入）只在进房与断线重连时做，
+    // 否则每次广播都触发全员 join 会把后端打满，导致整个互动群响应变卡。
+    const next = await api.roomState(roomId);
+    setState(next);
+    setError('');
+  }
+
+  async function rejoin() {
+    if (!roomId) return;
+    // 重新 join，恢复可能被标记为 LEFT 的成员身份，避免竞标/下注被拒
     const next = await api.joinRoom(roomId);
     setState(next);
     setError('');
@@ -1211,13 +1290,16 @@ export default function GameRoom() {
     let cancelled = false;
     let socket: WebSocket | null = null;
     let refreshTimer: number | null = null;
+    let refreshDueAt = 0;
     let reconnectTimer: number | null = null;
     let reconnectAttempts = 0;
+    let hasOpenedSocket = false;
     setConnState('connecting');
     stickToBottomRef.current = true;
     didInitialScrollRef.current = false;
     setChannelOpen(false);
     setChat([]);
+    didReceiveHistoryRef.current = false;
     clearPendingBet();
     dismissPrivateBetNotice();
     const storedClaims = readStoredPacketClaims(roomId);
@@ -1226,16 +1308,24 @@ export default function GameRoom() {
     packetDetailCacheRef.current = {};
     setAnimatedDiceIds({});
 
-    const scheduleRefresh = () => {
-      if (refreshTimer) window.clearTimeout(refreshTimer);
+    const scheduleRefresh = (delayMs = 250) => {
+      const dueAt = Date.now() + delayMs;
+      // 已有更早的刷新时，不让后来的恢复心跳把它推迟。
+      if (refreshTimer !== null && refreshDueAt <= dueAt) return;
+      if (refreshTimer !== null) window.clearTimeout(refreshTimer);
+      refreshDueAt = dueAt;
       refreshTimer = window.setTimeout(() => {
+        refreshTimer = null;
+        refreshDueAt = 0;
         void refresh().catch(() => undefined);
-      }, 250);
+      }, delayMs);
     };
 
     // 回到前台时若连接已断开，立即重连而不是等退避计时
     const onVisibilityChange = () => {
-      if (document.visibilityState === 'visible') reconnectNowRef.current();
+      if (document.visibilityState !== 'visible') return;
+      reconnectNowRef.current();
+      scheduleRefresh(0);
     };
     document.addEventListener('visibilitychange', onVisibilityChange);
 
@@ -1267,17 +1357,23 @@ export default function GameRoom() {
               action?: 'bet' | 'all_in';
               acceptance?: unknown;
               reason?: string;
+              heartbeat?: boolean;
               /** tip_thanks 附带祝福语 */
               tipMessage?: string;
               avatarUrl?: string | null;
               user?: { uid: string; nickname: string; avatarUrl?: string | null };
             };
             if (payload.type === 'chat_history' && payload.messages) {
-              stickToBottomRef.current = true;
-              didInitialScrollRef.current = false;
+              const recentMessages = payload.messages.slice(-CLIENT_CHAT_LIMIT);
+              const isInitialHistory = !didReceiveHistoryRef.current;
+              didReceiveHistoryRef.current = true;
+              if (isInitialHistory) {
+                stickToBottomRef.current = true;
+                didInitialScrollRef.current = false;
+              }
               // 历史加载可能晚于实时 chat；按 ID 合并，不能覆盖刚收到的对局红包。
               setChat((prev) => {
-                const merged = [...payload.messages!];
+                const merged = [...recentMessages];
                 const ids = new Set(merged.map((message) => message.id));
                 for (const current of prev) {
                   if (ids.has(current.id)) continue;
@@ -1293,11 +1389,13 @@ export default function GameRoom() {
                   merged.push(current);
                   ids.add(current.id);
                 }
-                return merged.sort((left, right) => left.at.localeCompare(right.at));
+                return merged
+                  .sort((left, right) => left.at.localeCompare(right.at))
+                  .slice(-CLIENT_CHAT_LIMIT);
               });
               const packetIds = [
                 ...new Set(
-                  payload.messages
+                  recentMessages
                     .filter((message) => message.type === 'USER_PACKET')
                     .map((message) => parseUserPacketContent(message.content).id)
                     .filter(Boolean),
@@ -1339,7 +1437,10 @@ export default function GameRoom() {
                   ) {
                     return withoutLocal;
                   }
-                  return [...withoutLocal.slice(-99), incoming];
+                  return [
+                    ...withoutLocal.slice(-(CLIENT_CHAT_LIMIT - 1)),
+                    incoming,
+                  ];
                 }
                 const existingIndex = prev.findIndex((message) => message.id === incoming.id);
                 if (existingIndex >= 0) {
@@ -1347,7 +1448,7 @@ export default function GameRoom() {
                     index === existingIndex ? { ...message, ...incoming } : message,
                   );
                 }
-                return [...prev.slice(-99), incoming];
+                return [...prev.slice(-(CLIENT_CHAT_LIMIT - 1)), incoming];
               });
             } else if (
               payload.type === 'chat_update' &&
@@ -1357,7 +1458,9 @@ export default function GameRoom() {
               const updated = payload.message;
               setChat((prev) => {
                 const exists = prev.some((item) => item.id === updated.id);
-                if (!exists) return [...prev.slice(-99), updated];
+                if (!exists) {
+                  return [...prev.slice(-(CLIENT_CHAT_LIMIT - 1)), updated];
+                }
                 return prev.map((item) => (item.id === updated.id ? { ...item, ...updated } : item));
               });
             } else if (
@@ -1427,8 +1530,14 @@ export default function GameRoom() {
                     ? tipPayload.avatarUrl
                     : undefined,
               });
+            } else if (payload.type === 'round') {
+              // 周期恢复心跳让各客户端随机错峰，避免数百人同一毫秒请求 state。
+              scheduleRefresh(
+                payload.heartbeat
+                  ? 250 + Math.floor(Math.random() * 1_750)
+                  : 250,
+              );
             } else if (
-              payload.type === 'round' ||
               payload.type === 'claim' ||
               payload.type === 'activity' ||
               payload.type === 'reward'
@@ -1452,10 +1561,12 @@ export default function GameRoom() {
           socketRef.current = ws;
           ws.onopen = () => {
             if (cancelled) return;
+            const isReconnect = hasOpenedSocket;
+            hasOpenedSocket = true;
             reconnectAttempts = 0;
             setConnState('online');
-            // 重连成功后立即同步一次状态，补回断线期间错过的对局进展
-            scheduleRefresh();
+            // 首次进房已完成 join；重连后只读同步状态，避免重复写成员记录。
+            if (isReconnect) scheduleRefresh();
           };
           ws.onmessage = handleSocketMessage;
           ws.onclose = (event) => {
@@ -1516,7 +1627,7 @@ export default function GameRoom() {
 
     return () => {
       cancelled = true;
-      if (refreshTimer) window.clearTimeout(refreshTimer);
+      if (refreshTimer !== null) window.clearTimeout(refreshTimer);
       if (reconnectTimer) window.clearTimeout(reconnectTimer);
       document.removeEventListener('visibilitychange', onVisibilityChange);
       reconnectNowRef.current = () => {};
@@ -1543,6 +1654,7 @@ export default function GameRoom() {
     const onScroll = () => {
       const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
       stickToBottomRef.current = distance < 140;
+      if (stickToBottomRef.current) markNewBelow(false);
     };
     el.addEventListener('scroll', onScroll, { passive: true });
     return () => el.removeEventListener('scroll', onScroll);
@@ -1553,9 +1665,17 @@ export default function GameRoom() {
     const el = streamRef.current;
     if (!el) return;
     const force = !didInitialScrollRef.current || stickToBottomRef.current;
-    if (!force) return;
-    const behavior: ScrollBehavior = didInitialScrollRef.current ? 'smooth' : 'auto';
+    if (!force) {
+      markNewBelow(true);
+      return;
+    }
+    markNewBelow(false);
     const jump = () => {
+      // 几百人同时刷屏时平滑滚动会被连续打断、停在半路导致「脱底」，
+      // 落后超过一屏的一小段就直接瞬时跳到底，只有小距离才用平滑。
+      const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+      const behavior: ScrollBehavior =
+        !didInitialScrollRef.current || distance > 240 ? 'auto' : 'smooth';
       el.scrollTo({ top: el.scrollHeight, behavior });
       didInitialScrollRef.current = true;
       stickToBottomRef.current = true;
@@ -1569,7 +1689,7 @@ export default function GameRoom() {
       cancelAnimationFrame(raf1);
       if (raf2) cancelAnimationFrame(raf2);
     };
-  }, [loading, feed.length, chat.length]);
+  }, [loading, feed.length, feedTailId]);
 
   useEffect(() => {
     void api
@@ -1665,6 +1785,16 @@ export default function GameRoom() {
     }
   }
 
+  /** 自己发出内容后强制回到底部：即使之前上翻了历史，也应立刻看到自己的消息 */
+  function jumpToBottom() {
+    stickToBottomRef.current = true;
+    markNewBelow(false);
+    requestAnimationFrame(() => {
+      const el = streamRef.current;
+      if (el) el.scrollTop = el.scrollHeight;
+    });
+  }
+
   /** 连接未就绪时给出可见提示，避免玩家以为消息/出价已发出 */
   function ensureSocketReady(): boolean {
     if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) return true;
@@ -1673,16 +1803,16 @@ export default function GameRoom() {
     return false;
   }
 
-  function sendChat() {
-    const content = draft.trim();
-    if (!content) return;
-    if (!ensureSocketReady()) return;
+  /** 返回 false 表示未发送成功（连接断开/重复下注中），输入框保留内容 */
+  function sendChat(content: string): boolean {
+    if (!content) return false;
+    if (!ensureSocketReady()) return false;
     const pendingBet = phase === 'BETTING' ? parsePendingBetCommand(content) : null;
-    if (pendingBet && betPendingRef.current) return;
+    if (pendingBet && betPendingRef.current) return false;
 
     setError('');
     socketRef.current!.send(JSON.stringify({ type: 'chat', content }));
-    setDraft('');
+    jumpToBottom();
     if (pendingBet) {
       betPendingRef.current = true;
       setBetPending(true);
@@ -1699,6 +1829,7 @@ export default function GameRoom() {
         });
       }, 10_000);
     }
+    return true;
   }
 
   function leaveAndGoBack() {
@@ -1722,6 +1853,7 @@ export default function GameRoom() {
   function sendSticker(stickerId: string) {
     if (!ensureSocketReady()) return;
     socketRef.current!.send(JSON.stringify({ type: 'sticker', stickerId }));
+    jumpToBottom();
   }
 
   /** 首次领取才播放短动效；已领取/已结束的红包直接打开领取详情。 */
@@ -1961,10 +2093,7 @@ export default function GameRoom() {
     if (!ensureSocketReady()) return;
     socketRef.current!.send(JSON.stringify({ type: 'dice' }));
     setDiceSent(true);
-    requestAnimationFrame(() => {
-      const el = streamRef.current;
-      if (el) el.scrollTop = el.scrollHeight;
-    });
+    jumpToBottom();
   }
 
   const composerHint = betPending
@@ -2040,10 +2169,8 @@ export default function GameRoom() {
               className="game-room-refresh"
               type="button"
               onClick={() => {
-                // 刷新同时检查连接：断开时立即重建 WebSocket；
-                // 被移出房间的场景下 refresh() 会重新 join，成功后再重连一次即可恢复
-                reconnectNowRef.current();
-                void refresh()
+                // 用户主动刷新时重新 join，可恢复短暂断线后被标记 LEFT 的成员身份。
+                void rejoin()
                   .then(() => reconnectNowRef.current())
                   .catch(() => setError('刷新失败，请检查网络后重试'));
               }}
@@ -2159,7 +2286,12 @@ export default function GameRoom() {
                           {item.lockEmoji}
                         </p>
                       ) : (
-                        <p aria-live="polite">{item.text}</p>
+                        <p aria-live="polite">
+                          <RemainingCopy
+                            endsAt={item.endsAt}
+                            template={item.template ?? ''}
+                          />
+                        </p>
                       )}
                       {item.time && <time>{item.time}</time>}
                     </div>
@@ -2215,9 +2347,9 @@ export default function GameRoom() {
               const isDemo = !!item.demo;
               return (
                 <div className={`feed-chat ${item.mine ? 'mine' : 'theirs'}`} key={item.id}>
-                  <ChatAvatar url={item.avatar} name={item.mine ? '我' : item.name} />
+                  {!item.mine && <ChatAvatar url={item.avatar} name={item.name} />}
                   <div className="feed-chat-body">
-                    <div className="feed-chat-name">{item.mine ? '我' : item.name}</div>
+                    {!item.mine && <div className="feed-chat-name">{item.name}</div>}
                     <button
                       type="button"
                       className={`wx-rp wx-rp-standard ${opened || gone || isDemo ? 'opened' : ''}`}
@@ -2265,9 +2397,9 @@ export default function GameRoom() {
             if (item.kind === 'userTip') {
               return (
                 <div className={`feed-chat ${item.mine ? 'mine' : 'theirs'}`} key={item.id}>
-                  <ChatAvatar url={item.avatar} name={item.mine ? '我' : item.name} />
+                  {!item.mine && <ChatAvatar url={item.avatar} name={item.name} />}
                   <div className="feed-chat-body">
-                    <div className="feed-chat-name">{item.mine ? '我' : item.name}</div>
+                    {!item.mine && <div className="feed-chat-name">{item.name}</div>}
                     <div
                       className={`wx-transfer ${item.mine ? 'mine' : 'theirs'}`}
                       aria-label="转账给客服"
@@ -2331,9 +2463,15 @@ export default function GameRoom() {
                           <div className="wx-rp-copy">
                             <strong>{item.title}</strong>
                             <small>
-                              {item.claimable && typeof item.seconds === 'number'
-                                ? `${item.subtitle} · ${item.seconds}s`
-                                : item.subtitle}
+                              {item.claimable ? (
+                                <PacketSubtitle
+                                  subtitle={item.subtitle}
+                                  endsAt={item.endsAt}
+                                  staticSeconds={item.staticSeconds}
+                                />
+                              ) : (
+                                item.subtitle
+                              )}
                             </small>
                           </div>
                         </div>
@@ -2362,6 +2500,16 @@ export default function GameRoom() {
             return null;
             })}
         </div>
+
+        {newBelow && (
+          <button
+            type="button"
+            className="feed-jump-latest"
+            onClick={jumpToBottom}
+          >
+            ↓ 有新消息
+          </button>
+        )}
       </div>
 
       <div className="game-room-footer">
@@ -2370,24 +2518,17 @@ export default function GameRoom() {
         )}
         {error && <div className="chat-error-bar">{error}</div>}
 
-        {continuation?.mine && continuationSeconds !== null && continuationSeconds > 0 && (
-          <div className="game-room-actions compact">
-            <button
-              className="primary-action"
-              type="button"
-              disabled={busy}
-              onClick={() =>
-                void runAction(() => api.continueBanker(roomId, continuation.previousRoundId))
-              }
-            >
-              续庄确认（{continuationSeconds}s）
-            </button>
-          </div>
+        {continuation?.mine && continuation.deadline && (
+          <ContinuationConfirm
+            deadline={continuation.deadline}
+            busy={busy}
+            onConfirm={() =>
+              void runAction(() => api.continueBanker(roomId, continuation.previousRoundId))
+            }
+          />
         )}
 
         <ChatComposer
-          value={draft}
-          onChange={setDraft}
           onSend={sendChat}
           disabled={chatMuted}
           busy={betPending}

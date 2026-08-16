@@ -6,13 +6,25 @@ import { onboardingStateOf, upsertUserFromTelegram } from '../services/user.js';
 import { env } from '../config.js';
 import { decryptSecret, safeDecryptSecret, safeMaskSecret } from '../lib/crypto.js';
 import { isPresetAvatarUrl, PRESET_AVATAR_URLS } from '../data/presetAvatars.js';
-import { broadcastUserProfileChanged } from '../services/roomHub.js';
+import {
+  broadcastUserProfileChanged,
+  invalidateUserConnections,
+} from '../services/roomHub.js';
+import { verifyPaymentPin } from '../services/paymentPin.js';
+import { pushService } from '../services/push.js';
 
 const loginSchema = z.object({
   initData: z.string().min(1),
   botUsername: z.string().regex(/^[A-Za-z0-9_]{5,64}$/).optional(),
   deviceId: z.string().min(8).max(256),
 });
+
+const deviceRebindSchema = loginSchema.extend({
+  paymentPin: z.string().regex(/^\d{6}$/),
+});
+
+/** 自助换绑频率：7 天内限一次；换绑后 24 小时暂停提现（钱包侧校验） */
+const SELF_REBIND_COOLDOWN_MS = 7 * 24 * 60 * 60 * 1000;
 
 async function resolveBotToken(botUsername?: string): Promise<{ token: string; botId?: string } | null> {
   if (botUsername) {
@@ -88,6 +100,96 @@ export async function authRoutes(app: FastifyInstance) {
       },
       pendingInviterUid: user.inviterId ? null : refUid,
     };
+  });
+
+  /**
+   * 自助换绑设备：被 DEVICE_MISMATCH 挡在登录外的用户，凭 Telegram 身份（initData）
+   * + 支付密码把账号换绑到当前设备。7 天限一次；换绑后 24 小时暂停提现（钱包侧校验）。
+   * 未设支付密码的账号没有第二凭证，仍需走客服人工核验。
+   */
+  app.post('/api/auth/device-rebind', async (req, reply) => {
+    const body = deviceRebindSchema.parse(req.body);
+
+    let tgUser: { id: number } | null = null;
+    const devMatch =
+      env.nodeEnv === 'development' ? /^dev:(\d+)(?::(.+))?$/.exec(body.initData) : null;
+    if (devMatch) {
+      tgUser = { id: parseInt(devMatch[1], 10) };
+    } else {
+      const botInfo = await resolveBotToken(body.botUsername);
+      if (!botInfo) return reply.code(503).send({ error: 'NO_BOT_CONFIGURED' });
+      const verified = verifyInitData(body.initData, botInfo.token);
+      if (!verified) return reply.code(401).send({ error: 'INVALID_INIT_DATA' });
+      tgUser = verified.user;
+    }
+
+    const user = await prisma.user.findUnique({
+      where: { tgId: BigInt(tgUser.id) },
+      include: { device: true, paymentPin: true },
+    });
+    if (!user || user.status !== 'ACTIVE') {
+      return reply.code(403).send({ error: 'USER_BANNED' });
+    }
+    if (!user.device || user.device.status !== 'ACTIVE') {
+      // 没有生效中的绑定：走正常登录 + 绑定流程即可
+      return reply.code(409).send({
+        error: 'NO_ACTIVE_DEVICE',
+        message: '当前无需换绑，请重新打开小程序登录',
+      });
+    }
+    if (user.device.deviceId === body.deviceId) {
+      return { ok: true, alreadyBound: true };
+    }
+    if (!user.paymentPin?.isSet) {
+      return reply.code(409).send({
+        error: 'PAYMENT_PIN_NOT_SET',
+        message: '该账号未设置支付密码，无法自助换绑，请联系客服核验身份',
+      });
+    }
+    const lastRebindAt = user.device.lastSelfRebindAt?.getTime() ?? 0;
+    if (Date.now() - lastRebindAt < SELF_REBIND_COOLDOWN_MS) {
+      const nextAllowedAt = new Date(lastRebindAt + SELF_REBIND_COOLDOWN_MS);
+      return reply.code(429).send({
+        error: 'REBIND_COOLDOWN',
+        message: `自助换绑 7 天内限一次，${nextAllowedAt.toLocaleDateString('zh-MY', { timeZone: 'Asia/Kuala_Lumpur' })} 后可再次操作；急需请联系客服`,
+        nextAllowedAt: nextAllowedAt.toISOString(),
+      });
+    }
+
+    // 支付密码校验：沿用统一的失败计数与锁定机制（连错锁定，全局错误处理器返回码）
+    await verifyPaymentPin(user.id, body.paymentPin);
+
+    await prisma.device.update({
+      where: { id: user.device.id },
+      data: {
+        deviceId: body.deviceId,
+        status: 'ACTIVE',
+        boundAt: new Date(),
+        lastSelfRebindAt: new Date(),
+        // 作废旧设备上的所有登录态
+        authVersion: { increment: 1 },
+      },
+    });
+    await invalidateUserConnections(user.id);
+    await prisma.auditLog.create({
+      data: {
+        adminId: 'self-service',
+        action: 'device_self_rebind',
+        target: user.id,
+        before: { deviceIdSuffix: user.device.deviceId.slice(-6) },
+        after: { deviceIdSuffix: body.deviceId.slice(-6) },
+        ip: req.ip,
+      },
+    });
+    // 通知用户：如非本人操作可立即挂失
+    void pushService
+      .sendCustom(
+        user.id,
+        '🔐 设备已更换\n\n您的账号刚完成设备换绑，旧设备已退出登录。\n为保障资金安全，换绑后 24 小时内暂停提现。\n如非本人操作，请立即联系客服冻结账号。',
+      )
+      .catch(() => undefined);
+
+    return { ok: true };
   });
 
   /** 当前用户与准入状态 */

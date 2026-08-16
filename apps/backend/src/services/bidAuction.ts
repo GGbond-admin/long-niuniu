@@ -13,6 +13,7 @@ import {
 import {
   appendAssistantChatOnce,
   appendSystemChatOnce,
+  rebroadcastRoomState,
   systemChat,
 } from './roomHub.js';
 
@@ -40,9 +41,11 @@ function stripHtml(html: string): string {
 }
 
 export function mentionUser(user: MentionUser): string {
-  if (user.tgUsername) return `@${user.tgUsername}`;
+  // 群内 @ 优先显示玩家昵称，避免暴露 Telegram 用户名或 UID
   const name = user.nickname?.trim();
-  return name ? `@${name}` : `@UID${user.uid}`;
+  if (name) return `@${name}`;
+  if (user.tgUsername) return `@${user.tgUsername}`;
+  return `@UID${user.uid}`;
 }
 
 async function loadBids(roundId: string) {
@@ -67,12 +70,14 @@ function formatBidList(
     .join('\n');
 }
 
-/** 有人出价后：@ 播报金额并追问是否有更高 */
+/** 有人出价后：@ 播报金额并追问是否有更高；若触发防狙击延时则一并播报 */
 export async function announceBidPlaced(params: {
   roundId: string;
   roomId: string;
   userId: string;
   amountCents: bigint;
+  /** placeBankerBid 在最后 5 秒内出现新高价时返回的新截止时间 */
+  extendedEndsAt?: Date | null;
 }): Promise<void> {
   const [templates, bidder, bids] = await Promise.all([
     getMessageTemplatesForRoom(params.roomId),
@@ -84,7 +89,7 @@ export async function announceBidPlaced(params: {
   ]);
   if (!bidder) return;
   const leader = bids[0];
-  const content = stripHtml(
+  let content = stripHtml(
     renderMessage(templates.bidPlaced, {
       player: mentionUser(bidder),
       amount: fromCents(params.amountCents),
@@ -92,7 +97,23 @@ export async function announceBidPlaced(params: {
       high: fromCents(leader?.amountCents ?? params.amountCents),
     }),
   );
+  if (params.extendedEndsAt) {
+    const seconds = Math.max(
+      1,
+      Math.round((params.extendedEndsAt.getTime() - Date.now()) / 1000),
+    );
+    const notice = `⏰ 最后时刻有人加价，倒计时重置为 ${seconds} 秒，还有更高的吗？`;
+    content = content ? `${content}\n\n${notice}` : notice;
+  }
   if (content) systemChat(params.roomId, content);
+  if (params.extendedEndsAt) {
+    // 立即重播房间状态，让前端倒计时同步跳回新的截止时间
+    await rebroadcastRoomState({
+      roomId: params.roomId,
+      roundId: params.roundId,
+      phase: RoundPhase.BANKER_BID,
+    }).catch(() => undefined);
+  }
 }
 
 type ClosingStep =

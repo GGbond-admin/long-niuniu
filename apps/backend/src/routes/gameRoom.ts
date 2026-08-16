@@ -14,6 +14,7 @@ import { prisma } from '../lib/prisma.js';
 import {
   canClaimPacket,
   continueBanker,
+  currentRoundPhaseForRoom,
   currentRoundForRoom,
   GameError,
   joinRoom,
@@ -26,6 +27,7 @@ import {
 import { announceBidPlaced } from '../services/bidAuction.js';
 import {
   handleRoomChatCommand,
+  isRoomCommandCandidate,
   isChatMuted,
   privateBetConfirmationFor,
   runBankerDiceCeremony,
@@ -48,7 +50,7 @@ import {
   addClient,
   appendChat,
   appendChatOnce,
-  broadcastToRoom,
+  broadcastToRoomCluster,
   onlineCount,
   removeClient,
   type RoomClient,
@@ -63,6 +65,11 @@ const amountSchema = z.object({
 const tipSchema = amountSchema.extend({
   requestId: z.string().uuid(),
 });
+const WS_SESSION_REVALIDATE_MS = 15_000;
+const WS_MESSAGE_RATE_WINDOW_MS = 5_000;
+const WS_MESSAGE_RATE_LIMIT = 12;
+const WS_MESSAGE_QUEUE_LIMIT = 20;
+const WS_MESSAGE_MAX_BYTES = 4 * 1024;
 
 function parseAmountCents(amount: string): bigint {
   try {
@@ -299,7 +306,9 @@ async function buildRoomState(roomId: string, userId: string) {
 }
 
 function activity(roomId: string, kind: string, user: { uid: string; nickname: string }) {
-  broadcastToRoom(roomId, { type: 'activity', kind, user });
+  void broadcastToRoomCluster(roomId, { type: 'activity', kind, user }).catch(
+    () => undefined,
+  );
 }
 
 function serializeBetAcceptance(result: Awaited<ReturnType<typeof placeBet>>) {
@@ -357,7 +366,7 @@ export async function gameRoomRoutes(app: FastifyInstance) {
     const round = await currentRoundForRoom(id);
     if (!round || round.phase !== RoundPhase.BANKER_BID) throw new GameError('INVALID_PHASE');
     const amountCents = parseAmountCents(amount);
-    await placeBankerBid(round.id, userId, amountCents);
+    const bid = await placeBankerBid(round.id, userId, amountCents);
     const user = await prisma.user.findUniqueOrThrow({
       where: { id: userId },
       select: { uid: true, nickname: true },
@@ -367,6 +376,7 @@ export async function gameRoomRoutes(app: FastifyInstance) {
       roomId: id,
       userId,
       amountCents,
+      extendedEndsAt: bid?.extendedEndsAt ?? null,
     }).catch(() => undefined);
     activity(id, 'bid', { uid: user.uid, nickname: user.nickname ?? user.uid });
     return buildRoomState(id, userId);
@@ -577,7 +587,7 @@ export async function gameRoomRoutes(app: FastifyInstance) {
           avatarUrl: user.avatarUrl,
         },
       });
-      broadcastToRoom(id, {
+      await broadcastToRoomCluster(id, {
         type: 'tip_thanks',
         nickname,
         amountCents: amount,
@@ -677,45 +687,71 @@ export async function gameRoomRoutes(app: FastifyInstance) {
     addClient(id, client);
     let lastPresenceTouch = 0;
     let cleanedUp = false;
+    let lastSessionValidatedAt = Date.now();
+    let sessionValidationInFlight: Promise<boolean> | null = null;
+    let messageQueue: Promise<void> = Promise.resolve();
+    let queuedMessages = 0;
+    let lastRateWarningAt = 0;
+    const messageTimestamps: number[] = [];
 
-    const sessionIsCurrent = async () => {
-      const current = await prisma.user.findUnique({
-        where: { id: user.id },
-        select: {
-          status: true,
-          kind: true,
-          device: {
-            select: {
-              deviceId: true,
-              authVersion: true,
-              status: true,
+    const sessionIsCurrent = async (force = false) => {
+      if (!force && Date.now() - lastSessionValidatedAt < WS_SESSION_REVALIDATE_MS) {
+        return true;
+      }
+      if (sessionValidationInFlight) return sessionValidationInFlight;
+      sessionValidationInFlight = (async () => {
+        const current = await prisma.user.findUnique({
+          where: { id: user.id },
+          select: {
+            status: true,
+            kind: true,
+            device: {
+              select: {
+                deviceId: true,
+                authVersion: true,
+                status: true,
+              },
             },
           },
-        },
-      });
-      return Boolean(
-        current &&
-          current.status === 'ACTIVE' &&
-          current.kind !== 'VIRTUAL' &&
-          current.device?.status === 'ACTIVE' &&
-          current.device.deviceId === claims.deviceId &&
-          current.device.authVersion === claims.deviceVersion,
-      );
+        });
+        const valid = Boolean(
+          current &&
+            current.status === 'ACTIVE' &&
+            current.kind !== 'VIRTUAL' &&
+            current.device?.status === 'ACTIVE' &&
+            current.device.deviceId === claims.deviceId &&
+            current.device.authVersion === claims.deviceVersion,
+        );
+        if (valid) lastSessionValidatedAt = Date.now();
+        return valid;
+      })();
+      try {
+        return await sessionValidationInFlight;
+      } finally {
+        sessionValidationInFlight = null;
+      }
     };
     const closeExpiredSession = () => {
       if (socket.readyState === socket.OPEN) socket.close(4403, 'DEVICE_SESSION_EXPIRED');
     };
     const sessionTimer = setInterval(() => {
-      void sessionIsCurrent()
+      void sessionIsCurrent(true)
         .then((valid) => {
           if (!valid) closeExpiredSession();
         })
         .catch(closeExpiredSession);
-    }, 15_000);
+    }, WS_SESSION_REVALIDATE_MS);
     sessionTimer.unref?.();
 
-    socket.on('message', (raw: Buffer) => {
-      void (async () => {
+    const warnRateLimit = () => {
+      const now = Date.now();
+      if (now - lastRateWarningAt < 1_000 || socket.readyState !== socket.OPEN) return;
+      lastRateWarningAt = now;
+      socket.send(JSON.stringify({ type: 'chat_error', message: '发送过快，请稍后再试' }));
+    };
+
+    const processSocketMessage = async (raw: Buffer) => {
+        if (cleanedUp) return;
         let payload: { type?: string; content?: string };
         try {
           payload = JSON.parse(raw.toString('utf8'));
@@ -730,6 +766,18 @@ export async function gameRoomRoutes(app: FastifyInstance) {
           socket.send(JSON.stringify({ type: 'pong' }));
           return;
         }
+        const rateNow = Date.now();
+        while (
+          messageTimestamps.length > 0 &&
+          messageTimestamps[0]! <= rateNow - WS_MESSAGE_RATE_WINDOW_MS
+        ) {
+          messageTimestamps.shift();
+        }
+        if (messageTimestamps.length >= WS_MESSAGE_RATE_LIMIT) {
+          warnRateLimit();
+          return;
+        }
+        messageTimestamps.push(rateNow);
         if (payload.type === 'dice') {
           const result = await runBankerDiceCeremony({ roomId: id, userId: user.id });
           if (result.kind === 'error') {
@@ -738,21 +786,16 @@ export async function gameRoomRoutes(app: FastifyInstance) {
           }
           return;
         }
-        const sender =
-          payload.type === 'sticker' || payload.type === 'chat' || payload.type === 'emoji'
-            ? await prisma.user.findUnique({
-                where: { id: user.id },
-                select: { uid: true, nickname: true, avatarUrl: true },
-              })
-            : null;
+        // 连接建立时已验明身份；昵称/头像变更会通过 profile_update 同步并更新 client。
+        // 不要为每一条聊天再查一次用户表，否则大群刷屏会形成数据库风暴。
         const senderProfile = {
-          uid: sender?.uid ?? user.uid,
-          nickname: sender?.nickname ?? sender?.uid ?? user.nickname ?? user.uid,
-          avatarUrl: sender ? sender.avatarUrl : user.avatarUrl,
+          uid: client.uid,
+          nickname: client.nickname,
+          avatarUrl: client.avatarUrl,
         };
         if (payload.type === 'sticker') {
-          const round = await currentRoundForRoom(id);
-          if (isChatMuted(round?.phase)) {
+          const phase = await currentRoundPhaseForRoom(id);
+          if (isChatMuted(phase)) {
             socket.send(
               JSON.stringify({ type: 'chat_error', message: '抢红包阶段禁止发言，请专注领取' }),
             );
@@ -779,8 +822,8 @@ export async function gameRoomRoutes(app: FastifyInstance) {
           const content = String(payload.content ?? '').trim().slice(0, 200);
           if (!content) return;
 
-          const round = await currentRoundForRoom(id);
-          if (isChatMuted(round?.phase)) {
+          const phase = await currentRoundPhaseForRoom(id);
+          if (isChatMuted(phase)) {
             socket.send(
               JSON.stringify({
                 type: 'chat_error',
@@ -790,7 +833,7 @@ export async function gameRoomRoutes(app: FastifyInstance) {
             return;
           }
 
-          if (payload.type === 'chat') {
+          if (payload.type === 'chat' && isRoomCommandCandidate(content)) {
             const result = await handleRoomChatCommand({
               roomId: id,
               userId: user.id,
@@ -823,10 +866,11 @@ export async function gameRoomRoutes(app: FastifyInstance) {
                     roomId: id,
                     userId: user.id,
                     amountCents: parseAmountCents(result.echo),
+                    extendedEndsAt: result.bidExtendedEndsAt ?? null,
                   }).catch(() => undefined);
                 }
               }
-              broadcastToRoom(id, {
+              await broadcastToRoomCluster(id, {
                 type: 'activity',
                 kind: result.action,
                 user: {
@@ -852,7 +896,24 @@ export async function gameRoomRoutes(app: FastifyInstance) {
           lastPresenceTouch = Date.now();
           await touchRoomPresence(id, user.id).catch(() => undefined);
         }
-      })().catch(() => undefined);
+    };
+
+    socket.on('message', (raw: Buffer) => {
+      if (raw.byteLength > WS_MESSAGE_MAX_BYTES) {
+        socket.close(1009, 'MESSAGE_TOO_LARGE');
+        return;
+      }
+      if (queuedMessages >= WS_MESSAGE_QUEUE_LIMIT) {
+        warnRateLimit();
+        return;
+      }
+      queuedMessages += 1;
+      messageQueue = messageQueue
+        .then(() => processSocketMessage(raw))
+        .catch(() => undefined)
+        .finally(() => {
+          queuedMessages -= 1;
+        });
     });
 
     const cleanup = () => {

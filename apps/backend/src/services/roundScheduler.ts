@@ -27,7 +27,9 @@ import {
 } from './roomHub.js';
 import { scheduleVirtualDiceForRound } from './virtualPlayerWorker.js';
 
-const ROUND_REBROADCAST_INTERVAL_MS = 5_000;
+// 正常阶段变化都有即时事件；这里只做丢事件恢复心跳。
+// 大群若 5 秒一次会让所有在线客户端同时拉 state，形成数据库尖峰。
+const ROUND_REBROADCAST_INTERVAL_MS = 30_000;
 const lastRoundBroadcastAt = new Map<string, number>();
 
 async function cacheRound(roundId: string) {
@@ -100,12 +102,28 @@ export class RoundScheduler {
         ] = await Promise.all([
           prisma.round.findMany({
             where: { phase: RoundPhase.BANKER_BID, bidEndsAt: { lte: now } },
-            select: { id: true, roomId: true },
+            select: {
+              id: true,
+              roomId: true,
+              events: {
+                where: { type: `ROOM_ANNOUNCED_${RoundPhase.BANKER_BID}` },
+                select: { id: true },
+                take: 1,
+              },
+            },
             take: 100,
           }),
           prisma.round.findMany({
             where: { phase: RoundPhase.BETTING, betEndsAt: { lte: now } },
-            select: { id: true, roomId: true },
+            select: {
+              id: true,
+              roomId: true,
+              events: {
+                where: { type: `ROOM_ANNOUNCED_${RoundPhase.BETTING}` },
+                select: { id: true },
+                take: 1,
+              },
+            },
             take: 100,
           }),
           prisma.round.findMany({
@@ -114,7 +132,15 @@ export class RoundScheduler {
               claimEndsAt: { lte: now },
               packet: { status: 'SENT' },
             },
-            select: { id: true, roomId: true },
+            select: {
+              id: true,
+              roomId: true,
+              events: {
+                where: { type: `ROOM_ANNOUNCED_${RoundPhase.CLAIMING}` },
+                select: { id: true },
+                take: 1,
+              },
+            },
             take: 100,
           }),
           prisma.round.findMany({
@@ -157,12 +183,15 @@ export class RoundScheduler {
 
         // 出价窗口结束后：3/2/1 → 播报最终名单 → 再锁定最高价（不立刻 closeBidding）
         for (const round of dueBids) {
-          try {
-            await ensureRoundAnnouncement({
+          if (round.events.length === 0) {
+            void ensureRoundAnnouncement({
               roundId: round.id,
               roomId: round.roomId,
               to: RoundPhase.BANKER_BID,
-            });
+            }).catch(() => undefined);
+            continue;
+          }
+          try {
             await advanceBidClosingCeremony({
               roundId: round.id,
               roomId: round.roomId,
@@ -172,12 +201,15 @@ export class RoundScheduler {
           }
         }
         for (const round of dueBets) {
-          try {
-            await ensureRoundAnnouncement({
+          if (round.events.length === 0) {
+            void ensureRoundAnnouncement({
               roundId: round.id,
               roomId: round.roomId,
               to: RoundPhase.BETTING,
-            });
+            }).catch(() => undefined);
+            continue;
+          }
+          try {
             await transition(round.id, round.roomId, RoundPhase.BETTING, () =>
               closeBetting(round.id),
             );
@@ -194,27 +226,31 @@ export class RoundScheduler {
           const shouldBroadcast =
             !announced || now.getTime() - lastBroadcast >= ROUND_REBROADCAST_INTERVAL_MS;
           if (announced && !shouldBroadcast) continue;
-          try {
-            if (!announced && round.phase === RoundPhase.CLAIMING) {
-              if (!round.packet?.id) continue;
-              await appendGamePacketMessage(round.roomId, {
-                packetId: round.packet.id,
-                roundId: round.id,
-              });
-              await refreshUnannouncedClaimDeadline(round.id);
-            }
-            if (!announced) {
+          if (!announced) {
+            void (async () => {
+              if (round.phase === RoundPhase.CLAIMING) {
+                if (!round.packet?.id) return;
+                await appendGamePacketMessage(round.roomId, {
+                  packetId: round.packet.id,
+                  roundId: round.id,
+                });
+                await refreshUnannouncedClaimDeadline(round.id);
+              }
               await ensureRoundAnnouncement({
                 roundId: round.id,
                 roomId: round.roomId,
                 to: round.phase,
               });
-            }
+            })().catch(() => undefined);
+            continue;
+          }
+          try {
             if (shouldBroadcast) {
               await rebroadcastRoomState({
                 roundId: round.id,
                 roomId: round.roomId,
                 phase: round.phase,
+                heartbeat: true,
               });
               lastRoundBroadcastAt.set(round.id, now.getTime());
             }
@@ -250,11 +286,6 @@ export class RoundScheduler {
               roundId: round.id,
             });
             await refreshUnannouncedClaimDeadline(round.id);
-            await ensureRoundAnnouncement({
-              roundId: round.id,
-              roomId: round.roomId,
-              to: RoundPhase.CLAIMING,
-            });
             gameBus.transition({
               roundId: round.id,
               roomId: round.roomId,
@@ -296,11 +327,6 @@ export class RoundScheduler {
                   roundId: round.id,
                 });
                 await refreshUnannouncedClaimDeadline(round.id);
-                await ensureRoundAnnouncement({
-                  roundId: round.id,
-                  roomId: round.roomId,
-                  to: RoundPhase.CLAIMING,
-                });
                 gameBus.transition({
                   roundId: round.id,
                   roomId: round.roomId,
@@ -316,17 +342,22 @@ export class RoundScheduler {
         }
 
         for (const round of dueClaims) {
+          if (round.events.length === 0) {
+            void (async () => {
+              await refreshUnannouncedClaimDeadline(round.id);
+              await ensureRoundAnnouncement({
+                roundId: round.id,
+                roomId: round.roomId,
+                to: RoundPhase.CLAIMING,
+              });
+            })().catch(() => undefined);
+            continue;
+          }
           try {
-            await refreshUnannouncedClaimDeadline(round.id);
-            await ensureRoundAnnouncement({
-              roundId: round.id,
-              roomId: round.roomId,
-              to: RoundPhase.CLAIMING,
-            });
+            await expirePacket(round.id);
           } catch {
             continue;
           }
-          await expirePacket(round.id);
           const expiredRound = await prisma.round.findUnique({
             where: { id: round.id },
             select: { phase: true },

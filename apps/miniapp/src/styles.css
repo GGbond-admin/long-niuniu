@@ -201,9 +201,8 @@
   gap:8px;
   padding:6px 10px;
   border-bottom:1px solid rgba(232,213,168,.12);
-  background:rgba(18,18,20,.92);
-  backdrop-filter:blur(18px);
-  -webkit-backdrop-filter:blur(18px);
+  /* 聊天滚动区上方不用毛玻璃：backdrop blur 会逐帧重绘导致低端机卡顿 */
+  background:rgba(19,19,21,.98);
 }
 .game-room-header > .chat-back{
   width:44px;
@@ -752,6 +751,26 @@
   flex-direction:column;
   gap:10px;
 }
+/* 上翻期间来了新消息：浮出回底提示，不强拉用户 */
+.feed-jump-latest{
+  position:absolute;
+  left:50%;
+  bottom:12px;
+  z-index:9;
+  transform:translateX(-50%);
+  padding:7px 14px;
+  border:1px solid rgba(232,213,168,.35);
+  border-radius:999px;
+  background:rgba(24,22,18,.96);
+  color:#f0dfa8;
+  font-size:12px;
+  font-weight:600;
+  box-shadow:0 6px 18px rgba(0,0,0,.45);
+}
+.feed-jump-latest:active{
+  transform:translateX(-50%) scale(.96);
+}
+
 .feed-loading{
   margin:auto;
   color:var(--text-tertiary);
@@ -4432,9 +4451,12 @@
 }
 .feed-phase-sticker {
   display: block;
-  width: 120px;
-  max-width: min(120px, 38vw);
+  width: 200px;
+  max-width: min(200px, 62vw);
   height: auto;
+  /* 预留图片高度（图源 840×560），避免加载完成后撑高内容把「贴底」顶掉 */
+  aspect-ratio: 3 / 2;
+  object-fit: cover;
   border-radius: 10px;
   border: 1px solid rgba(232, 213, 168, 0.18);
   box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
@@ -4442,10 +4464,12 @@
 }
 .feed-banner img {
   display: block;
-  width: 120px;
-  max-width: min(120px, 38vw);
+  width: 200px;
+  max-width: min(200px, 62vw);
   margin: 0;
-  border-radius: 10px;
+  aspect-ratio: 3 / 2;
+  object-fit: cover;
+  border-radius: 12px;
   border: 1px solid rgba(232, 213, 168, 0.18);
   box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
   animation: banner-pop 0.35s cubic-bezier(0.22, 1, 0.36, 1);
@@ -5304,7 +5328,7 @@ img.feed-assistant-avatar {
 .feed-chat.mine {
   align-self: flex-end;
   flex-direction: row-reverse;
-  max-width: 72%;
+  max-width: 82%;
   grid-template-columns: none;
 }
 .feed-chat-avatar,
@@ -5340,6 +5364,14 @@ img.feed-assistant-avatar {
   background: #3a3428 !important;
   color: #f5f0e6 !important;
 }
+.feed-chat.mine .feed-chat-bubble:not(.emoji) {
+  /* 短消息不再缩成很窄的“折叠块”，长消息保持完整换行。 */
+  min-width: 72px;
+}
+.feed-chat-bubble p {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 .feed-chat-bubble time {
   display: none;
 }
@@ -5359,9 +5391,11 @@ img.feed-assistant-avatar {
   align-self: flex-start;
 }
 .feed-banner img {
-  width: 120px;
-  max-width: min(120px, 38vw);
-  border-radius: 10px;
+  width: 200px;
+  max-width: min(200px, 62vw);
+  aspect-ratio: 3 / 2;
+  object-fit: cover;
+  border-radius: 12px;
 }
 .game-room-actions.compact {
   padding: 6px 12px 0;
@@ -6474,8 +6508,8 @@ img.feed-assistant-avatar {
   }
   .feed-phase-sticker,
   .feed-banner img {
-    width: 96px;
-    max-width: 32vw;
+    width: 160px;
+    max-width: 56vw;
   }
 }
 .wx-sheet-panel {
@@ -6794,9 +6828,8 @@ img.feed-assistant-avatar {
 /* 统一聊天底部（客服 / 互动群共用 ChatComposer） */
 .chat-screen-footer {
   border-top: 1px solid var(--border);
-  background: rgba(18, 18, 20, 0.96);
-  backdrop-filter: blur(var(--blur));
-  -webkit-backdrop-filter: blur(var(--blur));
+  /* 输入栏悬于聊天流上方，去掉 backdrop blur 减少滚动/打字时的重绘 */
+  background: rgba(18, 18, 20, 0.98);
 }
 .chat-composer-shell {
   display: grid;

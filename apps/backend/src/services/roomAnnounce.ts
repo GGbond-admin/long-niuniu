@@ -38,9 +38,11 @@ function mention(user: {
   nickname?: string | null;
   tgUsername?: string | null;
 }): string {
-  if (user.tgUsername) return `@${user.tgUsername}`;
+  // 群内 @ 优先显示玩家昵称，避免暴露 Telegram 用户名或 UID
   const name = user.nickname?.trim();
-  return name ? `@${name}` : `@UID${user.uid}`;
+  if (name) return `@${name}`;
+  if (user.tgUsername) return `@${user.tgUsername}`;
+  return `@UID${user.uid}`;
 }
 
 async function loadRound(roundId: string) {
@@ -76,7 +78,7 @@ function buildSealedSummary(
   const betLines = round.bets.map((bet) => {
     betSum += bet.amountCents;
     if (bet.isAllIn) shSum += bet.amountCents;
-    return `@${bet.user.nickname} ${fromCents(bet.amountCents)}${bet.isAllIn ? '梭哈' : ''}`;
+    return `${mention(bet.user)} ${fromCents(bet.amountCents)}${bet.isAllIn ? '梭哈' : ''}`;
   });
   const settings = round.configSnapshot
     ? parseSettingsSnapshot(round.configSnapshot)
@@ -99,7 +101,7 @@ function buildSealedSummary(
 
 export type AnnounceBanner = 'bet-start' | 'bet-stop' | 'claim-start' | 'claim-stop';
 
-export type AnnounceMessage =
+export type AnnounceMessage = (
   | { kind: 'text'; content: string }
   | { kind: 'banner'; banner: AnnounceBanner }
   | {
@@ -107,7 +109,11 @@ export type AnnounceMessage =
       mode: 'bid' | 'bet' | 'claim';
       endsAt: string;
       template: string;
-    };
+    }
+) & {
+  /** 发送本条前等待的毫秒数：给红包卡片留出停留时间，避免立刻被顶出屏幕 */
+  delayMs?: number;
+};
 
 function text(content: string): AnnounceMessage {
   return { kind: 'text', content };
@@ -227,14 +233,21 @@ export async function buildRoundAnnounceMessages(params: {
   }
 
   if (params.to === RoundPhase.CLAIMING) {
-    const claimSeconds = settings?.round.claimDurationSeconds ?? 30;
+    const claimSeconds = settings?.round.claimDurationSeconds ?? 40;
+    // 红包卡片刚插入聊天流：横幅后的 3 条台词各慢 2 秒发出，让玩家先看到红包
     const messages: AnnounceMessage[] = [
       banner('claim-start'),
-      text(stripHtml(renderMessage(templates.claimStart, { claimSeconds }))),
-      text(stripHtml(renderMessage(templates.claimWarning, { claimSeconds }))),
+      {
+        ...text(stripHtml(renderMessage(templates.claimStart, { claimSeconds }))),
+        delayMs: 2_000,
+      },
+      {
+        ...text(stripHtml(renderMessage(templates.claimWarning, { claimSeconds }))),
+        delayMs: 2_000,
+      },
     ];
     const live = countdown('claim', round.claimEndsAt, templates.claimCountdown);
-    if (live) messages.push(live);
+    if (live) messages.push({ ...live, delayMs: 2_000 });
     return messages;
   }
 

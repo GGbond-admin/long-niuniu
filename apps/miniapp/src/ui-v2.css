@@ -1619,3 +1619,59 @@ body:has(.ui-shell) #root {
     transition: none;
   }
 }
+
+/* ————————————————————————————————————————————
+   Telegram 真全屏（Bot API 8.0 requestFullscreen）
+   全屏后 WebView 顶到状态栏之下，Telegram 的收起/关闭按钮悬浮在右上角。
+   --tg-safe-area-inset-top / --tg-content-safe-area-inset-top 由 Telegram 注入，
+   老客户端没有这些变量时退回 env()，且不会加 tg-fullscreen 类，零影响。
+   ———————————————————————————————————————————— */
+:root {
+  --app-top-inset: 0px;
+}
+body.tg-fullscreen {
+  --app-top-inset: calc(
+    var(--tg-safe-area-inset-top, env(safe-area-inset-top, 0px)) +
+    var(--tg-content-safe-area-inset-top, 0px)
+  );
+  padding-top: var(--app-top-inset);
+}
+
+/* 普通文档流页面靠 body padding 即可；100dvh 的容器要扣掉安全区，防止底部被顶出屏幕 */
+body.tg-fullscreen .page {
+  min-height: calc(100dvh - var(--app-top-inset)) !important;
+}
+body.tg-fullscreen:has(.ui-shell) #root {
+  height: calc(100dvh - var(--app-top-inset));
+  min-height: calc(100dvh - var(--app-top-inset));
+  max-height: calc(100dvh - var(--app-top-inset));
+}
+
+/* 视口锁高的沉浸式界面：取消 body padding，让背景铺满到屏幕顶，由头部自己避让 */
+body.tg-fullscreen:has(.game-room, .chat-screen) {
+  padding-top: 0;
+}
+body.tg-fullscreen .game-room-header {
+  padding-top: calc(6px + var(--app-top-inset)) !important;
+}
+body.tg-fullscreen .chat-screen .chat-header {
+  padding-top: calc(12px + var(--app-top-inset));
+}
+
+/* 发红包/转账、打赏页：吸顶导航自己吃掉安全区（背景不透明，滚动时盖住内容） */
+body.tg-fullscreen:has(.cash-page, .tip-page) {
+  padding-top: 0;
+}
+body.tg-fullscreen .cash-nav,
+body.tg-fullscreen .tip-page-nav {
+  padding-top: max(8px, calc(var(--app-top-inset) + 6px));
+}
+
+/* fixed 定位的全屏覆盖层不受 body padding 影响，单独避让 */
+body.tg-fullscreen .wx-rp-modal,
+body.tg-fullscreen .wx-rp-opening {
+  padding-top: var(--app-top-inset);
+}
+body.tg-fullscreen .room-tip-notice {
+  top: calc(var(--app-top-inset) + 12px);
+}
