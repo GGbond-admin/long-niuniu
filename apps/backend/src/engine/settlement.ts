@@ -7,7 +7,8 @@
  * - 同级比金额，金额相同平局（该对退回，不抽水）
  * - 输方按赢方牌型倍数赔付（金牛 11 倍、对子 12 倍……普通按点数倍数）
  * - 抽水只抽赢方盈利：玩家赢默认 3%、庄家赢默认 5%（可配置）；与庄家三费并存
- * - 闲赢从庄池支付，庄池不足按上限赔付（免赔部分记 shortfall）
+ * - 闲赢从庄池支付，庄池不足按赔付顺序逐个赔到庄钱归零（见 comparePayoutPriority），
+ *   赔到一半的那位拿走剩余庄钱，其后的赢家「喝水」（paid=0，全额记 shortfall）
  * - 庄赢从下注时冻结的最大赔付预留金收取；旧单预留不足时才防御性记 shortfall
  */
 
@@ -30,6 +31,8 @@ export interface PlayerInput {
   claimCents: number; // 抢到的红包金额（分）
   /** 下注时已冻结的最大赔付预留金（分）；旧单缺省时按本金处理 */
   reservedCents?: number;
+  /** 下注时间（毫秒）：庄钱不足时同倍数、同点数、同红包金额者按此先后赔付 */
+  betPlacedAtMs?: number;
 }
 
 export interface PairSettlement {
@@ -73,6 +76,36 @@ export interface RoundSettlementResult {
   stats: { playerWin: number; playerLose: number; tie: number };
 }
 
+/** 判定完成、尚未分配庄钱的中间态 */
+interface PairDraft {
+  index: number;
+  input: PlayerInput;
+  playerHand: HandResult;
+  isBustPlayer: boolean;
+  outcome: PairSettlement['outcome'];
+  multiplier: number;
+  payableCents: number;
+}
+
+/** 净变动为零时统一记 +0，避免 -0 流入成绩单与账目核对 */
+function zeroSafe(value: number): number {
+  return value === 0 ? 0 : value;
+}
+
+/**
+ * 庄钱不足时的赔付顺序（《红包牛牛｜下注与庄家赔付规则》三）：
+ * 倍数高 → 点数大 → 红包金额大 → 下注时间早；全部相同则按入参顺序，保证结果可复现。
+ */
+function comparePayoutPriority(a: PairDraft, b: PairDraft): number {
+  if (a.multiplier !== b.multiplier) return b.multiplier - a.multiplier;
+  if (a.playerHand.points !== b.playerHand.points) return b.playerHand.points - a.playerHand.points;
+  if (a.input.claimCents !== b.input.claimCents) return b.input.claimCents - a.input.claimCents;
+  const aPlacedAt = a.input.betPlacedAtMs ?? Number.MAX_SAFE_INTEGER;
+  const bPlacedAt = b.input.betPlacedAtMs ?? Number.MAX_SAFE_INTEGER;
+  if (aPlacedAt !== bPlacedAt) return aPlacedAt - bPlacedAt;
+  return a.index - b.index;
+}
+
 export function settleRound(params: {
   bankerUserId: string;
   bankerClaimCents: number;
@@ -91,18 +124,18 @@ export function settleRound(params: {
   let bankerGross = 0;
   let totalRake = 0;
   const stats = { playerWin: 0, playerLose: 0, tie: 0 };
-  const pairs: PairSettlement[] = [];
 
-  for (const p of params.players) {
-    const playerHand = evaluateHand(p.claimCents);
-    const playerBust = isBust(playerHand, handConfig);
+  // 第一步：逐对判定胜负与应付金额，此时不动庄钱
+  const drafts: PairDraft[] = params.players.map((input, index) => {
+    const playerHand = evaluateHand(input.claimCents);
+    const isBustPlayer = isBust(playerHand, handConfig);
 
     let outcome: PairSettlement['outcome'];
     if (bankerHand.type === HandType.MIANSI || playerHand.type === HandType.MIANSI) {
       outcome = 'TIE'; // 免死（0.01）：本对判和，退回本金不赔付
-    } else if (playerBust && bankerBust) {
+    } else if (isBustPlayer && bankerBust) {
       outcome = 'BANKER_WIN'; // 双自爆 → 庄赢（已确认）
-    } else if (playerBust) {
+    } else if (isBustPlayer) {
       outcome = 'BANKER_WIN';
     } else if (bankerBust) {
       outcome = 'PLAYER_WIN';
@@ -112,80 +145,68 @@ export function settleRound(params: {
         cmp === CompareResult.TIE ? 'TIE' : cmp === CompareResult.PLAYER_WIN ? 'PLAYER_WIN' : 'BANKER_WIN';
     }
 
-    const base: Omit<
-      PairSettlement,
-      'outcome' | 'multiplier' | 'payableCents' | 'paidCents' | 'shortfallCents' | 'rakeCents' | 'playerNetCents' | 'bankerNetCents'
-    > = {
-      userId: p.userId,
-      betCents: p.betCents,
+    if (outcome === 'TIE') stats.tie++;
+    else if (outcome === 'PLAYER_WIN') stats.playerWin++;
+    else stats.playerLose++;
+
+    const multiplier =
+      outcome === 'TIE'
+        ? 0
+        : multiplierOf(outcome === 'PLAYER_WIN' ? playerHand : bankerHand, handConfig);
+    return {
+      index,
+      input,
       playerHand,
-      bankerHand,
-      isBustPlayer: playerBust,
-      isBustBanker: bankerBust,
-    };
-
-    if (outcome === 'TIE') {
-      stats.tie++;
-      pairs.push({
-        ...base,
-        outcome,
-        multiplier: 0,
-        payableCents: 0,
-        paidCents: 0,
-        shortfallCents: 0,
-        rakeCents: 0,
-        playerNetCents: 0,
-        bankerNetCents: 0,
-      });
-      continue;
-    }
-
-    if (outcome === 'PLAYER_WIN') {
-      stats.playerWin++;
-      const multiplier = multiplierOf(playerHand, handConfig);
-      const payable = multiplier * p.betCents;
-      const paid = Math.min(payable, potRemaining);
-      const shortfall = payable - paid;
-      const rake = rakeOf(paid, 'PLAYER', feeConfig);
-      potRemaining -= paid;
-      bankerGross -= paid;
-      totalRake += rake;
-      pairs.push({
-        ...base,
-        outcome,
-        multiplier,
-        payableCents: payable,
-        paidCents: paid,
-        shortfallCents: shortfall,
-        rakeCents: rake,
-        playerNetCents: paid - rake,
-        bankerNetCents: -paid,
-      });
-      continue;
-    }
-
-    // BANKER_WIN：按庄家（赢方）牌型倍数从下注时冻结的最大赔付预留金收取
-    stats.playerLose++;
-    const multiplier = multiplierOf(bankerHand, handConfig);
-    const payable = multiplier * p.betCents;
-    const capacity = Math.max(p.betCents, p.reservedCents ?? p.betCents);
-    const paid = Math.min(payable, capacity);
-    const shortfall = payable - paid;
-    const rake = rakeOf(paid, 'BANKER', feeConfig);
-    bankerGross += paid - rake;
-    totalRake += rake;
-    pairs.push({
-      ...base,
+      isBustPlayer,
       outcome,
       multiplier,
-      payableCents: payable,
-      paidCents: paid,
-      shortfallCents: shortfall,
-      rakeCents: rake,
-      playerNetCents: -paid,
-      bankerNetCents: paid - rake,
-    });
+      payableCents: multiplier * input.betCents,
+    };
+  });
+
+  // 第二步：闲家赢按赔付顺序从庄钱扣款，庄钱归零后其余赢家喝水
+  const payments = new Map<number, { paidCents: number; rakeCents: number }>();
+  for (const draft of drafts.filter((item) => item.outcome === 'PLAYER_WIN').sort(comparePayoutPriority)) {
+    const paidCents = Math.min(draft.payableCents, potRemaining);
+    const rakeCents = rakeOf(paidCents, 'PLAYER', feeConfig);
+    potRemaining -= paidCents;
+    bankerGross -= paidCents;
+    totalRake += rakeCents;
+    payments.set(draft.index, { paidCents, rakeCents });
   }
+
+  // 庄家赢从各自的最大赔付预留金收取，互不影响，无需排序
+  for (const draft of drafts) {
+    if (draft.outcome !== 'BANKER_WIN') continue;
+    const capacity = Math.max(draft.input.betCents, draft.input.reservedCents ?? draft.input.betCents);
+    const paidCents = Math.min(draft.payableCents, capacity);
+    const rakeCents = rakeOf(paidCents, 'BANKER', feeConfig);
+    bankerGross += paidCents - rakeCents;
+    totalRake += rakeCents;
+    payments.set(draft.index, { paidCents, rakeCents });
+  }
+
+  // 第三步：按入参顺序组装成绩单，避免结算顺序影响展示
+  const pairs: PairSettlement[] = drafts.map((draft) => {
+    const { paidCents, rakeCents } = payments.get(draft.index) ?? { paidCents: 0, rakeCents: 0 };
+    const isPlayerWin = draft.outcome === 'PLAYER_WIN';
+    return {
+      userId: draft.input.userId,
+      betCents: draft.input.betCents,
+      playerHand: draft.playerHand,
+      bankerHand,
+      outcome: draft.outcome,
+      isBustPlayer: draft.isBustPlayer,
+      isBustBanker: bankerBust,
+      multiplier: draft.multiplier,
+      payableCents: draft.payableCents,
+      paidCents,
+      shortfallCents: draft.payableCents - paidCents,
+      rakeCents,
+      playerNetCents: zeroSafe(isPlayerWin ? paidCents - rakeCents : -paidCents),
+      bankerNetCents: zeroSafe(isPlayerWin ? -paidCents : paidCents - rakeCents),
+    };
+  });
 
   const participantCount = params.participantCount ?? params.players.length + 1;
   const fees = bankerFees(params.potCents, participantCount, feeConfig);

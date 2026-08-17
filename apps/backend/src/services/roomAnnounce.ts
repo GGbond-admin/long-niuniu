@@ -234,8 +234,9 @@ export async function buildRoundAnnounceMessages(params: {
 
   if (params.to === RoundPhase.CLAIMING) {
     const claimSeconds = settings?.round.claimDurationSeconds ?? 40;
-    // 红包卡片刚插入聊天流：横幅后的 3 条台词各慢 2 秒发出，让玩家先看到红包
-    const messages: AnnounceMessage[] = [
+    // 红包卡片刚插入聊天流：横幅后的台词各慢 2 秒发出，让玩家先看到红包。
+    // 不再发「抢包进行中 · 还剩 N 秒」倒计时气泡，顶栏倒计时已足够。
+    return [
       banner('claim-start'),
       {
         ...text(stripHtml(renderMessage(templates.claimStart, { claimSeconds }))),
@@ -246,9 +247,6 @@ export async function buildRoundAnnounceMessages(params: {
         delayMs: 2_000,
       },
     ];
-    const live = countdown('claim', round.claimEndsAt, templates.claimCountdown);
-    if (live) messages.push({ ...live, delayMs: 2_000 });
-    return messages;
   }
 
   if (params.to === RoundPhase.CLAIM_EXPIRED) {

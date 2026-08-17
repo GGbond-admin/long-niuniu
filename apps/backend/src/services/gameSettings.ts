@@ -327,6 +327,23 @@ export async function setPacketChannel(
   return next;
 }
 
+/**
+ * 设定上庄起拍价（最低竞标金额，分）。进行中的牌局沿用开局快照，下一局生效。
+ */
+export async function setBankerBidMin(
+  gameCode: string,
+  bankerBidMinCents: number,
+  updatedBy?: string,
+) {
+  const current = await getGameConfig(gameCode, 'round', DEFAULT_ROUND_CONFIG);
+  if (bankerBidMinCents > current.bankerBidMaxCents) {
+    throw new Error('BANKER_BID_MIN_ABOVE_MAX');
+  }
+  const next = { ...current, bankerBidMinCents };
+  await setGameConfig(gameCode, 'round', next, updatedBy);
+  return next;
+}
+
 /** @deprecated 使用 setAssistantService */
 export async function setRoundAutoStart(
   gameCode: string,

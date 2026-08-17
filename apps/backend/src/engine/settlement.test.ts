@@ -43,6 +43,70 @@ describe('单局结算（06 文档 §6 / 04 文档 T01–T08）', () => {
     expect(pair.playerNetCents).toBe(toCents('77.6'));
   });
 
+  it('庄钱不足按赔付顺序：高倍优先，赔到归零后其余喝水（下注与庄家赔付规则 四）', () => {
+    // 故意乱序传入（D→C→B→A），验证结算不依赖入参顺序
+    const r = settleRound({
+      bankerUserId: 'banker',
+      bankerClaimCents: toCents('0.02'), // 普通 2 点自爆 → 闲家全赢
+      potCents: toCents('100000'),
+      players: [
+        { userId: 'D', betCents: toCents('5000'), claimCents: toCents('0.09') }, // 普通 9 点 1x
+        { userId: 'C', betCents: toCents('2000'), claimCents: toCents('0.70') }, // 金牛 11x 7 点
+        { userId: 'B', betCents: toCents('3000'), claimCents: toCents('0.90') }, // 金牛 11x 9 点
+        { userId: 'A', betCents: toCents('3000'), claimCents: toCents('6.66') }, // 豹子 17x 8 点
+      ],
+      handConfig,
+    });
+    const byUser = new Map(r.pairs.map((pair) => [pair.userId, pair]));
+
+    expect(byUser.get('A')!.paidCents).toBe(toCents('51000'));
+    expect(byUser.get('A')!.shortfallCents).toBe(0);
+    expect(byUser.get('B')!.paidCents).toBe(toCents('33000'));
+    expect(byUser.get('B')!.shortfallCents).toBe(0);
+    // C 应赔 22000，庄钱只剩 16000 → 全部给 C
+    expect(byUser.get('C')!.payableCents).toBe(toCents('22000'));
+    expect(byUser.get('C')!.paidCents).toBe(toCents('16000'));
+    expect(byUser.get('C')!.shortfallCents).toBe(toCents('6000'));
+    // 庄钱归零 → D 喝水
+    expect(byUser.get('D')!.paidCents).toBe(0);
+    expect(byUser.get('D')!.shortfallCents).toBe(toCents('5000'));
+    expect(r.potRemainingCents).toBe(0);
+    // 成绩单仍按入参顺序展示
+    expect(r.pairs.map((pair) => pair.userId)).toEqual(['D', 'C', 'B', 'A']);
+  });
+
+  it('同倍数同点数：红包金额大者先赔（2.35 优先于 1.18）', () => {
+    const r = settleRound({
+      bankerUserId: 'banker',
+      bankerClaimCents: toCents('0.02'), // 自爆
+      potCents: toCents('100'), // 只够赔一位
+      players: [
+        { userId: 'small', betCents: toCents('10'), claimCents: toCents('1.18') }, // 牛牛 10x
+        { userId: 'big', betCents: toCents('10'), claimCents: toCents('2.35') }, // 牛牛 10x
+      ],
+      handConfig,
+    });
+    const byUser = new Map(r.pairs.map((pair) => [pair.userId, pair]));
+    expect(byUser.get('big')!.paidCents).toBe(toCents('100'));
+    expect(byUser.get('small')!.paidCents).toBe(0);
+  });
+
+  it('倍数点数红包金额全同：下注时间早者先赔', () => {
+    const r = settleRound({
+      bankerUserId: 'banker',
+      bankerClaimCents: toCents('0.02'),
+      potCents: toCents('100'),
+      players: [
+        { userId: 'late', betCents: toCents('10'), claimCents: toCents('2.35'), betPlacedAtMs: 2_000 },
+        { userId: 'early', betCents: toCents('10'), claimCents: toCents('2.35'), betPlacedAtMs: 1_000 },
+      ],
+      handConfig,
+    });
+    const byUser = new Map(r.pairs.map((pair) => [pair.userId, pair]));
+    expect(byUser.get('early')!.paidCents).toBe(toCents('100'));
+    expect(byUser.get('late')!.paidCents).toBe(0);
+  });
+
   it('抽水分侧：玩家赢 3%、庄家赢 5%，与利润池文档一致', () => {
     const playerWin = settleRound({
       bankerUserId: 'banker',

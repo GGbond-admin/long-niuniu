@@ -9,6 +9,7 @@ import {
   isBust,
   keyDigits,
   maxPayoutMultiplier,
+  multiplierOf,
   pointsOf,
 } from './hand.js';
 import { toCents } from './betting.js';
@@ -26,6 +27,9 @@ describe('点数计算（06 文档 §1.1）', () => {
   it('总和个位为 0 → 10点', () => {
     expect(pointsOf(toCents('1.09'))).toBe(10); // 1+0+9=10
   });
+  it('相加为 20 仍记 10 点（点数表无 0 点）', () => {
+    expect(pointsOf(toCents('9.83'))).toBe(10); // 9+8+3=20
+  });
   it('0.09 → 9点', () => {
     expect(pointsOf(toCents('0.09'))).toBe(9);
   });
@@ -42,31 +46,64 @@ describe('牌型判定（06 文档 §1.2）', () => {
     expect(handTypeOf(toCents('5.00'))).toBe(HandType.MANNIU);
     expect(handTypeOf(toCents('88.00'))).toBe(HandType.MANNIU);
   });
-  it('反顺：9.87 / 3.21 / 2.10', () => {
+  it('反顺（倒顺）：连续递减 9.87 / 3.21 / 2.10', () => {
     expect(handTypeOf(toCents('9.87'))).toBe(HandType.FANSHUN);
     expect(handTypeOf(toCents('3.21'))).toBe(HandType.FANSHUN);
     expect(handTypeOf(toCents('2.10'))).toBe(HandType.FANSHUN);
   });
-  it('顺子：0.12 / 1.23 / 7.89', () => {
+  it('反顺：0.98 为规则钦定特例', () => {
+    expect(handTypeOf(toCents('0.98'))).toBe(HandType.FANSHUN);
+  });
+  it('反顺：仅递减但不连续不算，如 9.51 / 3.10', () => {
+    expect(handTypeOf(toCents('9.51'))).toBe(HandType.NORMAL);
+    expect(handTypeOf(toCents('3.10'))).toBe(HandType.NORMAL);
+  });
+  it('顺子：连续递增 0.12 / 1.23 / 7.89（0 可作起点）', () => {
     expect(handTypeOf(toCents('0.12'))).toBe(HandType.SHUNZI);
     expect(handTypeOf(toCents('1.23'))).toBe(HandType.SHUNZI);
     expect(handTypeOf(toCents('7.89'))).toBe(HandType.SHUNZI);
+  });
+  it('顺子：仅递增但不连续不算，如 0.13 / 1.28 / 5.68', () => {
+    expect(handTypeOf(toCents('0.13'))).toBe(HandType.NORMAL);
+    expect(handTypeOf(toCents('1.28'))).toBe(HandType.NORMAL);
+    expect(handTypeOf(toCents('5.68'))).toBe(HandType.NORMAL);
   });
   it('对子：1.22 / 7.55', () => {
     expect(handTypeOf(toCents('1.22'))).toBe(HandType.DUIZI);
     expect(handTypeOf(toCents('7.55'))).toBe(HandType.DUIZI);
   });
-  it('金牛：0.10 / 0.50', () => {
+  it('金牛：仅 0.X0（X=1–9）', () => {
     expect(handTypeOf(toCents('0.10'))).toBe(HandType.JINNIU);
     expect(handTypeOf(toCents('0.50'))).toBe(HandType.JINNIU);
+    expect(handTypeOf(toCents('0.90'))).toBe(HandType.JINNIU);
   });
-  it('免死：0.01 固定判免死，不再归入金牛', () => {
+  it('金牛：0.0X 不再算金牛', () => {
+    expect(handTypeOf(toCents('0.05'))).toBe(HandType.NORMAL);
+    expect(handTypeOf(toCents('0.02'))).toBe(HandType.NORMAL);
+  });
+  it('牛牛：三位相加刚好等于 10', () => {
+    expect(handTypeOf(toCents('2.35'))).toBe(HandType.NIUNIU);
+    expect(handTypeOf(toCents('4.15'))).toBe(HandType.NIUNIU);
+    expect(handTypeOf(toCents('5.50'))).toBe(HandType.NIUNIU);
+    expect(handTypeOf(toCents('2.80'))).toBe(HandType.NIUNIU);
+    expect(handTypeOf(toCents('0.19'))).toBe(HandType.NIUNIU);
+    expect(handTypeOf(toCents('5.32'))).toBe(HandType.NIUNIU);
+  });
+  it('牛牛兜底于其他特别牌型：0.55 判对子、1.36 判牛牛', () => {
+    expect(handTypeOf(toCents('0.55'))).toBe(HandType.DUIZI); // 和为 10 但对子优先
+    expect(handTypeOf(toCents('1.36'))).toBe(HandType.NIUNIU); // 递增但不连续 → 牛牛
+  });
+  it('相加为 20 不是牛牛，按普通 10 点', () => {
+    const hand = evaluateHand(toCents('9.83'));
+    expect(hand.type).toBe(HandType.NORMAL);
+    expect(hand.points).toBe(10);
+  });
+  it('免死：0.01 固定判免死', () => {
     expect(handTypeOf(toCents('0.01'))).toBe(HandType.MIANSI);
-    expect(handTypeOf(toCents('0.02'))).toBe(HandType.JINNIU); // 其余单非零位仍是金牛
   });
-  it('普通：2.80 / 3.42', () => {
-    expect(handTypeOf(toCents('2.80'))).toBe(HandType.NORMAL);
+  it('普通：3.42 / 9.83', () => {
     expect(handTypeOf(toCents('3.42'))).toBe(HandType.NORMAL);
+    expect(handTypeOf(toCents('9.83'))).toBe(HandType.NORMAL);
   });
   it('关键三位数字提取', () => {
     expect(keyDigits(toCents('27.23'))).toEqual([7, 2, 3]); // a=整数位个位
@@ -80,8 +117,18 @@ describe('比牌（06 文档 §2）', () => {
     const player = evaluateHand(toCents('1.11'));
     expect(compareHands(banker, player)).toBe(CompareResult.PLAYER_WIN);
   });
-  it('同级（同点）比金额：2.80 赢 1.09（均 10 点普通）', () => {
+  it('同级比金额：2.80 赢 1.09（均为牛牛）', () => {
     const banker = evaluateHand(toCents('1.09'));
+    const player = evaluateHand(toCents('2.80'));
+    expect(compareHands(banker, player)).toBe(CompareResult.PLAYER_WIN);
+  });
+  it('牛牛等级低于金牛：0.10 赢 2.80', () => {
+    const banker = evaluateHand(toCents('0.10'));
+    const player = evaluateHand(toCents('2.80'));
+    expect(compareHands(banker, player)).toBe(CompareResult.BANKER_WIN);
+  });
+  it('牛牛等级高于普通：2.80 赢 9.83（普通 10 点，金额更大也输）', () => {
+    const banker = evaluateHand(toCents('9.83'));
     const player = evaluateHand(toCents('2.80'));
     expect(compareHands(banker, player)).toBe(CompareResult.PLAYER_WIN);
   });
@@ -89,6 +136,15 @@ describe('比牌（06 文档 §2）', () => {
     const a = evaluateHand(toCents('2.80'));
     const b = evaluateHand(toCents('2.80'));
     expect(compareHands(a, b)).toBe(CompareResult.TIE);
+  });
+});
+
+describe('牌型倍数', () => {
+  it('牛牛默认 10 倍', () => {
+    expect(multiplierOf(evaluateHand(toCents('2.35')))).toBe(10);
+  });
+  it('普通 10 点仍走点数倍数表（默认 4 倍）', () => {
+    expect(multiplierOf(evaluateHand(toCents('9.83')))).toBe(4);
   });
 });
 
@@ -130,10 +186,10 @@ describe('自爆（06 文档 §2.1）', () => {
     expect(h.points).toBe(4);
     expect(isBust(h)).toBe(false);
   });
-  it('边界：0.03 属金牛（仅一位非零），默认豁免自爆', () => {
+  it('边界：0.03 不再是金牛，按普通 3 点自爆', () => {
     const h = evaluateHand(toCents('0.03'));
-    expect(h.type).toBe(HandType.JINNIU);
-    expect(isBust(h)).toBe(false);
+    expect(h.type).toBe(HandType.NORMAL);
+    expect(isBust(h)).toBe(true);
   });
   it('特殊牌型豁免：金牛 0.10（1点）不自爆', () => {
     const h = evaluateHand(toCents('0.10'));

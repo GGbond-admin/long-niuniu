@@ -51,6 +51,7 @@ export default function ChatComposer({
   toolsHighlight = false,
 }: Props) {
   const [value, setValue] = useState('');
+  const [submitting, setSubmitting] = useState(false);
   const [panel, setPanel] = useState<'tools' | 'plus' | null>(null);
   const [toolTab, setToolTab] = useState<'dice' | 'emoji' | 'sticker'>(
     dicePanel ? defaultToolTab : 'emoji',
@@ -58,6 +59,7 @@ export default function ChatComposer({
   const inputRef = useRef<HTMLInputElement>(null);
   const showPlus = (plusActions?.length ?? 0) > 0;
   const showDice = !!dicePanel;
+  const sendBusy = busy || submitting;
 
   function insertEmoji(emoji: string) {
     if (disabled) return;
@@ -83,16 +85,30 @@ export default function ChatComposer({
   function submit(event: FormEvent) {
     event.preventDefault();
     const content = value.trim();
-    if (disabled || busy || !content) return;
+    if (disabled || sendBusy || !content) return;
     setPanel(null);
-    const result = onSend(content);
-    if (result instanceof Promise) {
-      void result.then((ok) => {
-        if (ok !== false) setValue('');
-      });
-      return;
+    try {
+      const result = onSend(content);
+      if (result instanceof Promise) {
+        setSubmitting(true);
+        void result
+          .then((ok) => {
+            if (ok !== false) {
+              setValue((current) => (current.trim() === content ? '' : current));
+            } else {
+              requestAnimationFrame(() => inputRef.current?.focus());
+            }
+          })
+          .catch(() => {
+            requestAnimationFrame(() => inputRef.current?.focus());
+          })
+          .finally(() => setSubmitting(false));
+        return;
+      }
+      if (result !== false) setValue('');
+    } catch {
+      requestAnimationFrame(() => inputRef.current?.focus());
     }
-    if (result !== false) setValue('');
   }
 
   function toggleTools() {
@@ -101,6 +117,7 @@ export default function ChatComposer({
       requestAnimationFrame(() => inputRef.current?.focus());
       return;
     }
+    inputRef.current?.blur();
     setPanel('tools');
     if (toolsHighlight && showDice) setToolTab('dice');
     else if (!showDice && toolTab === 'dice') setToolTab('emoji');
@@ -114,6 +131,7 @@ export default function ChatComposer({
           className={`composer-icon ${panel === 'tools' ? 'active' : ''} ${toolsHighlight && panel !== 'tools' ? 'highlight' : ''}`}
           aria-label={panel === 'tools' ? '收起工具，显示键盘' : '打开工具'}
           onClick={toggleTools}
+          disabled={sendBusy}
         >
           {panel === 'tools' ? '⌨️' : '🎮'}
         </button>
@@ -121,19 +139,30 @@ export default function ChatComposer({
           ref={inputRef}
           value={value}
           onChange={(e) => setValue(e.target.value.slice(0, maxLength))}
+          onFocus={() => setPanel(null)}
           placeholder={placeholder}
-          disabled={disabled}
+          disabled={disabled || submitting}
           maxLength={maxLength}
+          enterKeyHint="send"
         />
-        <button type="submit" disabled={disabled || busy || !value.trim()}>
-          发送
+        <button type="submit" disabled={disabled || sendBusy || !value.trim()}>
+          {submitting ? '发送中' : '发送'}
         </button>
         {showPlus && (
           <button
             type="button"
             className={`composer-icon ${panel === 'plus' ? 'active' : ''}`}
             aria-label="更多"
-            onClick={() => setPanel(panel === 'plus' ? null : 'plus')}
+            disabled={sendBusy}
+            onClick={() => {
+              if (panel === 'plus') {
+                setPanel(null);
+                requestAnimationFrame(() => inputRef.current?.focus());
+                return;
+              }
+              inputRef.current?.blur();
+              setPanel('plus');
+            }}
           >
             ＋
           </button>

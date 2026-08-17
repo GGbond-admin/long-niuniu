@@ -15,8 +15,13 @@ export default function SupportInboxToast() {
   const baseline = useRef<number | null>(null);
   const hideTimer = useRef<number | null>(null);
   const onSupportPath = location.pathname.startsWith('/support');
+  const onGameRoomPath = /^\/game\/[^/]+\/play\/?$/.test(location.pathname);
 
   useEffect(() => {
+    if (onSupportPath || onGameRoomPath) {
+      setToast(null);
+      return;
+    }
     let cancelled = false;
 
     async function poll() {
@@ -58,9 +63,9 @@ export default function SupportInboxToast() {
       window.clearInterval(timer);
       if (hideTimer.current) window.clearTimeout(hideTimer.current);
     };
-  }, [location.pathname]);
+  }, [location.pathname, onGameRoomPath, onSupportPath]);
 
-  if (!toast || onSupportPath) return null;
+  if (!toast || onSupportPath || onGameRoomPath) return null;
 
   return (
     <div className="support-inbox-toast" role="status" aria-live="polite">

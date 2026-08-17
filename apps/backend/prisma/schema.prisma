@@ -505,6 +505,7 @@ model Round {
   events      RoundEvent[]
 
   @@unique([roomId, seqNo])
+  @@index([roomId, phase, seqNo])
   @@index([phase])
   @@map("rounds")
 }
@@ -581,6 +582,7 @@ model Packet {
   channel          PacketChannel @default(TNG) // TNG=外部链接抢包；INTERNAL=小助手直发、余额入账
   packerAccount    String?       @map("packer_account") // 发包 TNG 账号标识
   claimUrl         String?       @map("claim_url")
+  deepLink         String?       @map("deep_link") // tngdwallet:// 深链，https 分享链打不开时兜底
   totalCents       BigInt        @map("total_cents")
   participantCount Int           @map("participant_count")
   status           PacketStatus  @default(CREATED)
@@ -589,8 +591,15 @@ model Packet {
   expiresAt        DateTime?     @map("expires_at")
   reconciledCents  BigInt        @default(0) @map("reconciled_cents")
   returnedCents    BigInt        @default(0) @map("returned_cents")
-  round            Round         @relation(fields: [roundId], references: [id])
-  claims           Claim[]
+
+  // ── 手机端自动建包（TNG ingest）──
+  correlation      String?   @unique // 派单短码：手机端写入红包祝福语并原样回传，用于关联本局
+  ingestDeviceId   String?   @map("ingest_device_id") // 当前持有派单租约的采集设备
+  ingestLeaseUntil DateTime? @map("ingest_lease_until") // 租约到期前不再派给其它设备
+
+  round      Round           @relation(fields: [roundId], references: [id])
+  claims     Claim[]
+  claimInbox TngClaimInbox[]
 
   @@map("packets")
 }
@@ -627,6 +636,7 @@ model Claim {
   user   User   @relation(fields: [userId], references: [id])
 
   @@unique([roundId, userId]) // 幂等：同局同人只认额一次
+  @@index([userId, createdAt])
   @@map("claims")
 }
 
@@ -644,9 +654,42 @@ model TngAccount {
   @@map("tng_accounts")
 }
 
+/**
+ * 手机端回传的领取明细中，无法自动匹配到玩家的记录（同名歧义、未实名、姓名不在本局参与者内）。
+ * 运营在后台人工指认后再落成 Claim，避免自动记账把钱算到错误账号上。
+ */
+model TngClaimInbox {
+  id          String              @id @default(cuid())
+  packetId    String              @map("packet_id")
+  roundId     String              @map("round_id")
+  tngName     String              @map("tng_name") // 加密存储
+  tngNameHash String              @map("tng_name_hash") // 盲索引，便于按姓名检索
+  amountCents BigInt              @map("amount_cents")
+  claimedAt   DateTime            @map("claimed_at")
+  deviceId    String?             @map("device_id")
+  status      TngClaimInboxStatus @default(PENDING)
+  reason      String? // NAME_NOT_MATCHED / NAME_AMBIGUOUS / KYC_NOT_APPROVED / ...
+  resolvedBy  String?             @map("resolved_by")
+  resolvedAt  DateTime?           @map("resolved_at")
+  claimId     String?             @map("claim_id") // 人工指认后生成的 Claim
+  createdAt   DateTime            @default(now()) @map("created_at")
+
+  packet Packet @relation(fields: [packetId], references: [id])
+
+  @@unique([packetId, tngNameHash, amountCents]) // 幂等：同红包同人同额只留一条
+  @@index([status, createdAt])
+  @@map("tng_claim_inbox")
+}
+
+enum TngClaimInboxStatus {
+  PENDING
+  RESOLVED
+  DISCARDED
+}
+
 enum ClaimSource {
   MANUAL
-  PROVIDER // 预留：未来自动回调
+  PROVIDER // 手机端采集回调自动认额
   AUTO_TAIL // 自动认尾包：抢包超时后系统补录尾包金额
   INTERNAL // 内部红包：玩家在系统内抢包，金额随机拆分并直接入余额
 }
@@ -818,6 +861,12 @@ model Agent {
   /// 称桶占成点数：实得比例 = sharePoints ÷ 称桶基准(默认130)。65 点 → 50%
   sharePoints Int         @map("share_points")
   status      AgentStatus @default(ACTIVE)
+  /// 上级代理（null = 第一层代理，仅后台可建）；下级占成须 ≤ 上级占成 − 最低预留点数
+  parentAgentId String? @map("parent_agent_id")
+  parent        Agent?  @relation("AgentTree", fields: [parentAgentId], references: [id])
+  children      Agent[] @relation("AgentTree")
+  /// 建立者：ADMIN（后台）或上级代理的 agentId（前台升级）
+  createdBy     String? @map("created_by")
   createdAt   DateTime    @default(now()) @map("created_at")
   updatedAt   DateTime    @updatedAt @map("updated_at")
 
@@ -825,6 +874,7 @@ model Agent {
   shares  AgentProfitShare[]
 
   @@index([status])
+  @@index([parentAgentId])
   @@map("agents")
 }
 
@@ -842,6 +892,8 @@ model AgentPlayer {
   user    User     @relation(fields: [userId], references: [id])
   boundAt DateTime @default(now()) @map("bound_at")
   boundBy String?  @map("bound_by")
+  /// 归属来源：MANUAL 后台手动绑定 / REFERRAL 推荐码注册自动归属
+  source  String   @default("MANUAL")
 
   @@index([agentId])
   @@map("agent_players")
@@ -874,9 +926,12 @@ model ProfitPoolDaily {
   carryOutCents        BigInt @default(0) @map("carry_out_cents")
   bucketBaseSnapshot   Int    @map("bucket_base_snapshot")
 
-  status    String   @default("SETTLED") // SETTLED | NO_DISTRIBUTION
-  settledBy String?  @map("settled_by")
-  createdAt DateTime @default(now()) @map("created_at")
+  /// PENDING（报表已生成待确认）| SETTLED（已确认发放）| NO_DISTRIBUTION（负池不分配）
+  status      String    @default("SETTLED")
+  settledBy   String?   @map("settled_by")
+  confirmedBy String?   @map("confirmed_by")
+  confirmedAt DateTime? @map("confirmed_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
 
   shares AgentProfitShare[]
 
@@ -884,7 +939,9 @@ model ProfitPoolDaily {
   @@map("profit_pool_daily")
 }
 
-/// 代理称桶分配明细：金额 = 净池 × (代理流水 ÷ 公司流水) × (占成点数 ÷ 称桶基准)
+/// 代理称桶分配明细（占成差额制）：
+/// 自身利润 = 净池 × (直属玩家流水 ÷ 公司流水) × (占成 ÷ 基准)
+/// 差额利润 = Σ 净池 × (直属下级团队流水 ÷ 公司流水) × ((自身占成 − 下级占成) ÷ 基准)
 model AgentProfitShare {
   id      String          @id @default(cuid())
   poolId  String          @map("pool_id")
@@ -893,11 +950,21 @@ model AgentProfitShare {
   agent   Agent           @relation(fields: [agentId], references: [id])
   date    String
 
+  /// 自身流水（直属玩家 + 代理本人）
   turnoverCents        BigInt   @map("turnover_cents")
+  /// 团队流水（自身流水 + 所有下级代理团队流水）
+  teamTurnoverCents    BigInt   @default(0) @map("team_turnover_cents")
   companyTurnoverCents BigInt   @map("company_turnover_cents")
   sharePointsSnapshot  Int      @map("share_points_snapshot")
   bucketBaseSnapshot   Int      @map("bucket_base_snapshot")
+  /// 自身称桶利润
+  selfAmountCents      BigInt   @default(0) @map("self_amount_cents")
+  /// 下级差额利润合计
+  overrideAmountCents  BigInt   @default(0) @map("override_amount_cents")
+  /// 合计 = 自身 + 差额
   amountCents          BigInt   @map("amount_cents")
+  /// 直属下级差额明细快照 [{agentId,label,uid,points,diffPoints,teamTurnoverCents,amountCents}]
+  breakdown            Json?
   ledgerRef            String?  @map("ledger_ref")
   createdAt            DateTime @default(now()) @map("created_at")
 

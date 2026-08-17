@@ -28,7 +28,7 @@ const pageTitles: Record<Page, [string, string]> = {
   rounds: ['对局控制台', '竞标、下注、发包、认额与结算'],
   tng: ['TNG 红包台账', '发包账号、在途金额与认额差异'],
   finance: ['钱包财务', '平台科目、全量流水与人工调账'],
-  profitPool: ['利润池分配', '抽水毛利 → 净利润池 → 代理称桶分成'],
+  profitPool: ['代理与利润池', '两步结算：生成报表 → 确认发放；代理树与占成差额分成'],
   rewards: ['每日奖励', '棋牌、庄家与特别奖励配置'],
   rebates: ['推广返水', '三级有效流水与日结佣金'],
   leaderboards: ['排行榜', '积分、棋牌、打桩三榜快照'],
@@ -67,7 +67,8 @@ const badgeLabels: Record<string, string> = {
 const groups: Array<[string, Page[]]> = [
   ['总览', ['dashboard']],
   ['会员', ['users', 'kyc']],
-  ['资金', ['deposits', 'withdrawals', 'payments', 'finance', 'profitPool', 'tng']],
+  // 按日常操作频率排序：工单类在前，账务/分成居中，通道设置最后
+  ['资金', ['deposits', 'withdrawals', 'tng', 'profitPool', 'finance', 'payments']],
   ['游戏', ['gameOps']],
   ['增长', ['rebates', 'messaging', 'support']],
   ['系统', ['bots', 'admins', 'audit']],

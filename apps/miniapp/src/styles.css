@@ -192,7 +192,53 @@
   flex:0 0 auto;
   border-top:1px solid rgba(232,213,168,.1);
   background:linear-gradient(180deg, rgba(20,19,18,.94) 0%, rgba(12,12,13,.98) 100%);
-  padding-bottom:max(8px, env(safe-area-inset-bottom));
+  padding-bottom:max(8px, var(--app-bottom-inset, env(safe-area-inset-bottom)));
+}
+.room-connection-bar,
+.game-room-footer .chat-error-bar{
+  min-height:38px;
+  margin:8px 10px 0;
+  padding:7px 8px 7px 11px;
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:10px;
+  border-radius:12px;
+  font-size:12px;
+  line-height:1.35;
+}
+.room-connection-bar{
+  border:1px solid rgba(251,191,36,.24);
+  background:rgba(72,48,11,.32);
+  color:#f5d98a;
+}
+.room-connection-bar.kicked{
+  border-color:rgba(248,113,113,.25);
+  background:rgba(74,24,27,.34);
+  color:#fecaca;
+}
+.room-connection-bar button,
+.game-room-footer .chat-error-bar button{
+  flex:0 0 auto;
+  min-width:44px;
+  min-height:32px;
+  padding:0 10px;
+  border:0;
+  border-radius:999px;
+  background:rgba(255,255,255,.09);
+  color:inherit;
+  font-size:12px;
+  font-weight:700;
+}
+.game-room-footer .chat-error-bar{
+  border:1px solid rgba(248,113,113,.22);
+  background:rgba(74,24,27,.32);
+  color:#fecaca;
+}
+.game-room-footer .chat-error-bar button{
+  min-width:32px;
+  padding:0;
+  font-size:18px;
 }
 .game-room-header{
   display:grid;
@@ -402,7 +448,8 @@
 @media (prefers-reduced-motion:reduce){
   .game-room-quick-link,
   .game-room-quick-link::before,
-  .game-room-quick-link img{
+  .game-room-quick-link img,
+  .feed-entry-skeleton i{
     animation:none !important;
   }
 }
@@ -775,6 +822,77 @@
   margin:auto;
   color:var(--text-tertiary);
   font-size:13px;
+}
+.feed-entry-skeleton{
+  width:100%;
+  margin:auto 0;
+  padding:10px 2px 24px;
+  display:flex;
+  flex-direction:column;
+  gap:14px;
+}
+.feed-entry-skeleton-title{
+  margin-bottom:4px;
+  color:var(--text-secondary);
+  font-size:13px;
+  text-align:center;
+}
+.feed-entry-skeleton i{
+  display:block;
+  width:66%;
+  height:48px;
+  border-radius:4px 16px 16px 16px;
+  background:linear-gradient(
+    100deg,
+    rgba(255,255,255,.045) 20%,
+    rgba(255,255,255,.09) 42%,
+    rgba(255,255,255,.045) 64%
+  );
+  background-size:220% 100%;
+  animation:room-entry-pulse 1.35s ease-in-out infinite;
+}
+.feed-entry-skeleton i:nth-of-type(2){
+  width:54%;
+  align-self:flex-end;
+  border-radius:16px 4px 16px 16px;
+}
+.feed-entry-skeleton i:nth-of-type(3){width:78%}
+.feed-entry-skeleton i:nth-of-type(4){
+  width:46%;
+  align-self:flex-end;
+  border-radius:16px 4px 16px 16px;
+}
+@keyframes room-entry-pulse{
+  from{background-position:110% 0}
+  to{background-position:-110% 0}
+}
+.feed-entry-error{
+  width:min(100%, 340px);
+  margin:auto;
+  padding:24px 20px;
+  border:1px solid rgba(248,113,113,.2);
+  border-radius:18px;
+  background:rgba(36,19,20,.72);
+  text-align:center;
+}
+.feed-entry-error strong{
+  display:block;
+  font-size:15px;
+}
+.feed-entry-error p{
+  margin:8px 0 16px;
+  color:var(--text-secondary);
+  font-size:12px;
+  line-height:1.6;
+}
+.feed-entry-error button{
+  min-width:116px;
+  min-height:42px;
+  border:1px solid rgba(232,213,168,.32);
+  border-radius:999px;
+  background:rgba(201,169,98,.14);
+  color:var(--accent-text);
+  font-weight:700;
 }
 .feed-announce{
   padding:14px;
@@ -3127,7 +3245,7 @@
   position: fixed;
   z-index: 50;
   left: 50%;
-  bottom: max(10px, env(safe-area-inset-bottom));
+  bottom: max(10px, var(--app-bottom-inset, env(safe-area-inset-bottom)));
   width: min(calc(100% - 28px), 420px);
   transform: translateX(-50%);
   display: grid;
@@ -4695,7 +4813,7 @@
 }
 
 .game-room-composer {
-  grid-template-columns: 44px minmax(0, 1fr) 52px 44px;
+  grid-template-columns: 44px minmax(0, 1fr) 58px 44px;
   gap: 6px;
   padding: 8px 10px 4px;
   border: 0;
@@ -4708,7 +4826,7 @@
   border-radius:999px;
   background:rgba(255,255,255,.04);
   color:var(--text);
-  font-size:13px;
+  font-size:16px;
   transition:border-color .18s ease, background .18s ease;
 }
 .game-room-composer input:focus{
@@ -4719,9 +4837,9 @@
   color:var(--text-tertiary);
 }
 .game-room-composer button[type='submit']{
-  min-width:52px;
+  min-width:58px;
   min-height:44px;
-  padding:0 12px;
+  padding:0 6px;
   border:0;
   border-radius:999px;
   background:linear-gradient(180deg, #f0dfa8 0%, var(--accent) 100%);
@@ -4771,6 +4889,24 @@
 }
 
 /* 输入框上方的阶段提示条（竞品式深灰小气泡，居中悬浮） */
+.composer-mode-tip{
+  margin:7px 10px 0;
+  padding:7px 10px;
+  display:flex;
+  align-items:center;
+  gap:7px;
+  border:1px solid rgba(201,169,98,.2);
+  border-radius:10px;
+  background:rgba(201,169,98,.08);
+  color:var(--text-secondary);
+  font-size:11px;
+  line-height:1.35;
+}
+.composer-mode-tip b{
+  flex:0 0 auto;
+  color:var(--accent-text);
+  font-size:11px;
+}
 .composer-tip {
   width: fit-content;
   max-width: calc(100% - 48px);
@@ -4872,7 +5008,7 @@ img.feed-chat-avatar {
 .tool-drawer {
   border-top: 1px solid var(--border);
   background: rgba(14, 14, 16, 0.96);
-  padding-bottom: max(8px, env(safe-area-inset-bottom));
+  padding-bottom: 8px;
 }
 .tool-tabs {
   display: flex;
@@ -4880,8 +5016,8 @@ img.feed-chat-avatar {
   padding: 8px 12px 4px;
 }
 .tool-tabs button {
-  width: 40px;
-  height: 34px;
+  width: 44px;
+  height: 44px;
   display: grid;
   place-items: center;
   border: 0;
@@ -4903,7 +5039,7 @@ img.feed-chat-avatar {
 .plus-drawer {
   border-top: 1px solid var(--border);
   background: rgba(14, 14, 16, 0.96);
-  padding: 16px 12px max(16px, env(safe-area-inset-bottom));
+  padding: 16px 12px;
 }
 .plus-actions {
   display: flex;
@@ -5052,6 +5188,7 @@ img.feed-assistant-avatar {
   overflow-y: auto;
 }
 .game-room-footer .expression-panel button {
+  min-height:42px;
   padding: 6px 0;
   border: 0;
   border-radius: 10px;
@@ -6830,12 +6967,13 @@ img.feed-assistant-avatar {
   border-top: 1px solid var(--border);
   /* 输入栏悬于聊天流上方，去掉 backdrop blur 减少滚动/打字时的重绘 */
   background: rgba(18, 18, 20, 0.98);
+  padding-bottom:max(8px, var(--app-bottom-inset, env(safe-area-inset-bottom)));
 }
 .chat-composer-shell {
   display: grid;
 }
 .chat-screen .game-room-composer {
-  padding: 8px 10px max(8px, env(safe-area-inset-bottom));
+  padding: 8px 10px 4px;
 }
 .chat-screen .tool-drawer,
 .chat-screen .plus-drawer {
@@ -6859,6 +6997,7 @@ img.feed-assistant-avatar {
   object-fit: contain;
 }
 .chat-screen .expression-panel button {
+  min-height:42px;
   border: 0;
   background: transparent;
   font-size: 22px;
@@ -6870,8 +7009,8 @@ img.feed-assistant-avatar {
   padding: 8px 12px 0;
 }
 .chat-screen .tool-tabs button {
-  width: 40px;
-  height: 36px;
+  width: 44px;
+  height: 44px;
   border: 0;
   border-radius: 10px;
   background: transparent;

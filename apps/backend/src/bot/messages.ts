@@ -46,9 +46,17 @@ export function formatScoreboard(scoreboard: RoundScoreboard): string[] {
         : player.outcome === 'BANKER_WIN'
           ? `输 ${signedMoney(String(player.netCents))}${multiplier > 1 ? `（庄家牌型 ×${multiplier}）` : ''}`
           : '平';
+    const shortfall = BigInt(String(player.shortfallCents));
+    // 庄钱赔完后排在后面的赢家一分未得，按规则叫「喝水」
+    const shortfallText =
+      player.outcome === 'PLAYER_WIN' && shortfall > 0n && BigInt(String(player.netCents)) === 0n
+        ? '（喝水 · 庄钱已赔完）'
+        : shortfall > 0n
+          ? `（免赔 RM ${fromCents(String(shortfall))}）`
+          : '';
     lines.push(
       `${player.isBust ? '💥 ' : ''}<b>${mention(player)}</b> · RM ${fromCents(String(player.claimCents))} · ${player.isAllIn ? '梭哈' : '下注'} RM ${fromCents(String(player.betCents))}`,
-      `${handLabel(player.handType, player.points)} → ${outcome}${BigInt(String(player.shortfallCents)) > 0n ? `（免赔 RM ${fromCents(String(player.shortfallCents))}）` : ''}`,
+      `${handLabel(player.handType, player.points)} → ${outcome}${shortfallText}`,
       `积分：RM ${fromCents(String(player.balanceBeforeCents))} → RM ${fromCents(String(player.balanceAfterCents))}`,
       '',
     );

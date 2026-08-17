@@ -1,4 +1,4 @@
-import { AccountType, MessageType, Prisma, RewardTab } from '@prisma/client';
+import { AccountType, ClaimSource, MessageType, Prisma, RewardTab } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
@@ -28,6 +28,8 @@ import {
   resolveAvatarUrl,
 } from '../services/supportAutoReply.js';
 import { transfer } from '../services/wallet.js';
+import { recordClaim } from '../services/game.js';
+import { gameBus } from '../services/gameBus.js';
 import { reloadBots, validateBotCredentials } from '../bot/index.js';
 import { broadcastUserProfileChanged } from '../services/roomHub.js';
 import {
@@ -1988,6 +1990,138 @@ export async function adminOperationsRoutes(app: FastifyInstance) {
         },
       }),
     };
+  });
+
+  // ── 手机端回传的待指认领取明细 ──
+  app.get('/api/admin/tng/claim-inbox', { preHandler: tngManagers }, async (req) => {
+    const query = z
+      .object({
+        status: z.enum(['PENDING', 'RESOLVED', 'DISCARDED']).default('PENDING'),
+        take: z.coerce.number().int().min(1).max(200).default(50),
+      })
+      .parse(req.query);
+    const rows = await prisma.tngClaimInbox.findMany({
+      where: { status: query.status },
+      orderBy: { createdAt: 'desc' },
+      take: query.take,
+      include: {
+        packet: {
+          select: {
+            id: true,
+            roundId: true,
+            totalCents: true,
+            participantCount: true,
+            round: { select: { phase: true, roomId: true } },
+          },
+        },
+      },
+    });
+    return {
+      items: rows.map((row) => ({
+        id: row.id,
+        packetId: row.packetId,
+        roundId: row.roundId,
+        roomId: row.packet.round.roomId,
+        phase: row.packet.round.phase,
+        tngName: safeDecryptSecret(row.tngName),
+        amountCents: String(row.amountCents),
+        claimedAt: row.claimedAt,
+        deviceId: row.deviceId,
+        reason: row.reason,
+        status: row.status,
+        createdAt: row.createdAt,
+      })),
+    };
+  });
+
+  /** 人工指认：把采集到的姓名归到指定玩家并正式认额（沿用 forceMatch 的原因留痕要求）。 */
+  app.post('/api/admin/tng/claim-inbox/:id/resolve', { preHandler: tngManagers }, async (req) => {
+    const { id } = req.params as { id: string };
+    const adminId = (req.user as { sub: string }).sub;
+    const body = z
+      .object({
+        userId: z.string().min(1).max(64),
+        forceMatch: z.boolean().default(false),
+        matchOverrideReason: z.string().min(4).max(500).optional(),
+      })
+      .refine((value) => !value.forceMatch || !!value.matchOverrideReason, {
+        message: '强制匹配必须填写原因',
+        path: ['matchOverrideReason'],
+      })
+      .parse(req.body);
+
+    const row = await prisma.tngClaimInbox.findUnique({ where: { id } });
+    if (!row) return { ok: false, error: 'INBOX_ITEM_NOT_FOUND' };
+    if (row.status !== 'PENDING') return { ok: false, error: 'INBOX_ITEM_NOT_PENDING' };
+
+    const result = await recordClaim({
+      roundId: row.roundId,
+      userId: body.userId,
+      amountCents: row.amountCents,
+      tngName: safeDecryptSecret(row.tngName),
+      source: ClaimSource.PROVIDER,
+      enteredBy: adminId,
+      forceMatch: body.forceMatch,
+      matchOverrideReason: body.matchOverrideReason,
+    });
+
+    await prisma.tngClaimInbox.update({
+      where: { id },
+      data: {
+        status: 'RESOLVED',
+        resolvedBy: adminId,
+        resolvedAt: new Date(),
+        claimId: result.claim.id,
+      },
+    });
+    await prisma.auditLog.create({
+      data: {
+        adminId,
+        action: 'tng_claim_inbox_resolve',
+        target: row.id,
+        after: {
+          roundId: row.roundId,
+          userId: body.userId,
+          amountCents: String(row.amountCents),
+          forceMatch: body.forceMatch,
+          ...(body.matchOverrideReason ? { reason: body.matchOverrideReason } : {}),
+        },
+        ip: req.ip,
+      },
+    });
+    gameBus.claimRecorded({
+      roundId: row.roundId,
+      userId: body.userId,
+      amountCents: String(row.amountCents),
+    });
+    return { ok: true, complete: result.complete, claim: result.claim };
+  });
+
+  /** 丢弃：重复采集、测试数据或已由人工另行录入的行。 */
+  app.post('/api/admin/tng/claim-inbox/:id/discard', { preHandler: tngManagers }, async (req) => {
+    const { id } = req.params as { id: string };
+    const adminId = (req.user as { sub: string }).sub;
+    const body = z.object({ reason: z.string().min(4).max(500) }).parse(req.body);
+    const row = await prisma.tngClaimInbox.updateMany({
+      where: { id, status: 'PENDING' },
+      data: {
+        status: 'DISCARDED',
+        reason: body.reason,
+        resolvedBy: adminId,
+        resolvedAt: new Date(),
+      },
+    });
+    if (row.count !== 1) return { ok: false, error: 'INBOX_ITEM_NOT_PENDING' };
+    await prisma.auditLog.create({
+      data: {
+        adminId,
+        action: 'tng_claim_inbox_discard',
+        target: id,
+        after: { reason: body.reason },
+        ip: req.ip,
+      },
+    });
+    return { ok: true };
   });
 
   // ── Bot 状态 / 默认路由 ──

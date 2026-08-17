@@ -35,6 +35,11 @@ export const env = {
   tngPacketHosts: resolveTngPacketHosts(),
   /** 开启后可由系统自动登记发包链接（模板含 {{packetId}}） */
   tngAutoPacketUrlTemplate: process.env.TNG_AUTO_PACKET_URL_TEMPLATE ?? '',
+  /** 手机端采集程序回调用：Bearer Token（身份）与 HMAC 签名密钥（完整性），两者必须不同 */
+  tngIngestToken: process.env.TNG_INGEST_TOKEN ?? '',
+  tngIngestSecret: process.env.TNG_INGEST_SECRET ?? '',
+  /** 派单租约时长：租约内不把同一局派给其它采集设备 */
+  tngIngestLeaseSeconds: parseInt(process.env.TNG_INGEST_LEASE_SECONDS ?? '90', 10),
 };
 
 if (nodeEnv === 'production') {
@@ -59,4 +64,18 @@ if (nodeEnv === 'production') {
   if (env.corsOrigins.length === 0 || env.corsOrigins.some((origin) => origin === '*')) {
     throw new Error('CORS_ORIGINS must contain explicit trusted origins in production');
   }
+  // 手机端回调可选：未配置则整套 ingest 接口关闭；一旦配置就必须足够强且两者独立
+  if (env.tngIngestToken || env.tngIngestSecret) {
+    if (env.tngIngestToken.length < 32 || env.tngIngestSecret.length < 32) {
+      throw new Error(
+        'TNG_INGEST_TOKEN and TNG_INGEST_SECRET must each contain at least 32 characters',
+      );
+    }
+    if (env.tngIngestToken === env.tngIngestSecret) {
+      throw new Error('TNG_INGEST_SECRET must be independent from TNG_INGEST_TOKEN');
+    }
+  }
 }
+
+/** 手机端采集回调是否启用：Token 与签名密钥同时配置才开放 /api/internal/tng/*。 */
+export const tngIngestEnabled = Boolean(env.tngIngestToken && env.tngIngestSecret);

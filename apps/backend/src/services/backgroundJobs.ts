@@ -1,5 +1,5 @@
 import { generateAllLeaderboards } from './leaderboards.js';
-import { autoSettleProfitPool } from './profitPool.js';
+import { autoGenerateProfitPool } from './profitPool.js';
 import { pushService } from './push.js';
 import { previousMalaysiaDay, settleRebates } from './rebates.js';
 import { withRedisLock } from '../lib/redis.js';
@@ -30,8 +30,8 @@ export class BackgroundJobs {
       await withRedisLock('niuniu:background-jobs:tick', 55_000, async () => {
         await pushService.processDueJobs();
         await settleRebates(previousMalaysiaDay());
-        // 返水结算后再结利润池，保证当日流水/抽水口径完整。
-        await autoSettleProfitPool(previousMalaysiaDay());
+        // 返水结算后再生成称桶报表（PENDING，发放需后台确认），保证当日流水/抽水口径完整。
+        await autoGenerateProfitPool(previousMalaysiaDay());
         await reconcileVpayDeposits();
         if (Date.now() - this.lastLeaderboardRun > 5 * 60_000) {
           for (const gameCode of SUPPORTED_GAME_CODES) {

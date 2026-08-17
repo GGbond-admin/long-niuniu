@@ -43,11 +43,17 @@ export default function Profile({
   const [saving, setSaving] = useState(false);
   const [avatarError, setAvatarError] = useState('');
   const [bankText, setBankText] = useState('未添加');
+  const [agent, setAgent] = useState<Awaited<ReturnType<typeof api.agentMe>>['agent']>(null);
   const kyc = session.onboarding.kycStatus;
 
   useEffect(() => {
     if (!active) return;
     api.me().then(setDetails).catch(() => undefined);
+    // 代理专属入口：仅代理或以上级别可见（非代理返回 null）
+    api
+      .agentMe()
+      .then((result) => setAgent(result.agent))
+      .catch(() => setAgent(null));
   }, [active]);
 
   useEffect(() => {
@@ -232,6 +238,47 @@ export default function Profile({
           </button>
         </div>
       </section>
+
+      {agent && (
+        <section className="profile-section ag-exclusive">
+          <div className="ag-exclusive-head">
+            <strong>👑 代理专属</strong>
+            <small>仅代理或以上级别可见 · 占成 {agent.sharePoints}/{agent.bucketBase}</small>
+          </div>
+          <div className="ag-exclusive-grid">
+            <button type="button" onClick={() => navigate('/agent/report')}>
+              <i className="ag-badge-new">NEW</i>
+              <span className="ag-exclusive-icon">📊</span>
+              <strong>称桶报表</strong>
+            </button>
+            <button type="button" onClick={() => navigate('/agent/sharing')}>
+              <span className="ag-exclusive-icon">🧮</span>
+              <strong>分成管理</strong>
+            </button>
+            <button type="button" onClick={() => navigate('/agent/players')}>
+              <span className="ag-exclusive-icon">👥</span>
+              <strong>玩家列表</strong>
+            </button>
+            <button type="button" onClick={() => navigate('/invite')}>
+              <span className="ag-exclusive-icon">🔗</span>
+              <strong>推荐二维码</strong>
+            </button>
+          </div>
+          <button
+            type="button"
+            className="ag-exclusive-banner"
+            onClick={() => navigate('/agent/report')}
+          >
+            <span>
+              <strong>专属代理中心</strong>
+              <small>
+                名下玩家 {agent.playerCount} · 下级代理 {agent.subagentCount}，查看团队数据与收益
+              </small>
+            </span>
+            <em>立即查看</em>
+          </button>
+        </section>
+      )}
 
       <section className="profile-section profile-settings-section">
         <button

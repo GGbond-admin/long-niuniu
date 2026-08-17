@@ -15,6 +15,8 @@ export interface TgWebApp {
   requestFullscreen?(): void;
   exitFullscreen?(): void;
   isFullscreen?: boolean;
+  safeAreaInset?: { top: number; bottom: number; left: number; right: number };
+  contentSafeAreaInset?: { top: number; bottom: number; left: number; right: number };
   onEvent?(event: string, handler: () => void): void;
   offEvent?(event: string, handler: () => void): void;
 }
@@ -29,21 +31,86 @@ export function tg(): TgWebApp | null {
   return window.Telegram?.WebApp ?? null;
 }
 
+function writeCssVar(name: string, px: number) {
+  document.documentElement.style.setProperty(name, `${Math.max(0, Math.round(px))}px`);
+}
+
+/** 把 Telegram JS 安全区写进 CSS 变量，避免只靠官方脚本注入时偶发为 0 */
+function syncTelegramSafeArea(app: TgWebApp) {
+  const safe = app.safeAreaInset;
+  const content = app.contentSafeAreaInset;
+  if (safe) {
+    writeCssVar('--tg-safe-area-inset-top', safe.top);
+    writeCssVar('--tg-safe-area-inset-bottom', safe.bottom);
+    writeCssVar('--tg-safe-area-inset-left', safe.left);
+    writeCssVar('--tg-safe-area-inset-right', safe.right);
+  }
+  if (content) {
+    writeCssVar('--tg-content-safe-area-inset-top', content.top);
+    writeCssVar('--tg-content-safe-area-inset-bottom', content.bottom);
+    writeCssVar('--tg-content-safe-area-inset-left', content.left);
+    writeCssVar('--tg-content-safe-area-inset-right', content.right);
+  }
+}
+
+let disposeTelegramLayout: (() => void) | null = null;
+
 /**
  * 手机端进入即请求真全屏（Bot API 8.0+，Telegram 客户端 ≥ 11.0）。
  * 桌面端保持普通展开：桌面 requestFullscreen 会弹成独立全屏窗口，体验反而差。
- * 全屏状态同步到 body.tg-fullscreen，CSS 据此让出状态栏/系统按钮安全区。
+ * 同时同步 visualViewport 高度，软键盘出现时聊天输入栏始终留在可视区内。
  */
 export function initTelegramFullscreen() {
-  const app = tg();
-  if (!app) return;
+  // React StrictMode / Fast Refresh 会重复初始化；先移除旧监听，避免一次事件触发多次布局写入。
+  disposeTelegramLayout?.();
+  disposeTelegramLayout = null;
 
-  const syncClass = () => {
-    document.body.classList.toggle('tg-fullscreen', app.isFullscreen === true);
+  const viewport = window.visualViewport;
+  let viewportFrame = 0;
+  const syncViewport = () => {
+    viewportFrame = 0;
+    writeCssVar('--app-viewport-height', viewport?.height ?? window.innerHeight);
   };
-  app.onEvent?.('fullscreenChanged', syncClass);
-  app.onEvent?.('fullscreenFailed', syncClass);
-  syncClass();
+  const scheduleViewportSync = () => {
+    if (viewportFrame) window.cancelAnimationFrame(viewportFrame);
+    viewportFrame = window.requestAnimationFrame(syncViewport);
+  };
+  viewport?.addEventListener('resize', scheduleViewportSync);
+  viewport?.addEventListener('scroll', scheduleViewportSync);
+  window.addEventListener('resize', scheduleViewportSync);
+  syncViewport();
+
+  const app = tg();
+  if (!app) {
+    disposeTelegramLayout = () => {
+      viewport?.removeEventListener('resize', scheduleViewportSync);
+      viewport?.removeEventListener('scroll', scheduleViewportSync);
+      window.removeEventListener('resize', scheduleViewportSync);
+      if (viewportFrame) window.cancelAnimationFrame(viewportFrame);
+    };
+    return;
+  }
+
+  const syncLayout = () => {
+    document.body.classList.toggle('tg-fullscreen', app.isFullscreen === true);
+    syncTelegramSafeArea(app);
+    scheduleViewportSync();
+  };
+  const telegramEvents = [
+    'fullscreenChanged',
+    'fullscreenFailed',
+    'safeAreaChanged',
+    'contentSafeAreaChanged',
+  ];
+  for (const event of telegramEvents) app.onEvent?.(event, syncLayout);
+  disposeTelegramLayout = () => {
+    for (const event of telegramEvents) app.offEvent?.(event, syncLayout);
+    viewport?.removeEventListener('resize', scheduleViewportSync);
+    viewport?.removeEventListener('scroll', scheduleViewportSync);
+    window.removeEventListener('resize', scheduleViewportSync);
+    if (viewportFrame) window.cancelAnimationFrame(viewportFrame);
+  };
+  syncLayout();
 
   const isMobile = app.platform === 'android' || app.platform === 'android_x' || app.platform === 'ios';
   let supported = false;

@@ -135,7 +135,7 @@ export async function generateLeaderboard(
     });
     for (const row of rows) {
       const counts = row.counts as Record<string, number>;
-      const score = ['BAOZI', 'MANNIU', 'FANSHUN', 'SHUNZI', 'DUIZI', 'JINNIU'].reduce(
+      const score = ['BAOZI', 'MANNIU', 'FANSHUN', 'SHUNZI', 'DUIZI', 'JINNIU', 'NIUNIU'].reduce(
         (sum, hand) => sum + (counts[hand] ?? 0),
         0,
       );

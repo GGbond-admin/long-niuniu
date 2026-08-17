@@ -7,6 +7,8 @@
     "dev:backend": "pnpm --filter backend dev",
     "dev:miniapp": "pnpm --filter miniapp dev",
     "dev:admin": "pnpm --filter admin dev",
+    "demo:start": "bash scripts/start-demo.sh",
+    "demo:stop": "bash scripts/stop-demo.sh",
     "test": "pnpm --filter backend test",
     "build": "pnpm -r build"
   },

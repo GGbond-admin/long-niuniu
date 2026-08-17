@@ -27,27 +27,73 @@ export function invalidateDeviceSession(code = 'DEVICE_SESSION_EXPIRED'): void {
   }
 }
 
-async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
-  const res = await fetch(path, {
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...options.headers,
-    },
-  });
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    if (token && DEVICE_SESSION_ERRORS.has(body.error)) {
-      invalidateDeviceSession(body.error);
+type RequestPolicy = {
+  timeoutMs?: number;
+  retries?: number;
+};
+
+const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+async function request<T>(
+  path: string,
+  options: RequestInit = {},
+  policy: RequestPolicy = {},
+): Promise<T> {
+  const timeoutMs = policy.timeoutMs ?? 15_000;
+  const retries = Math.max(0, policy.retries ?? 0);
+
+  for (let attempt = 0; ; attempt += 1) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch(path, {
+        ...options,
+        signal: controller.signal,
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          ...options.headers,
+        },
+      });
+      const body = (await res.json().catch((cause) => {
+        if (res.ok) throw cause;
+        return {};
+      })) as {
+        error?: string;
+        message?: string;
+        details?: unknown;
+      };
+
+      if (!res.ok) {
+        if (token && body.error && DEVICE_SESSION_ERRORS.has(body.error)) {
+          invalidateDeviceSession(body.error);
+        }
+        throw Object.assign(
+          new Error(body.message ?? body.error ?? `HTTP ${res.status}`),
+          {
+            code: body.error,
+            status: res.status,
+            details: body.details,
+          },
+        );
+      }
+      return body as T;
+    } catch (cause) {
+      const status = (cause as { status?: number } | null)?.status;
+      const timedOut = controller.signal.aborted;
+      const error = timedOut
+        ? Object.assign(new Error('请求超时，请检查网络后重试'), {
+            code: 'REQUEST_TIMEOUT',
+          })
+        : cause;
+      const retryable = timedOut || status === undefined || status >= 500;
+      if (attempt >= retries || !retryable) throw error;
+      clearTimeout(timeout);
+      await wait(350 * (attempt + 1));
+    } finally {
+      clearTimeout(timeout);
     }
-    throw Object.assign(new Error(body.message ?? body.error ?? `HTTP ${res.status}`), {
-      code: body.error,
-      status: res.status,
-      details: body.details,
-    });
   }
-  return res.json();
 }
 
 async function upload<T>(path: string, file: File): Promise<T> {
@@ -81,6 +127,9 @@ function joinRoom(roomId: string): Promise<RoomState> {
   const pending = request<RoomState>(`/api/game/rooms/${roomId}/join`, {
     method: 'POST',
     body: '{}',
+  }, {
+    timeoutMs: 8_000,
+    retries: 1,
   });
   joinRoomRequests.set(key, pending);
   void pending.then(
@@ -717,6 +766,110 @@ export const api = {
 
   inviteLink: () =>
     request<{ uid: string; nickname: string; avatarUrl?: string; deepLink: string }>('/api/promotion/invite-link'),
+
+  /** 代理身份（非代理返回 agent: null，用于「代理专属」入口显隐） */
+  agentMe: () =>
+    request<{
+      agent: {
+        id: string;
+        label: string;
+        sharePoints: number;
+        bucketBase: number;
+        minReservePoints: number;
+        maxChildPoints: number;
+        playerCount: number;
+        subagentCount: number;
+      } | null;
+    }>('/api/agent/me'),
+
+  agentReport: (date?: string) =>
+    request<{
+      date: string;
+      today: string;
+      status: 'ESTIMATED' | 'PENDING' | 'SETTLED' | 'NO_DISTRIBUTION';
+      company: {
+        turnoverCents: string;
+        expenseCents: string;
+        rakeTotalCents: string;
+        netPoolCents: string;
+      };
+      mine: {
+        sharePoints: number;
+        bucketBase: number;
+        selfTurnoverCents: string;
+        teamTurnoverCents: string;
+        contributionBp: number;
+        selfAmountCents: string;
+        overrideAmountCents: string;
+        totalAmountCents: string;
+      };
+      subagents: Array<{
+        label: string;
+        uidMasked: string;
+        sharePoints: number;
+        diffPoints: number;
+        teamTurnoverCents: string;
+        amountCents: string;
+      }>;
+      players: Array<{
+        uidMasked: string;
+        nickname: string | null;
+        avatarUrl: string | null;
+        turnoverCents: string;
+        profitCents: string;
+      }>;
+    }>(`/api/agent/report${date ? `?date=${date}` : ''}`),
+
+  agentPlayers: () =>
+    request<{
+      maxChildPoints: number;
+      bucketBase: number;
+      items: Array<{
+        playerId: string;
+        uidMasked: string;
+        nickname: string | null;
+        avatarUrl: string | null;
+        joinedAt: string;
+        boundAt: string;
+        source: 'MANUAL' | 'REFERRAL';
+        totalTurnoverCents: string;
+      }>;
+    }>('/api/agent/players'),
+
+  agentPromote: (playerId: string, sharePoints: number, label?: string) =>
+    request<{ ok: boolean }>(`/api/agent/players/${playerId}/promote`, {
+      method: 'POST',
+      body: JSON.stringify({ sharePoints, label }),
+    }),
+
+  agentSubagents: () =>
+    request<{
+      mine: {
+        sharePoints: number;
+        bucketBase: number;
+        minReservePoints: number;
+        maxChildPoints: number;
+      };
+      items: Array<{
+        agentId: string;
+        label: string;
+        uidMasked: string;
+        nickname: string | null;
+        avatarUrl: string | null;
+        sharePoints: number;
+        status: 'ACTIVE' | 'DISABLED';
+        playerCount: number;
+        subagentCount: number;
+        myDiffPoints: number;
+        createdAt: string;
+      }>;
+    }>('/api/agent/subagents'),
+
+  agentSetSubagentPoints: (agentId: string, sharePoints: number) =>
+    request<{ ok: boolean }>(`/api/agent/subagents/${agentId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ sharePoints }),
+    }),
 
   notices: () =>
     request<{

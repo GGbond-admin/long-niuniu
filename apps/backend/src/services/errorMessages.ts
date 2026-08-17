@@ -124,6 +124,21 @@ export function paymentPinMessage(code: string): string {
   return PAYMENT_PIN_MESSAGES[code] ?? '支付密码校验失败，请重试';
 }
 
+/** 手机端采集回调的错误文案：面向采集程序开发者，不上玩家屏。 */
+const TNG_INGEST_MESSAGES: Record<string, string> = {
+  CORRELATION_NOT_FOUND: '关联短码不存在或已失效',
+  PACKET_LINK_REQUIRED: 'shareUrl 与 deepLink 至少提供一个',
+  PACKET_ALREADY_PUBLISHED: '该局已登记过其它链接',
+  PACKET_AMOUNT_MISMATCH: '建包金额或份数与派单不一致',
+  TNG_ACCOUNT_UNAVAILABLE: '发包账号不可用，请联系运营',
+  INVALID_PHASE: '该局已不在可发包/可认额阶段',
+  CORRELATION_ALLOCATION_FAILED: '短码分配失败，请重试',
+};
+
+export function tngIngestMessage(code: string): string {
+  return TNG_INGEST_MESSAGES[code] ?? '回调处理失败，请检查参数';
+}
+
 const CANCEL_REASON_MESSAGES: Record<string, string> = {
   NO_VALID_BANKER_BID: '本局无有效竞标，自动流局',
   NOT_ENOUGH_PLAYERS: '人数不足，自动流局',

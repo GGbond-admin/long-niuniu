@@ -1628,34 +1628,54 @@ body:has(.ui-shell) #root {
    ———————————————————————————————————————————— */
 :root {
   --app-top-inset: 0px;
+  --app-right-inset: 0px;
+  --app-bottom-inset: env(safe-area-inset-bottom, 0px);
+  --app-viewport-height: 100vh;
 }
 body.tg-fullscreen {
   --app-top-inset: calc(
     var(--tg-safe-area-inset-top, env(safe-area-inset-top, 0px)) +
     var(--tg-content-safe-area-inset-top, 0px)
   );
+  --app-right-inset: var(--tg-content-safe-area-inset-right, 0px);
+  --app-bottom-inset: max(
+    env(safe-area-inset-bottom, 0px),
+    var(--tg-safe-area-inset-bottom, 0px),
+    var(--tg-content-safe-area-inset-bottom, 0px)
+  );
   padding-top: var(--app-top-inset);
 }
 
 /* 普通文档流页面靠 body padding 即可；100dvh 的容器要扣掉安全区，防止底部被顶出屏幕 */
 body.tg-fullscreen .page {
-  min-height: calc(100dvh - var(--app-top-inset)) !important;
+  min-height: calc(var(--app-viewport-height, 100vh) - var(--app-top-inset)) !important;
 }
-body.tg-fullscreen:has(.ui-shell) #root {
-  height: calc(100dvh - var(--app-top-inset));
-  min-height: calc(100dvh - var(--app-top-inset));
-  max-height: calc(100dvh - var(--app-top-inset));
+/* 主 Tab 壳：不能压缩 #root 高度（.ui-shell 的 min-height:100vh 会把底部 tabbar
+   顶出 overflow:hidden 的裁剪区）；改为 shell 内部让出顶部安全区 */
+body.tg-fullscreen:has(.ui-shell) {
+  padding-top: 0;
+}
+body.tg-fullscreen .ui-shell {
+  min-height: 0;
+  padding-top: var(--app-top-inset);
 }
 
 /* 视口锁高的沉浸式界面：取消 body padding，让背景铺满到屏幕顶，由头部自己避让 */
 body.tg-fullscreen:has(.game-room, .chat-screen) {
   padding-top: 0;
 }
+.game-room,
+.chat-screen {
+  height: var(--app-viewport-height, 100vh);
+  max-height: var(--app-viewport-height, 100vh);
+}
 body.tg-fullscreen .game-room-header {
   padding-top: calc(6px + var(--app-top-inset)) !important;
+  padding-right: calc(10px + var(--app-right-inset)) !important;
 }
 body.tg-fullscreen .chat-screen .chat-header {
   padding-top: calc(12px + var(--app-top-inset));
+  padding-right: calc(16px + var(--app-right-inset));
 }
 
 /* 发红包/转账、打赏页：吸顶导航自己吃掉安全区（背景不透明，滚动时盖住内容） */
@@ -1665,6 +1685,10 @@ body.tg-fullscreen:has(.cash-page, .tip-page) {
 body.tg-fullscreen .cash-nav,
 body.tg-fullscreen .tip-page-nav {
   padding-top: max(8px, calc(var(--app-top-inset) + 6px));
+  padding-right: calc(16px + var(--app-right-inset));
+}
+body.tg-fullscreen .subpage-header {
+  padding-right: calc(16px + var(--app-right-inset));
 }
 
 /* fixed 定位的全屏覆盖层不受 body padding 影响，单独避让 */
@@ -1674,4 +1698,565 @@ body.tg-fullscreen .wx-rp-opening {
 }
 body.tg-fullscreen .room-tip-notice {
   top: calc(var(--app-top-inset) + 12px);
+}
+
+/* ═══════════ 代理专属（称桶报表 / 分成管理 / 玩家列表） ═══════════ */
+.ag-page {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.ag-datebar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-radius: var(--radius);
+  background: var(--fill);
+  border: 1px solid var(--line);
+}
+.ag-datebar small {
+  display: block;
+  color: var(--ink-mute);
+  font-size: 11px;
+  margin-bottom: 4px;
+}
+.ag-date-nav {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.ag-date-nav b {
+  font-size: 17px;
+  font-family: var(--font-display);
+  letter-spacing: 0.02em;
+}
+.ag-date-nav button {
+  width: 28px;
+  height: 28px;
+  border-radius: 9px;
+  border: 1px solid var(--line-soft);
+  background: var(--fill-strong);
+  color: var(--gold);
+  font-size: 16px;
+  line-height: 1;
+}
+.ag-date-nav button:disabled {
+  opacity: 0.35;
+}
+.ag-status {
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--line-soft);
+  white-space: nowrap;
+}
+.ag-status.paid {
+  color: var(--success);
+  border-color: rgba(110, 231, 183, 0.35);
+  background: rgba(110, 231, 183, 0.08);
+}
+.ag-status.pending {
+  color: var(--gold);
+  border-color: rgba(212, 192, 154, 0.4);
+  background: rgba(212, 192, 154, 0.08);
+}
+.ag-status.est {
+  color: var(--ink-soft);
+  background: var(--fill);
+}
+.ag-status.none {
+  color: var(--danger);
+  border-color: rgba(248, 113, 113, 0.3);
+  background: rgba(248, 113, 113, 0.06);
+}
+
+.ag-panel {
+  border-radius: var(--radius-lg);
+  background: var(--bg-elevated);
+  border: 1px solid var(--line);
+  padding: 16px;
+}
+.ag-panel-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+.ag-panel-head h2 {
+  font-size: 15px;
+  font-weight: 600;
+}
+.ag-panel-head small {
+  color: var(--ink-mute);
+  font-size: 11px;
+}
+.ag-more {
+  background: none;
+  border: none;
+  color: var(--gold);
+  font-size: 12px;
+  padding: 0;
+}
+.ag-company-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+.ag-company-grid article {
+  border-radius: 12px;
+  background: var(--fill);
+  border: 1px solid var(--line);
+  padding: 10px;
+  text-align: center;
+}
+.ag-company-grid small {
+  display: block;
+  color: var(--ink-mute);
+  font-size: 10.5px;
+  margin-bottom: 5px;
+}
+.ag-company-grid strong {
+  font-size: 13.5px;
+  font-family: var(--font-display);
+  word-break: break-all;
+}
+.ag-company-grid strong.neg {
+  color: var(--danger);
+}
+.ag-company-grid strong.pos {
+  color: var(--success);
+}
+
+.ag-profit-equation {
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+}
+.ag-profit-equation i {
+  align-self: center;
+  color: var(--ink-mute);
+  font-style: normal;
+  font-size: 15px;
+}
+.ag-profit-total {
+  flex: 1.3;
+  border-radius: 12px;
+  border: 1px solid var(--line-soft);
+  background: var(--accent-soft);
+  padding: 12px 10px;
+}
+.ag-profit-total strong {
+  display: block;
+  margin-top: 4px;
+  font-size: 19px;
+  color: var(--gold);
+  font-family: var(--font-display);
+}
+.ag-profit-part {
+  flex: 1;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: var(--fill);
+  padding: 12px 10px;
+}
+.ag-profit-part b {
+  display: block;
+  margin-top: 4px;
+  font-size: 13.5px;
+  font-family: var(--font-display);
+}
+.ag-profit-total small,
+.ag-profit-part small {
+  color: var(--ink-mute);
+  font-size: 10.5px;
+}
+.ag-profit-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  margin-top: 12px;
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+.ag-profit-meta b {
+  color: var(--ink);
+  font-family: var(--font-display);
+}
+
+.ag-table {
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  overflow: hidden;
+}
+.ag-table-row {
+  display: grid;
+  grid-template-columns: 1.4fr 1fr 0.9fr 1fr;
+  gap: 6px;
+  align-items: center;
+  padding: 10px 12px;
+  font-size: 12.5px;
+  border-top: 1px solid var(--line);
+}
+.ag-table.cols3 .ag-table-row {
+  grid-template-columns: 1.4fr 1fr 1fr;
+}
+.ag-table-row:first-child {
+  border-top: none;
+}
+.ag-table-row.head {
+  background: var(--fill);
+  color: var(--ink-mute);
+  font-size: 11px;
+}
+.ag-table-row.total {
+  background: var(--fill);
+  font-weight: 600;
+}
+.ag-table-row > span:not(:first-child) {
+  text-align: right;
+  font-family: var(--font-display);
+}
+.ag-cell-name strong {
+  display: block;
+  font-size: 12.5px;
+}
+.ag-cell-name small {
+  color: var(--ink-mute);
+  font-size: 10.5px;
+}
+.ag-diff {
+  color: var(--success);
+}
+.ag-money {
+  color: var(--gold);
+}
+.ag-note {
+  margin-top: 8px;
+  font-size: 10.5px;
+  color: var(--ink-mute);
+  line-height: 1.5;
+}
+.ag-empty {
+  padding: 18px 6px;
+  text-align: center;
+  color: var(--ink-mute);
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+.ag-footbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  border-radius: var(--radius);
+  background: var(--fill);
+  border: 1px solid var(--line-soft);
+  margin-bottom: 8px;
+}
+.ag-foot-points {
+  white-space: nowrap;
+  font-size: 12.5px;
+  color: var(--ink-soft);
+}
+.ag-foot-points b {
+  color: var(--gold);
+}
+.ag-footbar small {
+  color: var(--ink-mute);
+  font-size: 10.5px;
+  line-height: 1.5;
+}
+
+/* 玩家/代理列表 */
+.ag-tabs {
+  display: flex;
+  gap: 8px;
+}
+.ag-tabs button {
+  flex: 1;
+  padding: 9px 0;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--fill);
+  color: var(--ink-soft);
+  font-size: 12.5px;
+}
+.ag-tabs button.active {
+  border-color: var(--line-soft);
+  background: var(--accent-soft);
+  color: var(--gold);
+  font-weight: 600;
+}
+.ag-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ag-list-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: var(--fill);
+}
+.ag-list-avatar {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  overflow: hidden;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--fill-strong);
+  color: var(--gold);
+  font-size: 15px;
+}
+.ag-list-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.ag-list-avatar.agent {
+  border: 1px solid var(--line-soft);
+}
+.ag-list-copy {
+  flex: 1;
+  min-width: 0;
+}
+.ag-list-copy strong {
+  display: block;
+  font-size: 13.5px;
+}
+.ag-list-copy small {
+  display: block;
+  color: var(--ink-mute);
+  font-size: 10.5px;
+  margin-top: 2px;
+}
+.ag-list-copy small b {
+  color: var(--gold);
+}
+.ag-promote-btn {
+  flex-shrink: 0;
+  padding: 7px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(212, 192, 154, 0.45);
+  background: linear-gradient(135deg, rgba(212, 192, 154, 0.18), rgba(184, 154, 94, 0.12));
+  color: var(--gold);
+  font-size: 12px;
+  font-weight: 600;
+}
+.ag-promote-btn:disabled {
+  opacity: 0.4;
+}
+
+/* 弹层：升级代理 / 调整占成 */
+.ag-sheet {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+}
+.ag-sheet-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  border: none;
+}
+.ag-sheet-panel {
+  position: relative;
+  width: 100%;
+  max-width: 480px;
+  border-radius: 20px 20px 0 0;
+  background: var(--bg-elevated);
+  border: 1px solid var(--line-soft);
+  border-bottom: none;
+  padding: 20px 18px calc(20px + env(safe-area-inset-bottom));
+}
+.ag-sheet-panel h2 {
+  font-size: 16px;
+  margin-bottom: 4px;
+}
+.ag-sheet-sub {
+  color: var(--ink-mute);
+  font-size: 12px;
+  margin-bottom: 14px;
+}
+.ag-sheet-label {
+  display: block;
+  font-size: 12px;
+  color: var(--ink-soft);
+  margin-bottom: 8px;
+}
+.ag-quick-points {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.ag-quick-points button {
+  padding: 7px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: var(--fill);
+  color: var(--ink-soft);
+  font-size: 12.5px;
+}
+.ag-quick-points button.active {
+  border-color: var(--line-soft);
+  background: var(--accent-soft);
+  color: var(--gold);
+  font-weight: 600;
+}
+.ag-sheet-panel input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid var(--line-soft);
+  background: var(--fill);
+  color: var(--ink);
+  font-size: 16px;
+  font-family: var(--font-display);
+}
+.ag-sheet-hint {
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--ink-mute);
+  line-height: 1.55;
+}
+.ag-sheet-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 16px;
+}
+.ag-sheet-actions button {
+  flex: 1;
+  padding: 12px 0;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: var(--fill);
+  color: var(--ink-soft);
+  font-size: 14px;
+}
+.ag-sheet-actions button.primary {
+  border-color: transparent;
+  background: linear-gradient(135deg, var(--gold), var(--gold-deep));
+  color: #17130a;
+  font-weight: 700;
+}
+.ag-sheet-actions button:disabled {
+  opacity: 0.45;
+}
+
+/* Profile「代理专属」区块 */
+.ag-exclusive {
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--line-soft);
+  background: var(--bg-elevated);
+  padding: 14px;
+}
+.ag-exclusive-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.ag-exclusive-head strong {
+  font-size: 13.5px;
+  color: var(--gold);
+}
+.ag-exclusive-head small {
+  color: var(--ink-mute);
+  font-size: 10.5px;
+}
+.ag-exclusive-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+}
+.ag-exclusive-grid button {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 12px 4px 10px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: var(--fill);
+  color: var(--ink);
+}
+.ag-exclusive-grid strong {
+  font-size: 11.5px;
+  font-weight: 500;
+}
+.ag-exclusive-icon {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--accent-soft);
+  border: 1px solid var(--line-soft);
+  font-size: 16px;
+}
+.ag-badge-new {
+  position: absolute;
+  top: -6px;
+  right: -2px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--live);
+  color: #fff;
+  font-size: 9px;
+  font-style: normal;
+  font-weight: 700;
+}
+.ag-exclusive-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  margin-top: 10px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid var(--line-soft);
+  background: linear-gradient(135deg, rgba(212, 192, 154, 0.14), rgba(184, 154, 94, 0.06));
+  color: var(--ink);
+  text-align: left;
+}
+.ag-exclusive-banner strong {
+  display: block;
+  font-size: 13px;
+  color: var(--gold);
+}
+.ag-exclusive-banner small {
+  display: block;
+  color: var(--ink-mute);
+  font-size: 10.5px;
+  margin-top: 2px;
+}
+.ag-exclusive-banner em {
+  flex-shrink: 0;
+  font-style: normal;
+  padding: 7px 12px;
+  border-radius: 10px;
+  background: linear-gradient(135deg, var(--gold), var(--gold-deep));
+  color: #17130a;
+  font-size: 12px;
+  font-weight: 700;
+}
+.ag-share-summary .ag-note {
+  margin-top: 10px;
 }

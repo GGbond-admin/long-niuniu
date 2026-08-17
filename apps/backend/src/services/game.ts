@@ -27,7 +27,7 @@ import { settleRound as calculateSettlement } from '../engine/settlement.js';
 import { env } from '../config.js';
 import { blindIndex, decryptSecret, encryptSecret, normalizeIdentity } from '../lib/crypto.js';
 import { prisma } from '../lib/prisma.js';
-import { checkTngPacketUrl } from '../lib/tngPacketUrl.js';
+import { checkTngClaimLink, checkTngDeepLink } from '../lib/tngPacketUrl.js';
 import { serializable } from '../lib/transaction.js';
 import {
   getGameSettings,
@@ -62,11 +62,6 @@ const ACTIVE_PHASES: RoundPhase[] = [
   RoundPhase.CLAIM_EXPIRED,
   RoundPhase.SETTLING,
 ];
-
-/** 进行中牌局（不含 WAITING）：金额指令与状态展示优先取这类局，避免与下一局 WAITING 并存时取错 */
-const IN_PLAY_PHASES: RoundPhase[] = ACTIVE_PHASES.filter(
-  (phase) => phase !== RoundPhase.WAITING,
-);
 
 function isClaimReviewPhase(phase: RoundPhase): boolean {
   return phase === RoundPhase.CLAIMING || phase === RoundPhase.CLAIM_EXPIRED;
@@ -166,29 +161,57 @@ async function event(
   await tx.roundEvent.create({ data: { roundId, type, payload, actorId } });
 }
 
+type JoinRoomOptions = {
+  /**
+   * HTTP 玩家路由已经完成 authUser + requireKyc 时可跳过重复用户查询。
+   * 服务端虚拟玩家调用不传此项，继续走完整能力校验。
+   */
+  validatedHuman?: boolean;
+  /** 限定网页入口可加入的游戏；虚拟玩家内部调度不限制。 */
+  allowedGameCodes?: readonly string[];
+};
+
 /** 网页游戏房进房：需实名通过；成为房间活跃成员后方可竞标/下注/抢包 */
-export async function joinRoom(roomId: string, userId: string) {
+export async function joinRoom(
+  roomId: string,
+  userId: string,
+  options: JoinRoomOptions = {},
+) {
+  const roomLookup = options.allowedGameCodes?.length
+    ? prisma.room.findFirst({
+        where: {
+          id: roomId,
+          gameCode: { in: [...options.allowedGameCodes] },
+        },
+      })
+    : prisma.room.findUnique({ where: { id: roomId } });
+  const userLookup = options.validatedHuman
+    ? Promise.resolve(null)
+    : prisma.user.findUnique({
+        where: { id: userId },
+        include: { kyc: true, virtualPlayer: true },
+      });
   const [room, user] = await Promise.all([
-    prisma.room.findUnique({ where: { id: roomId } }),
-    prisma.user.findUnique({
-      where: { id: userId },
-      include: { kyc: true, virtualPlayer: true },
-    }),
+    roomLookup,
+    userLookup,
   ]);
   if (!room || room.status !== 'ACTIVE') throw new GameError('ROOM_NOT_FOUND');
-  if (!user || user.status !== UserStatus.ACTIVE) throw new GameError('USER_NOT_ACTIVE');
-  if (user.kyc?.status !== KycStatus.APPROVED) throw new GameError('KYC_REQUIRED');
-  if (user.kind === UserKind.VIRTUAL) {
-    const profile = user.virtualPlayer;
-    if (!profile || !profile.enabled || !profile.canJoin) {
-      throw new GameError('VIRTUAL_CAPABILITY_DENIED', { capability: 'join' });
+  if (!options.validatedHuman) {
+    if (!user || user.status !== UserStatus.ACTIVE) throw new GameError('USER_NOT_ACTIVE');
+    if (user.kyc?.status !== KycStatus.APPROVED) throw new GameError('KYC_REQUIRED');
+    if (user.kind === UserKind.VIRTUAL) {
+      const profile = user.virtualPlayer;
+      if (!profile || !profile.enabled || !profile.canJoin) {
+        throw new GameError('VIRTUAL_CAPABILITY_DENIED', { capability: 'join' });
+      }
+      if (profile.roomId !== roomId) throw new GameError('VIRTUAL_WRONG_ROOM');
     }
-    if (profile.roomId !== roomId) throw new GameError('VIRTUAL_WRONG_ROOM');
   }
   const existing = await prisma.roomMember.findUnique({
     where: { roomId_userId: { roomId, userId } },
   });
   if (existing?.status === 'BANNED') throw new GameError('ROOM_BANNED');
+  if (existing?.status === 'ACTIVE') return { room, member: existing };
   const member = await prisma.roomMember.upsert({
     where: { roomId_userId: { roomId, userId } },
     create: { roomId, userId },
@@ -840,10 +863,12 @@ export async function closeBetting(roundId: string) {
 export async function publishPacket(params: {
   roundId: string;
   claimUrl: string;
+  /** tngdwallet:// 深链；https 分享链在 Telegram 内置浏览器打不开时由前端兜底唤起 */
+  deepLink?: string;
   packerAccount: string;
   actorId?: string;
 }) {
-  const checked = checkTngPacketUrl(params.claimUrl, env.tngPacketHosts);
+  const checked = checkTngClaimLink(params.claimUrl, env.tngPacketHosts);
   if (!checked.ok) {
     throw new GameError(checked.code, {
       hostname: checked.hostname,
@@ -851,6 +876,12 @@ export async function publishPacket(params: {
     });
   }
   const claimUrl = checked.claimUrl;
+  let deepLink: string | null = checked.kind === 'deeplink' ? checked.claimUrl : null;
+  if (params.deepLink) {
+    const checkedDeep = checkTngDeepLink(params.deepLink);
+    if (!checkedDeep.ok) throw new GameError(checkedDeep.code);
+    deepLink = checkedDeep.deepLink;
+  }
   return serializable(async (tx) => {
     const round = await tx.round.findUnique({
       where: { id: params.roundId },
@@ -912,6 +943,7 @@ export async function publishPacket(params: {
       where: { id: round.packet.id },
       data: {
         claimUrl,
+        deepLink,
         packerAccount: params.packerAccount,
         status: 'SENT',
         sentAt: now,
@@ -1456,6 +1488,43 @@ export async function claimCandidates(tngName: string) {
   }));
 }
 
+export type ClaimNameResolution =
+  | { ok: true; userId: string }
+  | { ok: false; reason: 'NAME_NOT_MATCHED' | 'NAME_AMBIGUOUS' | 'KYC_NOT_APPROVED' };
+
+/**
+ * 手机端回传的领取明细只有 TNG 姓名，需先解析成本局玩家。
+ * 与 claimCandidates 的区别：这里只在**本局参与者**（庄家 + 已冻结下注的闲家）范围内匹配，
+ * 全库同名不会造成误记账；歧义或未实名一律交人工指认。
+ */
+export async function resolveClaimUserByName(
+  roundId: string,
+  tngName: string,
+): Promise<ClaimNameResolution> {
+  const round = await prisma.round.findUnique({
+    where: { id: roundId },
+    select: {
+      bankerId: true,
+      bets: { where: { status: BetStatus.FROZEN }, select: { userId: true } },
+    },
+  });
+  if (!round) return { ok: false, reason: 'NAME_NOT_MATCHED' };
+  const participantIds = new Set<string>(round.bets.map((bet) => bet.userId));
+  if (round.bankerId) participantIds.add(round.bankerId);
+  if (participantIds.size === 0) return { ok: false, reason: 'NAME_NOT_MATCHED' };
+
+  const nameHash = blindIndex(tngName);
+  const matches = await prisma.kyc.findMany({
+    where: { userId: { in: [...participantIds] }, realNameHash: nameHash },
+    select: { userId: true, status: true },
+  });
+  if (matches.length === 0) return { ok: false, reason: 'NAME_NOT_MATCHED' };
+  const approved = matches.filter((row) => row.status === KycStatus.APPROVED);
+  if (approved.length === 0) return { ok: false, reason: 'KYC_NOT_APPROVED' };
+  if (approved.length > 1) return { ok: false, reason: 'NAME_AMBIGUOUS' };
+  return { ok: true, userId: approved[0]!.userId };
+}
+
 export async function recordClaim(params: {
   roundId: string;
   userId: string;
@@ -1464,6 +1533,8 @@ export async function recordClaim(params: {
   enteredBy?: string;
   forceMatch?: boolean;
   matchOverrideReason?: string;
+  /** 默认后台人工录入；手机端自动回调传 PROVIDER */
+  source?: ClaimSource;
 }) {
   if (params.amountCents <= 0n) throw new GameError('INVALID_AMOUNT');
   if (params.forceMatch && (!params.matchOverrideReason || params.matchOverrideReason.trim().length < 4)) {
@@ -1524,6 +1595,7 @@ export async function recordClaim(params: {
         tngName: encryptSecret(normalizeIdentity(params.tngName)),
         handType: hand.type,
         points: hand.points,
+        source: params.source ?? ClaimSource.MANUAL,
         enteredBy: params.enteredBy,
         confirmedAt: new Date(),
       },
@@ -1754,6 +1826,7 @@ export async function settleGameRound(roundId: string, actorId?: string) {
         betCents: safeNumber(bet.amountCents, 'bet'),
         claimCents: safeNumber(claims.get(bet.userId)!.amountCents, 'claim'),
         reservedCents: safeNumber(reservedCentsOf(bet), 'betReserve'),
+        betPlacedAtMs: bet.createdAt.getTime(),
       })),
       participantCount: round.bets.length + 1,
       handConfig: settings.hand,
@@ -2208,18 +2281,18 @@ const roundInclude = {
 };
 
 export async function currentRoundForRoom(roomId: string) {
-  // 若进行中局与下一局 WAITING 因竞态短暂并存，必须优先返回进行中局，否则竞标金额会被拒。
-  const inPlay = await prisma.round.findFirst({
-    where: { roomId, phase: { in: IN_PLAY_PHASES } },
+  // 一次读取最近两个活跃局；若进行中局与下一局 WAITING 短暂并存，仍优先进行中局。
+  const rounds = await prisma.round.findMany({
+    where: { roomId, phase: { in: ACTIVE_PHASES } },
     orderBy: { seqNo: 'desc' },
     include: roundInclude,
+    take: 2,
   });
-  if (inPlay) return inPlay;
-  return prisma.round.findFirst({
-    where: { roomId, phase: RoundPhase.WAITING },
-    orderBy: { seqNo: 'desc' },
-    include: roundInclude,
-  });
+  return (
+    rounds.find((round) => round.phase !== RoundPhase.WAITING) ??
+    rounds[0] ??
+    null
+  );
 }
 
 /** 聊天禁言等热路径只需阶段，不应加载整局 bids / bets / claims。 */

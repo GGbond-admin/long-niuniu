@@ -21,7 +21,9 @@ import { adminGameRoutes, gameRoutes } from './routes/game.js';
 import { gameRoomRoutes } from './routes/gameRoom.js';
 import { initRoomHub } from './services/roomHub.js';
 import { adminOperationsRoutes, operationsRoutes } from './routes/operations.js';
+import { internalTngRoutes } from './routes/internalTng.js';
 import { adminProfitPoolRoutes } from './routes/profitPool.js';
+import { agentRoutes } from './routes/agent.js';
 import { adminVirtualPlayerRoutes } from './routes/virtualPlayers.js';
 import { adminNoticeRoutes, noticeRoutes } from './routes/notices.js';
 import { uploadRoutes } from './routes/uploads.js';
@@ -30,10 +32,12 @@ import { settingsRoutes } from './routes/settings.js';
 import { pushService, PushService } from './services/push.js';
 import { WalletError } from './services/wallet.js';
 import { GameError } from './services/game.js';
+import { TngIngestError } from './services/tngIngest.js';
 import { PaymentPinError } from './services/paymentPin.js';
 import {
   gameErrorMessage,
   paymentPinMessage,
+  tngIngestMessage,
   walletErrorMessage,
 } from './services/errorMessages.js';
 
@@ -209,6 +213,11 @@ export async function buildServer() {
         .code(status)
         .send({ error: err.code, message: paymentPinMessage(err.code), details: err.details });
     }
+    if (err instanceof TngIngestError) {
+      return reply
+        .code(err.status)
+        .send({ error: err.code, message: tngIngestMessage(err.code), details: err.details });
+    }
     if (err instanceof GameError) {
       const status = ['ROUND_NOT_FOUND', 'ROOM_NOT_FOUND', 'PACKET_NOT_FOUND'].includes(err.code)
         ? 404
@@ -253,7 +262,9 @@ export async function buildServer() {
   await app.register(adminVirtualPlayerRoutes);
   await app.register(operationsRoutes);
   await app.register(adminOperationsRoutes);
+  await app.register(internalTngRoutes);
   await app.register(adminProfitPoolRoutes);
+  await app.register(agentRoutes);
   await app.register(noticeRoutes);
   await app.register(adminNoticeRoutes);
   await app.register(uploadRoutes);

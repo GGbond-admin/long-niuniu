@@ -381,6 +381,7 @@ export default function GameOperationsCenter({ admin }: { admin: Admin }) {
   const [pinTitle, setPinTitle] = useState('');
   const [pinBody, setPinBody] = useState('');
   const [roomMinPlayers, setRoomMinPlayers] = useState('2');
+  const [bankerBidMinRm, setBankerBidMinRm] = useState('100');
   const [claimUrl, setClaimUrl] = useState('');
   const [packetUrlTouched, setPacketUrlTouched] = useState(false);
   const [packerAccount, setPackerAccount] = useState('');
@@ -452,24 +453,36 @@ export default function GameOperationsCenter({ admin }: { admin: Admin }) {
     setClaimDrafts((previous) => {
       const drafts = sameRound ? { ...previous } : {};
       const bankerBid = next.bids?.find((bid: Row) => bid.userId === next.bankerId);
+      const syncRow = (userId: string, claim: Row | undefined, fallbackName: string) => {
+        const existing = drafts[userId];
+        if (!claim) {
+          drafts[userId] = {
+            tngName: existing?.tngName ?? fallbackName,
+            amount: existing?.amount ?? '',
+          };
+          return;
+        }
+        const serverAmount = rm(claim.amountCents);
+        const serverName = claim.tngName ?? fallbackName;
+        // 正在改的草稿不要被轮询/WS 用服务端旧值盖掉，否则小数点填不进去
+        drafts[userId] = {
+          tngName: existing && existing.tngName !== serverName ? existing.tngName : serverName,
+          amount: existing && existing.amount !== serverAmount ? existing.amount : serverAmount,
+        };
+      };
       if (next.bankerId) {
-        const claim = next.claims?.find((entry: Row) => entry.userId === next.bankerId);
-        // 服务端已有认额时强制同步，避免空草稿挡住复核金额。
-        drafts[next.bankerId] = claim
-          ? { tngName: claim.tngName ?? bankerBid?.user?.nickname ?? '', amount: rm(claim.amountCents) }
-          : {
-              tngName: drafts[next.bankerId]?.tngName ?? bankerBid?.user?.nickname ?? '',
-              amount: drafts[next.bankerId]?.amount ?? '',
-            };
+        syncRow(
+          next.bankerId,
+          next.claims?.find((entry: Row) => entry.userId === next.bankerId),
+          bankerBid?.user?.nickname ?? '',
+        );
       }
       for (const bet of (next.bets ?? []).filter((entry: Row) => entry.status === 'FROZEN')) {
-        const claim = next.claims?.find((entry: Row) => entry.userId === bet.userId);
-        drafts[bet.userId] = claim
-          ? { tngName: claim.tngName ?? bet.user?.nickname ?? '', amount: rm(claim.amountCents) }
-          : {
-              tngName: drafts[bet.userId]?.tngName ?? bet.user?.nickname ?? '',
-              amount: drafts[bet.userId]?.amount ?? '',
-            };
+        syncRow(
+          bet.userId,
+          next.claims?.find((entry: Row) => entry.userId === bet.userId),
+          bet.user?.nickname ?? '',
+        );
       }
       return drafts;
     });
@@ -510,6 +523,8 @@ export default function GameOperationsCenter({ admin }: { admin: Admin }) {
         minPlayers: game.room.minPlayers as number,
         botService: game.botService,
         packetChannel: (game.packetChannel as string) === 'INTERNAL' ? 'INTERNAL' : 'TNG',
+        bankerBidMinCents: Number(game.bankerBidMinCents ?? 10_000),
+        bankerBidMaxCents: Number(game.bankerBidMaxCents ?? 100_000_000),
         game: {
           code: game.code,
           title: game.title,
@@ -640,6 +655,8 @@ export default function GameOperationsCenter({ admin }: { admin: Admin }) {
   useEffect(() => {
     if (!selectedRoom) return;
     setRoomMinPlayers(String(selectedRoom.minPlayers));
+    const minCents = Number(selectedRoom.bankerBidMinCents ?? 10_000);
+    setBankerBidMinRm(Number.isFinite(minCents) ? (minCents / 100).toFixed(2).replace(/\.00$/, '') : '100');
     if (typeof selectedRoom.botService?.assistantEnabled === 'boolean') {
       setAssistantEnabled(selectedRoom.botService.assistantEnabled);
     }
@@ -649,6 +666,7 @@ export default function GameOperationsCenter({ admin }: { admin: Admin }) {
   }, [
     selectedRoom?.id,
     selectedRoom?.minPlayers,
+    selectedRoom?.bankerBidMinCents,
     selectedRoom?.botService?.assistantEnabled,
     selectedRoom?.botService?.autoStart,
   ]);
@@ -1313,6 +1331,15 @@ export default function GameOperationsCenter({ admin }: { admin: Admin }) {
               <details className="ops-room-editor">
                 <summary>运行设置</summary>
                 <label>最低开局人数<input type="number" min="2" max="100" value={roomMinPlayers} onChange={(event) => setRoomMinPlayers(event.target.value)} /></label>
+                <label>
+                  上庄起拍价（RM）
+                  <input
+                    inputMode="decimal"
+                    value={bankerBidMinRm}
+                    onChange={(event) => setBankerBidMinRm(event.target.value)}
+                    placeholder="例如 100"
+                  />
+                </label>
                 <button
                   type="button"
                   disabled={!!busy}
@@ -1321,8 +1348,19 @@ export default function GameOperationsCenter({ admin }: { admin: Admin }) {
                     if (!Number.isInteger(minPlayers) || minPlayers < 2 || minPlayers > 100) {
                       throw new Error('最低开局人数必须为 2–100 的整数');
                     }
+                    const cleaned = bankerBidMinRm.trim().replace(/,/g, '');
+                    if (!/^\d+(\.\d{1,2})?$/.test(cleaned) || Number(cleaned) <= 0) {
+                      throw new Error('上庄起拍价必须是大于 0 的金额，最多两位小数');
+                    }
+                    const [integer, decimal = ''] = cleaned.split('.');
+                    const bankerBidMinCents = Number(
+                      BigInt(integer || '0') * 100n + BigInt((decimal + '00').slice(0, 2)),
+                    );
                     await patch(`/api/admin/rooms/${selectedRoom.id}`, {
                       minPlayers,
+                    });
+                    await post(`/api/admin/rooms/${selectedRoom.id}/banker-bid-min`, {
+                      bankerBidMinCents,
                     });
                   })}
                 >
@@ -1819,13 +1857,14 @@ function ClaimRow({
         <div className="ops-claim-inputs">
           <input
             aria-label={`${name} TNG 姓名`}
-            value={draft?.tngName?.trim() ? draft.tngName : (claim.tngName ?? '')}
+            value={draft?.tngName ?? claim.tngName ?? ''}
             onChange={(event) => onDraft(userId, { tngName: event.target.value })}
             placeholder="TNG 姓名"
           />
           <input
             aria-label={`${name} 领取金额`}
-            value={draft?.amount?.trim() ? draft.amount : rm(claim.amountCents)}
+            inputMode="decimal"
+            value={draft?.amount ?? rm(claim.amountCents)}
             onChange={(event) => onDraft(userId, { amount: event.target.value })}
             placeholder="RM"
           />

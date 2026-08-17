@@ -242,7 +242,12 @@ export default function GameDetail({ kycStatus }: { kycStatus: string }) {
             <p>闲家赢：庄家从庄池支付倍数 × 下注，平台抽取闲赢抽水（默认 3%）。</p>
             <p>闲家输：按庄家牌型倍数从最大赔付预留金扣除，剩余预留金自动退回。</p>
             <p>牌型 / 点数相同：庄赢闲输。</p>
-            <p>庄池不足赔付：以庄池余额为上限，不足部分免赔。</p>
+          </li>
+          <li>
+            <strong>庄钱不足时的赔付顺序</strong>
+            <p>庄钱是庄家本局可赔付的最高金额，赔完即止。不够赔全部赢家时按顺序赔付：</p>
+            <p>① 倍数高的先赔 → ② 同倍数点数大的先赔 → ③ 同倍数同点数红包金额大的先赔 → ④ 全同则下注时间早的先赔。</p>
+            <p>轮到某位赢家时庄钱不够全额，剩余庄钱全部赔给他；庄钱归零后，后面的赢家「喝水」，不获赔付，但下注冻结金额全额退回、不会倒扣。</p>
           </li>
         </ol>
       </RuleBlock>
@@ -250,26 +255,27 @@ export default function GameDetail({ kycStatus }: { kycStatus: string }) {
       <RuleBlock title="点数计算">
         <p>将红包金额（含小数点后两位）的所有数字相加，取个位数即为「点数」。</p>
         <p>例：3.42　3+4+2=9　9 点</p>
-        <p>总和为 0 或末位为 0 时显示为 10 点（即「牛牛」最大点数）。</p>
+        <p>三位数字相加刚好等于 10 时不按点数计算，直接判为「牛牛」牌型。</p>
+        <p>相加超过 10 取个位；个位为 0（如相加为 20）显示为 10 点，是最大点数。</p>
       </RuleBlock>
 
       <RuleBlock title="牌型与倍数（由高到低）">
         <ul className="rules-list">
           <li>
             <b>豹子（17 倍）</b>
-            <span>三位非零相同数字，如 1.11 / 7.77 / 9.99</span>
+            <span>三位数字全部相同，如 1.11 / 7.77 / 9.99</span>
           </li>
           <li>
             <b>满牛（15 倍）</b>
-            <span>整数金额，如 1.00 / 5.00 / 88.00</span>
+            <span>后两位为 00，如 1.00 / 5.00 / 88.00</span>
           </li>
           <li>
             <b>反顺（14 倍）</b>
-            <span>三位数字严格递减，如 9.87 / 3.21 / 2.10</span>
+            <span>三位数字连续递减，如 9.87 / 3.21 / 2.10；0.98 固定判反顺</span>
           </li>
           <li>
             <b>顺子（13 倍）</b>
-            <span>三位数字严格递增，如 0.12 / 1.23 / 7.89</span>
+            <span>三位数字连续递增，如 0.12 / 1.23 / 7.89（0 可作起点）</span>
           </li>
           <li>
             <b>对子（12 倍）</b>
@@ -277,21 +283,26 @@ export default function GameDetail({ kycStatus }: { kycStatus: string }) {
           </li>
           <li>
             <b>金牛（11 倍）</b>
-            <span>仅一位非零数字，如 0.10 / 0.50</span>
+            <span>0.X0 形式（X = 1–9），如 0.10 / 0.50 / 0.90</span>
+          </li>
+          <li>
+            <b>牛牛（10 倍）</b>
+            <span>三位数字相加刚好等于 10，如 2.35 / 1.36 / 5.50</span>
           </li>
           <li>
             <b>普通</b>
             <span>按 1–10 点数倍数结算</span>
           </li>
         </ul>
+        <p>同时符合多个牌型时取上表更高的牌型。</p>
         <p>实际倍数以游戏内显示为准（与后台配置实时同步）。</p>
       </RuleBlock>
 
       <RuleBlock title="牌型比较规则">
-        <p>先比牌型等级：豹子 ＞ 满牛 ＞ 反顺 ＞ 顺子 ＞ 对子 ＞ 金牛 ＞ 普通。</p>
+        <p>先比牌型等级：豹子 ＞ 满牛 ＞ 反顺 ＞ 顺子 ＞ 对子 ＞ 金牛 ＞ 牛牛 ＞ 普通。</p>
         <p>等级不同：高等级胜。</p>
         <p>等级相同 / 点数相同：比红包金额，金额大者胜。</p>
-        <p>例：2.80（10 点）赢 1.09（10 点）</p>
+        <p>例：2.80 赢 1.09（同为牛牛，金额大者胜）</p>
         <p>等级相同且金额完全相同：视为平局，本对不结算（双方下注金额原路返回）。</p>
         <p>例：2.80 平 2.80</p>
       </RuleBlock>
@@ -371,7 +382,10 @@ export default function GameDetail({ kycStatus }: { kycStatus: string }) {
           className="primary-action"
           type="button"
           onClick={enterGame}
-          disabled={kycStatus === 'PENDING' || (!room?.id && kycStatus === 'APPROVED')}
+          disabled={
+            kycStatus === 'PENDING'
+            || (kycStatus === 'APPROVED' && (!roomId || roomMissing))
+          }
         >
           {kycStatus === 'APPROVED'
             ? `进入${room?.interactionGroupTitle ?? '游戏互动群'}`

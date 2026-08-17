@@ -32,6 +32,7 @@ import { finalizeInternalRound } from '../services/internalPacket.js';
 import {
   getGameSettings,
   setAssistantService,
+  setBankerBidMin,
   setPacketChannel,
 } from '../services/gameSettings.js';
 import { processRoundRewards } from '../services/rewards.js';
@@ -1035,6 +1036,8 @@ export async function adminGameRoutes(app: FastifyInstance) {
             autoStart: Boolean(settings.round.autoStart),
           },
           packetChannel: settings.round.packetChannel === 'INTERNAL' ? 'INTERNAL' : 'TNG',
+          bankerBidMinCents: settings.round.bankerBidMinCents,
+          bankerBidMaxCents: settings.round.bankerBidMaxCents,
         };
       }),
       botService: {
@@ -1591,6 +1594,43 @@ export async function adminGameRoutes(app: FastifyInstance) {
         },
       });
       return { ok: true, packetChannel: next.packetChannel };
+    },
+  );
+
+  /** 设定上庄起拍价；进行中的牌局沿用原快照，下一局生效 */
+  app.post(
+    '/api/admin/rooms/:id/banker-bid-min',
+    { preHandler: operations },
+    async (req, reply) => {
+      const { id } = req.params as { id: string };
+      const adminId = (req.user as { sub: string }).sub;
+      const { bankerBidMinCents } = z
+        .object({
+          bankerBidMinCents: z.number().int().min(1).max(1_000_000_000),
+        })
+        .parse(req.body ?? {});
+      const room = await requireSupportedRoom(id);
+      try {
+        const next = await setBankerBidMin(room.gameCode, bankerBidMinCents, adminId);
+        await prisma.auditLog.create({
+          data: {
+            adminId,
+            action: 'banker_bid_min_update',
+            target: id,
+            after: { gameCode: room.gameCode, bankerBidMinCents: next.bankerBidMinCents },
+            ip: req.ip,
+          },
+        });
+        return { ok: true, bankerBidMinCents: next.bankerBidMinCents };
+      } catch (error) {
+        if (error instanceof Error && error.message === 'BANKER_BID_MIN_ABOVE_MAX') {
+          return reply.code(400).send({
+            error: 'BANKER_BID_MIN_ABOVE_MAX',
+            message: '起拍价不能高于最高出价，请先在规则与配置里调高上限',
+          });
+        }
+        throw error;
+      }
     },
   );
 

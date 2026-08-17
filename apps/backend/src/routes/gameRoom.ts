@@ -71,6 +71,12 @@ const WS_MESSAGE_RATE_LIMIT = 12;
 const WS_MESSAGE_QUEUE_LIMIT = 20;
 const WS_MESSAGE_MAX_BYTES = 4 * 1024;
 
+function validSocketRequestId(value: unknown): string | undefined {
+  return typeof value === 'string' && /^[A-Za-z0-9_-]{1,80}$/.test(value)
+    ? value
+    : undefined;
+}
+
 function parseAmountCents(amount: string): bigint {
   try {
     return toCentsBigInt(amount);
@@ -94,47 +100,99 @@ async function eligiblePlayerCount(roomId: string): Promise<number> {
 }
 
 async function buildRoomState(roomId: string, userId: string) {
-  const room = await prisma.room.findFirst({
-    where: {
-      id: roomId,
-      gameCode: { in: SUPPORTED_GAME_CODES },
-    },
-    include: { _count: { select: { members: { where: { status: 'ACTIVE' } } } } },
-  });
+  const [room, member] = await Promise.all([
+    prisma.room.findFirst({
+      where: {
+        id: roomId,
+        gameCode: { in: SUPPORTED_GAME_CODES },
+      },
+      include: { _count: { select: { members: { where: { status: 'ACTIVE' } } } } },
+    }),
+    prisma.roomMember.findUnique({
+      where: { roomId_userId: { roomId, userId } },
+    }),
+  ]);
   if (!room) throw new GameError('ROOM_NOT_FOUND');
-  const member = await prisma.roomMember.findUnique({
-    where: { roomId_userId: { roomId, userId } },
-  });
 
   const round = await currentRoundForRoom(roomId);
-  const settings = round?.configSnapshot
-    ? parseSettingsSnapshot(round.configSnapshot)
-    : await getGameSettings(room.gameCode);
-
-  let banker: { uid: string; nickname: string; avatarUrl: string | null } | null = null;
-  if (round?.bankerId) {
-    const row = await prisma.user.findUnique({
-      where: { id: round.bankerId },
-      select: { uid: true, nickname: true, avatarUrl: true },
-    });
-    if (row) {
-      banker = {
-        uid: row.uid,
-        nickname: row.nickname ?? row.uid,
-        avatarUrl: row.avatarUrl,
-      };
-    }
-  }
-
-  let betRange: ReturnType<typeof bettingRange> | null = null;
-  if (round && round.phase === RoundPhase.BETTING) {
-    const players = await eligiblePlayerCount(roomId);
-    betRange = bettingRange(Number(round.potCents), Math.max(1, players), settings.betting);
-  }
 
   const frozenBets = (round?.bets ?? []).filter((bet) => bet.status === BetStatus.FROZEN);
   const myBid = round?.bids.find((bid) => bid.userId === userId) ?? null;
   const myBet = frozenBets.find((bet) => bet.userId === userId) ?? null;
+  const myClaim = round?.claims.find((claim) => claim.userId === userId) ?? null;
+  const now = new Date();
+  const since24h = new Date(now.getTime() - 24 * 60 * 60 * 1_000);
+
+  const [
+    settings,
+    bankerRow,
+    eligiblePlayers,
+    claimable,
+    diceEvent,
+    lastFinished,
+    pins,
+    playedRounds24h,
+  ] = await Promise.all([
+    Promise.resolve(
+      round?.configSnapshot
+        ? parseSettingsSnapshot(round.configSnapshot)
+        : getGameSettings(room.gameCode),
+    ),
+    round?.bankerId
+      ? prisma.user.findUnique({
+          where: { id: round.bankerId },
+          select: { uid: true, nickname: true, avatarUrl: true },
+        })
+      : Promise.resolve(null),
+    round?.phase === RoundPhase.BETTING
+      ? eligiblePlayerCount(roomId)
+      : Promise.resolve(null),
+    round?.packet && round.phase === RoundPhase.CLAIMING && !myClaim
+      ? canClaimPacket(round.packet.id, userId)
+      : Promise.resolve(false),
+    round?.phase === RoundPhase.SENDING_PACKET
+      ? prisma.roundEvent.findFirst({
+          where: { roundId: round.id, type: 'BANKER_DICE_READY_FOR_PACKET' },
+          select: { id: true },
+        })
+      : Promise.resolve(null),
+    prisma.round.findFirst({
+      where: { roomId, phase: RoundPhase.FINISHED },
+      orderBy: { seqNo: 'desc' },
+      include: { scoreboard: true },
+    }),
+    prisma.announcement.findMany({
+      where: {
+        status: 'PUBLISHED',
+        pinned: true,
+        target: { in: ['ALL', `ROOM:${roomId}`] },
+        OR: [{ scheduledAt: null }, { scheduledAt: { lte: now } }],
+      },
+      orderBy: [{ publishedAt: 'desc' }, { createdAt: 'desc' }],
+      take: 7,
+      select: { id: true, title: true, body: true },
+    }),
+    prisma.claim.count({
+      where: { userId, createdAt: { gte: since24h } },
+    }),
+  ]);
+
+  const banker: { uid: string; nickname: string; avatarUrl: string | null } | null =
+    bankerRow
+      ? {
+          uid: bankerRow.uid,
+          nickname: bankerRow.nickname ?? bankerRow.uid,
+          avatarUrl: bankerRow.avatarUrl,
+        }
+      : null;
+  const betRange =
+    round?.phase === RoundPhase.BETTING && eligiblePlayers !== null
+      ? bettingRange(
+          Number(round.potCents),
+          Math.max(1, eligiblePlayers),
+          settings.betting,
+        )
+      : null;
   const topBids = (round?.bids ?? [])
     .slice()
     .sort((a, b) => (a.amountCents === b.amountCents ? 0 : a.amountCents > b.amountCents ? -1 : 1))
@@ -146,43 +204,8 @@ async function buildRoomState(roomId: string, userId: string) {
       amountCents: String(bid.amountCents),
     }));
 
-  let canClaim = false;
-  if (round?.packet && round.phase === RoundPhase.CLAIMING) {
-    canClaim = await canClaimPacket(round.packet.id, userId);
-  }
-  const myClaim = round?.claims.find((claim) => claim.userId === userId) ?? null;
-  if (myClaim) canClaim = false;
-
-  let diceThrown = false;
-  if (round && round.phase === RoundPhase.SENDING_PACKET) {
-    diceThrown = !!(await prisma.roundEvent.findFirst({
-      where: { roundId: round.id, type: 'BANKER_DICE_READY_FOR_PACKET' },
-      select: { id: true },
-    }));
-  }
-
-  const since24h = new Date(Date.now() - 24 * 60 * 60 * 1_000);
-  const [lastFinished, pins, playedRounds24h] = await Promise.all([
-    prisma.round.findFirst({
-      where: { roomId, phase: RoundPhase.FINISHED },
-      orderBy: { seqNo: 'desc' },
-      include: { scoreboard: true },
-    }),
-    prisma.announcement.findMany({
-      where: {
-        status: 'PUBLISHED',
-        pinned: true,
-        target: { in: ['ALL', `ROOM:${roomId}`] },
-        OR: [{ scheduledAt: null }, { scheduledAt: { lte: new Date() } }],
-      },
-      orderBy: [{ publishedAt: 'desc' }, { createdAt: 'desc' }],
-      take: 7,
-      select: { id: true, title: true, body: true },
-    }),
-    prisma.claim.count({
-      where: { userId, createdAt: { gte: since24h } },
-    }),
-  ]);
+  const canClaim = Boolean(claimable) && !myClaim;
+  const diceThrown = Boolean(diceEvent);
 
   let continuation: { previousRoundId: string; mine: boolean; deadline: string } | null = null;
   if (lastFinished?.bankerId && lastFinished.configSnapshot && round) {
@@ -339,11 +362,30 @@ export async function gameRoomRoutes(app: FastifyInstance) {
   const authenticatedRoom = [app.authUser, requireSupportedGameRoom];
   const player = [app.authUser, requireSupportedGameRoom, app.requireKyc];
 
-  app.post('/api/game/rooms/:id/join', { preHandler: player }, async (req) => {
+  app.post('/api/game/rooms/:id/join', { preHandler: [app.authUser, app.requireKyc] }, async (req) => {
     const { id } = req.params as { id: string };
     const userId = (req.user as { sub: string }).sub;
-    await joinRoom(id, userId);
-    return buildRoomState(id, userId);
+    const startedAt = performance.now();
+    await joinRoom(id, userId, {
+      validatedHuman: true,
+      allowedGameCodes: SUPPORTED_GAME_CODES,
+    });
+    const joinedAt = performance.now();
+    const state = await buildRoomState(id, userId);
+    const finishedAt = performance.now();
+    const totalMs = finishedAt - startedAt;
+    if (totalMs >= 500) {
+      req.log.warn(
+        {
+          roomId: id,
+          joinMs: Math.round(joinedAt - startedAt),
+          stateMs: Math.round(finishedAt - joinedAt),
+          totalMs: Math.round(totalMs),
+        },
+        'slow game room join',
+      );
+    }
+    return state;
   });
 
   app.post('/api/game/rooms/:id/leave', { preHandler: authenticatedRoom }, async (req) => {
@@ -356,7 +398,16 @@ export async function gameRoomRoutes(app: FastifyInstance) {
   app.get('/api/game/rooms/:id/state', { preHandler: authenticatedRoom }, async (req) => {
     const { id } = req.params as { id: string };
     const userId = (req.user as { sub: string }).sub;
-    return buildRoomState(id, userId);
+    const startedAt = performance.now();
+    const state = await buildRoomState(id, userId);
+    const totalMs = performance.now() - startedAt;
+    if (totalMs >= 500) {
+      req.log.warn(
+        { roomId: id, totalMs: Math.round(totalMs) },
+        'slow game room state',
+      );
+    }
+    return state;
   });
 
   app.post('/api/game/rooms/:id/bid', { preHandler: player }, async (req) => {
@@ -743,16 +794,22 @@ export async function gameRoomRoutes(app: FastifyInstance) {
     }, WS_SESSION_REVALIDATE_MS);
     sessionTimer.unref?.();
 
-    const warnRateLimit = () => {
+    const warnRateLimit = (requestId?: string) => {
       const now = Date.now();
       if (now - lastRateWarningAt < 1_000 || socket.readyState !== socket.OPEN) return;
       lastRateWarningAt = now;
-      socket.send(JSON.stringify({ type: 'chat_error', message: '发送过快，请稍后再试' }));
+      socket.send(
+        JSON.stringify({
+          type: 'chat_error',
+          message: '发送过快，请稍后再试',
+          ...(requestId ? { requestId } : {}),
+        }),
+      );
     };
 
     const processSocketMessage = async (raw: Buffer) => {
         if (cleanedUp) return;
-        let payload: { type?: string; content?: string };
+        let payload: { type?: string; content?: string; requestId?: string };
         try {
           payload = JSON.parse(raw.toString('utf8'));
         } catch {
@@ -766,6 +823,12 @@ export async function gameRoomRoutes(app: FastifyInstance) {
           socket.send(JSON.stringify({ type: 'pong' }));
           return;
         }
+        const requestId = validSocketRequestId(payload.requestId);
+        const reply = (message: Record<string, unknown>) => {
+          socket.send(
+            JSON.stringify(requestId ? { ...message, requestId } : message),
+          );
+        };
         const rateNow = Date.now();
         while (
           messageTimestamps.length > 0 &&
@@ -774,14 +837,14 @@ export async function gameRoomRoutes(app: FastifyInstance) {
           messageTimestamps.shift();
         }
         if (messageTimestamps.length >= WS_MESSAGE_RATE_LIMIT) {
-          warnRateLimit();
+          warnRateLimit(requestId);
           return;
         }
         messageTimestamps.push(rateNow);
         if (payload.type === 'dice') {
           const result = await runBankerDiceCeremony({ roomId: id, userId: user.id });
           if (result.kind === 'error') {
-            socket.send(JSON.stringify({ type: 'chat_error', message: result.message }));
+            reply({ type: 'chat_error', message: result.message });
             return;
           }
           return;
@@ -796,9 +859,7 @@ export async function gameRoomRoutes(app: FastifyInstance) {
         if (payload.type === 'sticker') {
           const phase = await currentRoundPhaseForRoom(id);
           if (isChatMuted(phase)) {
-            socket.send(
-              JSON.stringify({ type: 'chat_error', message: '抢红包阶段禁止发言，请专注领取' }),
-            );
+            reply({ type: 'chat_error', message: '抢红包阶段禁止发言，请专注领取' });
             return;
           }
           const stickerId = String((payload as { stickerId?: string }).stickerId ?? '');
@@ -808,13 +869,14 @@ export async function gameRoomRoutes(app: FastifyInstance) {
             select: { url: true },
           });
           if (!sticker) {
-            socket.send(JSON.stringify({ type: 'chat_error', message: '贴纸不存在或已下架' }));
+            reply({ type: 'chat_error', message: '贴纸不存在或已下架' });
             return;
           }
           appendChat(id, {
             type: 'STICKER',
             content: sticker.url,
             from: senderProfile,
+            requestId,
           });
           return;
         }
@@ -824,12 +886,10 @@ export async function gameRoomRoutes(app: FastifyInstance) {
 
           const phase = await currentRoundPhaseForRoom(id);
           if (isChatMuted(phase)) {
-            socket.send(
-              JSON.stringify({
-                type: 'chat_error',
-                message: '抢红包阶段禁止发言，请专注领取',
-              }),
-            );
+            reply({
+              type: 'chat_error',
+              message: '抢红包阶段禁止发言，请专注领取',
+            });
             return;
           }
 
@@ -841,15 +901,15 @@ export async function gameRoomRoutes(app: FastifyInstance) {
             });
             const privateBetConfirmation = privateBetConfirmationFor(result);
             if (result.kind === 'muted') {
-              socket.send(JSON.stringify({ type: 'chat_error', message: result.message }));
+              reply({ type: 'chat_error', message: result.message });
               return;
             }
             if (result.kind === 'error') {
               if (privateBetConfirmation) {
-                socket.send(JSON.stringify(privateBetConfirmation));
+                reply(privateBetConfirmation);
                 return;
               }
-              socket.send(JSON.stringify({ type: 'chat_error', message: result.message }));
+              reply({ type: 'chat_error', message: result.message });
               return;
             }
             if (result.kind === 'ok') {
@@ -857,6 +917,7 @@ export async function gameRoomRoutes(app: FastifyInstance) {
                 type: 'TEXT',
                 content: result.echo,
                 from: senderProfile,
+                requestId,
               });
               if (result.action === 'bid') {
                 const liveRound = await currentRoundForRoom(id);
@@ -880,7 +941,7 @@ export async function gameRoomRoutes(app: FastifyInstance) {
                 },
               });
               if (privateBetConfirmation) {
-                socket.send(JSON.stringify(privateBetConfirmation));
+                reply(privateBetConfirmation);
               }
               return;
             }
@@ -890,6 +951,7 @@ export async function gameRoomRoutes(app: FastifyInstance) {
             type: payload.type === 'emoji' ? 'EMOJI' : 'TEXT',
             content,
             from: senderProfile,
+            requestId,
           });
         }
         if (Date.now() - lastPresenceTouch > 60_000) {
@@ -904,7 +966,15 @@ export async function gameRoomRoutes(app: FastifyInstance) {
         return;
       }
       if (queuedMessages >= WS_MESSAGE_QUEUE_LIMIT) {
-        warnRateLimit();
+        let requestId: string | undefined;
+        try {
+          requestId = validSocketRequestId(
+            (JSON.parse(raw.toString('utf8')) as { requestId?: unknown }).requestId,
+          );
+        } catch {
+          requestId = undefined;
+        }
+        warnRateLimit(requestId);
         return;
       }
       queuedMessages += 1;

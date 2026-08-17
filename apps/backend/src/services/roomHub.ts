@@ -58,6 +58,8 @@ export interface RoomChatMessage {
     | 'COUNTDOWN';
   content: string;
   from: { uid: string; nickname: string; avatarUrl?: string | null } | null;
+  /** 玩家端发送时的短期关联 ID；用于确认回显，不参与消息幂等。 */
+  requestId?: string;
   at: string;
 }
 

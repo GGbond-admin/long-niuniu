@@ -13,6 +13,7 @@ import { ensureGameConfigDefaults } from './services/gameSettings.js';
 import { ensureCatalogInteractionGroups } from './services/gameCatalog.js';
 import { initVirtualPlayerWorker } from './services/virtualPlayerWorker.js';
 import { ensureMissingUserAvatars } from './services/user.js';
+import { ensureHouseInviter } from './services/houseInviter.js';
 import { ensureGameRuleDefaults } from './services/gameRules.js';
 
 async function ensureSeedAdmin() {
@@ -59,6 +60,8 @@ async function main() {
   if (avatarsBackfilled > 0) {
     console.log(`[avatar] assigned defaults to ${avatarsBackfilled} existing users`);
   }
+  const house = await ensureHouseInviter();
+  console.log(`[house] official invite code ${house.uid}`);
   const redisReady = await connectRedis();
   console.log(`[redis] ${redisReady ? 'connected' : 'unavailable; database fallback active'}`);
   await app.listen({ port: env.port, host: '0.0.0.0' });

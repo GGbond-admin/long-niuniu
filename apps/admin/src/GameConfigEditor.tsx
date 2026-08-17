@@ -21,6 +21,7 @@ const HAND_TYPES: Array<{ key: string; label: string }> = [
   { key: 'SHUNZI', label: '顺子' },
   { key: 'DUIZI', label: '对子' },
   { key: 'JINNIU', label: '金牛' },
+  { key: 'NIUNIU', label: '牛牛（三位相加=10）' },
   { key: 'NORMAL', label: '普通（占位，实际用下方点数倍数）' },
 ];
 
@@ -163,11 +164,11 @@ function HandForm({
           </Field>
         ))}
       </Section>
-      <Section title="普通牌型点数倍数（1–10 点，10=牛牛）">
+      <Section title="普通牌型点数倍数（1–10 点；相加=10 已归入「牛牛」牌型，此处 10 点仅指相加=20 等情形）">
         {NORMAL_POINTS.map((point) => (
           <Field
             key={point}
-            label={point === 10 ? '牛牛（10点）' : `${point} 点`}
+            label={point === 10 ? '10 点（最大点数）' : `${point} 点`}
             hint="倍"
           >
             <input
@@ -239,7 +240,8 @@ function BettingForm({
       <Section title="下注金额下限">
         <Field label="普通下注最低" hint="RM">
           <input
-            value={centsToRm(value.betMinCents)}
+            inputMode="decimal"
+            value={value.betMinCents ?? ''}
             onChange={(event) =>
               onChange({ ...value, betMinCents: event.target.value })
             }
@@ -247,7 +249,8 @@ function BettingForm({
         </Field>
         <Field label="梭哈最低" hint="RM">
           <input
-            value={centsToRm(value.shMinCents)}
+            inputMode="decimal"
+            value={value.shMinCents ?? ''}
             onChange={(event) =>
               onChange({ ...value, shMinCents: event.target.value })
             }
@@ -257,7 +260,7 @@ function BettingForm({
       <Section title="上限比例（相对庄钱）">
         <Field label="普通下注比例" hint="% ，例如 0.5 表示庄钱的 0.5%">
           <input
-            value={ratioToPercent(value.betRatio)}
+            value={value.betRatio ?? ''}
             onChange={(event) =>
               onChange({ ...value, betRatio: event.target.value })
             }
@@ -265,7 +268,7 @@ function BettingForm({
         </Field>
         <Field label="梭哈比例" hint="% ，例如 5 表示庄钱的 5%">
           <input
-            value={ratioToPercent(value.shRatio)}
+            value={value.shRatio ?? ''}
             onChange={(event) =>
               onChange({ ...value, shRatio: event.target.value })
             }
@@ -280,13 +283,12 @@ function BettingForm({
           <div className="cfg-tier-row" key={index}>
             <Field label="人数上限">
               <input
-                type="number"
-                min={1}
-                value={tier.maxPlayers}
+                inputMode="numeric"
+                value={tier.maxPlayers ?? ''}
                 onChange={(event) => {
                   const next = tiers.map((item, i) =>
                     i === index
-                      ? { ...item, maxPlayers: Number(event.target.value) }
+                      ? { ...item, maxPlayers: event.target.value }
                       : item,
                   );
                   onChange({ ...value, playerCoefTiers: next });
@@ -295,14 +297,12 @@ function BettingForm({
             </Field>
             <Field label="系数">
               <input
-                type="number"
-                min={0.01}
-                step={0.1}
-                value={tier.coef}
+                inputMode="decimal"
+                value={tier.coef ?? ''}
                 onChange={(event) => {
                   const next = tiers.map((item, i) =>
                     i === index
-                      ? { ...item, coef: Number(event.target.value) }
+                      ? { ...item, coef: event.target.value }
                       : item,
                   );
                   onChange({ ...value, playerCoefTiers: next });
@@ -352,7 +352,7 @@ function FeesForm({
     <Section title="费用与抽水">
       <Field label="上庄费比例" hint="% ，相对庄钱，例如 1 = 1%">
         <input
-          value={ratioToPercent(value.bankerSeatFeeRatio)}
+          value={value.bankerSeatFeeRatio ?? ''}
           onChange={(event) =>
             onChange({ ...value, bankerSeatFeeRatio: event.target.value })
           }
@@ -360,7 +360,8 @@ function FeesForm({
       </Field>
       <Field label="服务费（每场固定）" hint="RM">
         <input
-          value={centsToRm(value.serviceFeeCents)}
+          inputMode="decimal"
+          value={value.serviceFeeCents ?? ''}
           onChange={(event) =>
             onChange({ ...value, serviceFeeCents: event.target.value })
           }
@@ -368,7 +369,8 @@ function FeesForm({
       </Field>
       <Field label="红包人均单价" hint="RM / 人">
         <input
-          value={centsToRm(value.packetPerHeadCents)}
+          inputMode="decimal"
+          value={value.packetPerHeadCents ?? ''}
           onChange={(event) =>
             onChange({ ...value, packetPerHeadCents: event.target.value })
           }
@@ -376,7 +378,7 @@ function FeesForm({
       </Field>
       <Field label="玩家赢抽水比例" hint="% ，只抽闲家赢方盈利，例如 3 = 3%">
         <input
-          value={ratioToPercent(value.playerRakeRatio)}
+          value={value.playerRakeRatio ?? ''}
           onChange={(event) =>
             onChange({ ...value, playerRakeRatio: event.target.value })
           }
@@ -384,7 +386,7 @@ function FeesForm({
       </Field>
       <Field label="庄家赢抽水比例" hint="% ，只抽庄家赢方盈利，例如 5 = 5%">
         <input
-          value={ratioToPercent(value.bankerRakeRatio)}
+          value={value.bankerRakeRatio ?? ''}
           onChange={(event) =>
             onChange({ ...value, bankerRakeRatio: event.target.value })
           }
@@ -452,9 +454,13 @@ function RoundForm({
         </Field>
       </Section>
       <Section title="竞标金额范围">
-        <Field label="最低出价" hint="RM">
+        <Field
+          label="上庄起拍价"
+          hint="RM，玩家首次出价不得低于此金额；下一局生效"
+        >
           <input
-            value={centsToRm(value.bankerBidMinCents)}
+            inputMode="decimal"
+            value={value.bankerBidMinCents ?? ''}
             onChange={(event) =>
               onChange({ ...value, bankerBidMinCents: event.target.value })
             }
@@ -462,7 +468,8 @@ function RoundForm({
         </Field>
         <Field label="最高出价" hint="RM">
           <input
-            value={centsToRm(value.bankerBidMaxCents)}
+            inputMode="decimal"
+            value={value.bankerBidMaxCents ?? ''}
             onChange={(event) =>
               onChange({ ...value, bankerBidMaxCents: event.target.value })
             }
@@ -588,7 +595,7 @@ function RebateForm({
     <Section title="三级返水比例">
       <Field label="自身返水" hint="% ，例如 0.7">
         <input
-          value={ratioToPercent(value.selfRate)}
+          value={value.selfRate ?? ''}
           onChange={(event) =>
             onChange({ ...value, selfRate: event.target.value })
           }
@@ -596,7 +603,7 @@ function RebateForm({
       </Field>
       <Field label="一级（直属）返水" hint="%">
         <input
-          value={ratioToPercent(value.l1Rate)}
+          value={value.l1Rate ?? ''}
           onChange={(event) =>
             onChange({ ...value, l1Rate: event.target.value })
           }
@@ -604,7 +611,7 @@ function RebateForm({
       </Field>
       <Field label="二级返水" hint="%">
         <input
-          value={ratioToPercent(value.l2Rate)}
+          value={value.l2Rate ?? ''}
           onChange={(event) =>
             onChange({ ...value, l2Rate: event.target.value })
           }
@@ -636,7 +643,7 @@ function RewardsForm({
     <Section title="领取奖励的最低门槛">
       <Field label="普通下注最低" hint="RM">
         <input
-          value={centsToRm(value.minBetCents)}
+          value={value.minBetCents ?? ''}
           onChange={(event) =>
             onChange({ ...value, minBetCents: event.target.value })
           }
@@ -644,7 +651,7 @@ function RewardsForm({
       </Field>
       <Field label="梭哈最低" hint="RM">
         <input
-          value={centsToRm(value.minAllInCents)}
+          value={value.minAllInCents ?? ''}
           onChange={(event) =>
             onChange({ ...value, minAllInCents: event.target.value })
           }
@@ -652,7 +659,7 @@ function RewardsForm({
       </Field>
       <Field label="庄家即时奖励金额" hint="RM">
         <input
-          value={centsToRm(value.bankerInstantAmountCents)}
+          value={value.bankerInstantAmountCents ?? ''}
           onChange={(event) =>
             onChange({ ...value, bankerInstantAmountCents: event.target.value })
           }
@@ -891,7 +898,7 @@ function serializeConfig(key: string, draft: Row): Row {
       bankerBidMinCents:
         typeof draft.bankerBidMinCents === 'string'
           ? rmToCents(draft.bankerBidMinCents)
-          : intOrThrow(String(draft.bankerBidMinCents ?? ''), '最低出价'),
+          : intOrThrow(String(draft.bankerBidMinCents ?? ''), '上庄起拍价'),
       bankerBidMaxCents:
         typeof draft.bankerBidMaxCents === 'string'
           ? rmToCents(draft.bankerBidMaxCents)

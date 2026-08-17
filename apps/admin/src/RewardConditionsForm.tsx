@@ -22,6 +22,7 @@ const HAND_OPTIONS: Array<{ key: string; label: string }> = [
   { key: 'SHUNZI', label: '顺子' },
   { key: 'DUIZI', label: '对子' },
   { key: 'JINNIU', label: '金牛' },
+  { key: 'NIUNIU', label: '牛牛' },
 ];
 
 const HAND_LABEL: Record<string, string> = Object.fromEntries(

@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { prisma } from '../lib/prisma.js';
 import { blindIndex, encryptSecret, kycSearchHashes, normalizeIdentity } from '../lib/crypto.js';
 import { serializable } from '../lib/transaction.js';
+import { autoBindReferralPlayer } from '../services/profitPool.js';
 
 const bindInviterSchema = z.object({ inviterUid: z.string().regex(/^\d{6,20}$/) });
 // 上限与登录接口的 deviceId 校验保持一致（256），避免同一标识登录能过、绑定被拒
@@ -82,6 +83,12 @@ export async function onboardingRoutes(app: FastifyInstance) {
         where: { inviterId: userId, grandInviterId: null },
         data: { grandInviterId: inviter.id },
       });
+      // 称桶代理体系：沿邀请链向上找最近的启用代理，自动把新玩家归属其名下（失败不阻断注册）
+      try {
+        await autoBindReferralPlayer(tx, userId, inviter.id);
+      } catch (referralBindError) {
+        req.log?.warn?.({ err: referralBindError }, 'auto bind referral agent failed');
+      }
       return { inviter: { uid: inviter.uid, nickname: inviter.nickname }, alreadyBound: false as const };
     });
     if ('error' in result) {

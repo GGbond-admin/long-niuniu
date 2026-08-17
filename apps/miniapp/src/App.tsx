@@ -22,6 +22,9 @@ import KycForm from './pages/KycForm';
 import Tabs from './pages/Tabs';
 import Promotion from './pages/Promotion';
 import InviteFriends from './pages/InviteFriends';
+import AgentReport from './pages/AgentReport';
+import AgentPlayers from './pages/AgentPlayers';
+import AgentSubagents from './pages/AgentSubagents';
 import GameDetail from './pages/GameDetail';
 import GameRoom from './pages/GameRoom';
 import PacketDetail from './pages/PacketDetail';
@@ -316,8 +319,11 @@ export default function App() {
         <Route path="/kyc" element={<KycForm onDone={refresh} />} />
         <Route path="/promotion" element={<Promotion />} />
         <Route path="/invite" element={<InviteFriends />} />
+        <Route path="/agent/report" element={<AgentReport />} />
+        <Route path="/agent/players" element={<AgentPlayers />} />
+        <Route path="/agent/sharing" element={<AgentSubagents />} />
         <Route path="/game/:roomId" element={<GameDetail kycStatus={session.onboarding.kycStatus} />} />
-        <Route path="/game/:roomId/play" element={<GameRoom />} />
+        <Route path="/game/:roomId/play" element={<GameRoom session={session} />} />
         <Route path="/game/:roomId/packet" element={<PacketDetail />} />
         <Route
           path="/game/:roomId/send-packet"

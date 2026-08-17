@@ -1,16 +1,24 @@
 /**
- * 利润池与称桶分配 — 对应《利润池与称桶分配模式说明文档》/《07-利润池与称桶分配》
+ * 利润池与称桶分配 — 对应《07-利润池与称桶分配》与
+ * 《代理称桶制度与上下级分成机制说明文档》（2026-08-17 升级：代理树 + 占成差额制 + 两阶段结算）
  *
  * 链路：游戏抽水（玩家赢 3% / 庄家赢 5%，实收入账 PLATFORM_RAKE）
  *   → 当日毛利润 = 实收抽水合计
  *   → 公司支出 = 公司总流水 × 支出比例（默认 2.5%）
  *   → 净利润池 = 毛利润 − 支出 + 前日负结转
- *   → 代理所得 = 净池 × (代理流水 ÷ 公司总流水) × (占成点数 ÷ 称桶基准 130)
+ *   → 占成差额制分配：
+ *     自身利润 = 净池 × (直属玩家流水 ÷ 公司总流水) × (占成点数 ÷ 称桶基准 130)
+ *     差额利润 = Σ 净池 × (直属下级团队流水 ÷ 公司总流水) × ((自身占成 − 下级占成) ÷ 基准)
+ *   → 上级给下级设占成时必须至少预留 minReservePoints（默认 5）点差额。
+ *
+ * 结算流程（两阶段）：
+ *   1) 生成报表：后台任务自动（可关）或手动生成前一马来日 → ProfitPoolDaily(PENDING)
+ *   2) 确认发放：管理员核对后确认 → 状态 SETTLED，逐笔转账 + Bot 推送
  *
  * 口径说明（与推广返水一致）：
  * - 「流水」= 有效下注（闲家计自身注、庄家计对赌闲注，平局按返水配置剔除，虚拟玩家不计）；
- * - 「公司总流水」= 当日全体用户 TurnoverDaily.selfCents 合计，代理贡献比恒 ≤ 100%；
- * - 净池 ≤ 0 当日不分配，负额结转次日；余数（未分满部分）归公司留存。
+ * - 「自身流水」= 直属玩家流水 + 代理本人流水；「团队流水」= 自身流水 + 所有下级团队流水；
+ * - 净池 ≤ 0 当日不分配（NO_DISTRIBUTION），负额结转次日；余数与停用代理份额归公司留存。
  */
 import { AccountType, Prisma } from '@prisma/client';
 import { prisma } from '../lib/prisma.js';
@@ -25,7 +33,9 @@ export interface ProfitPoolConfig {
   expenseRatio: number;
   /** 称桶基准，默认 130；实得比例 = 占成点数 ÷ 基准 */
   bucketBase: number;
-  /** 是否随后台任务自动结算前一日 */
+  /** 上级给下级设占成时必须预留的最低点数差，默认 5 */
+  minReservePoints: number;
+  /** 是否随后台任务自动生成前一日报表（发放始终需后台确认） */
   autoSettle: boolean;
   /** 占成点数预设（后台快捷选择） */
   tierPresets: Array<{ label: string; points: number }>;
@@ -34,6 +44,7 @@ export interface ProfitPoolConfig {
 export const DEFAULT_PROFIT_POOL_CONFIG: ProfitPoolConfig = {
   expenseRatio: 0.025,
   bucketBase: 130,
+  minReservePoints: 5,
   autoSettle: true,
   tierPresets: [
     { label: '普通代理', points: 50 },
@@ -67,6 +78,13 @@ export async function setProfitPoolConfig(
   if (!Number.isInteger(next.bucketBase) || next.bucketBase < 1 || next.bucketBase > 10_000) {
     throw new ProfitPoolError('INVALID_BUCKET_BASE');
   }
+  if (
+    !Number.isInteger(next.minReservePoints) ||
+    next.minReservePoints < 0 ||
+    next.minReservePoints > next.bucketBase
+  ) {
+    throw new ProfitPoolError('INVALID_MIN_RESERVE');
+  }
   await setGameConfig(PLATFORM_CONFIG_SCOPE, 'profitPool', next, updatedBy);
   return next;
 }
@@ -94,7 +112,7 @@ export function previousDay(date: string): string {
   });
 }
 
-/** 称桶公式：净池 × (代理流水 ÷ 公司流水) × (点数 ÷ 基准)，分为单位向下取整 */
+/** 称桶公式：净池 × (流水 ÷ 公司流水) × (点数 ÷ 基准)，分为单位向下取整 */
 export function bucketShareCents(params: {
   netPoolCents: bigint;
   agentTurnoverCents: bigint;
@@ -119,6 +137,132 @@ export function bucketShareCents(params: {
   );
 }
 
+/** 差额明细：某个直属下级团队为上级贡献的占成差额利润 */
+export interface SubagentBreakdown {
+  agentId: string;
+  label: string;
+  uid: string;
+  sharePoints: number;
+  /** 上级占成 − 该下级占成（上级实得比例） */
+  diffPoints: number;
+  teamTurnoverCents: bigint;
+  amountCents: bigint;
+}
+
+export interface AgentShareInput {
+  agentId: string;
+  parentAgentId: string | null;
+  sharePoints: number;
+  status: string;
+  /** 自身流水 = 直属玩家 + 代理本人 */
+  selfTurnoverCents: bigint;
+  label?: string;
+  uid?: string;
+}
+
+export interface AgentShareResult {
+  teamTurnoverCents: bigint;
+  selfAmountCents: bigint;
+  overrideAmountCents: bigint;
+  amountCents: bigint;
+  breakdown: SubagentBreakdown[];
+}
+
+/**
+ * 占成差额制核心计算（纯函数，可单测）：
+ * - 团队流水自底向上聚合；
+ * - 每个 ACTIVE 代理：自身利润（直属玩家流水 × 自身占成）+ 差额利润（下级团队流水 × 占成差）；
+ * - DISABLED 代理不领取（份额归公司留存），但其团队流水照常向上聚合、上级照常按差额领取。
+ */
+export function computeAgentShares(params: {
+  netPoolCents: bigint;
+  companyTurnoverCents: bigint;
+  bucketBase: number;
+  agents: AgentShareInput[];
+}): Map<string, AgentShareResult> {
+  const { netPoolCents, companyTurnoverCents, bucketBase, agents } = params;
+  const byId = new Map(agents.map((agent) => [agent.agentId, agent]));
+  const children = new Map<string, AgentShareInput[]>();
+  for (const agent of agents) {
+    if (agent.parentAgentId && byId.has(agent.parentAgentId)) {
+      const list = children.get(agent.parentAgentId) ?? [];
+      list.push(agent);
+      children.set(agent.parentAgentId, list);
+    }
+  }
+
+  // 团队流水：后序遍历聚合（迭代实现 + 访问保护，防御脏数据成环）
+  const teamTurnover = new Map<string, bigint>();
+  const computeTeam = (agentId: string, visiting: Set<string>): bigint => {
+    const cached = teamTurnover.get(agentId);
+    if (cached !== undefined) return cached;
+    if (visiting.has(agentId)) return 0n;
+    visiting.add(agentId);
+    const agent = byId.get(agentId);
+    if (!agent) return 0n;
+    let total = agent.selfTurnoverCents;
+    for (const child of children.get(agentId) ?? []) {
+      total += computeTeam(child.agentId, visiting);
+    }
+    visiting.delete(agentId);
+    teamTurnover.set(agentId, total);
+    return total;
+  };
+  for (const agent of agents) computeTeam(agent.agentId, new Set());
+
+  const results = new Map<string, AgentShareResult>();
+  for (const agent of agents) {
+    const selfAmount =
+      agent.status === 'ACTIVE'
+        ? bucketShareCents({
+            netPoolCents,
+            agentTurnoverCents: agent.selfTurnoverCents,
+            companyTurnoverCents,
+            sharePoints: agent.sharePoints,
+            bucketBase,
+          })
+        : 0n;
+    const breakdown: SubagentBreakdown[] = [];
+    let overrideAmount = 0n;
+    if (agent.status === 'ACTIVE') {
+      for (const child of children.get(agent.agentId) ?? []) {
+        const diffPoints = agent.sharePoints - child.sharePoints;
+        const childTeam = teamTurnover.get(child.agentId) ?? 0n;
+        const amount =
+          diffPoints > 0
+            ? bucketShareCents({
+                netPoolCents,
+                agentTurnoverCents: childTeam,
+                companyTurnoverCents,
+                sharePoints: diffPoints,
+                bucketBase,
+              })
+            : 0n;
+        overrideAmount += amount;
+        breakdown.push({
+          agentId: child.agentId,
+          label: child.label ?? '',
+          uid: child.uid ?? '',
+          sharePoints: child.sharePoints,
+          diffPoints: Math.max(0, diffPoints),
+          teamTurnoverCents: childTeam,
+          amountCents: amount,
+        });
+      }
+    }
+    results.set(agent.agentId, {
+      teamTurnoverCents: teamTurnover.get(agent.agentId) ?? 0n,
+      selfAmountCents: selfAmount,
+      overrideAmountCents: overrideAmount,
+      amountCents: selfAmount + overrideAmount,
+      breakdown,
+    });
+  }
+  return results;
+}
+
+export type PoolStatus = 'ESTIMATED' | 'PENDING' | 'SETTLED' | 'NO_DISTRIBUTION';
+
 export interface AgentComputation {
   agentId: string;
   label: string;
@@ -127,15 +271,23 @@ export interface AgentComputation {
   uid: string;
   nickname: string | null;
   sharePoints: number;
+  parentAgentId: string | null;
   playerCount: number;
-  turnoverCents: bigint;
-  /** 贡献比（万分比整数，前端换算展示） */
+  /** 自身流水（直属玩家 + 本人） */
+  selfTurnoverCents: bigint;
+  /** 团队流水（自身 + 所有下级团队） */
+  teamTurnoverCents: bigint;
+  /** 团队流水贡献比（万分比整数，前端换算展示） */
   contributionBp: number;
+  selfAmountCents: bigint;
+  overrideAmountCents: bigint;
   amountCents: bigint;
+  breakdown: SubagentBreakdown[];
 }
 
 export interface PoolComputation {
   date: string;
+  status: PoolStatus;
   rakePlayerCents: bigint;
   rakeBankerCents: bigint;
   rakeTotalCents: bigint;
@@ -150,6 +302,7 @@ export interface PoolComputation {
   residualCents: bigint;
   carryOutCents: bigint;
   agents: AgentComputation[];
+  /** 数据是否已锁定（报表已生成，含待确认/已发放/不分配） */
   settled: boolean;
 }
 
@@ -159,10 +312,41 @@ export function expenseOf(turnoverCents: bigint, expenseRatio: number): bigint {
   return (turnoverCents * millionths + 500_000n) / 1_000_000n;
 }
 
+type StoredBreakdown = Array<{
+  agentId: string;
+  label: string;
+  uid: string;
+  sharePoints: number;
+  diffPoints: number;
+  teamTurnoverCents: string;
+  amountCents: string;
+}>;
+
+function serializeBreakdown(breakdown: SubagentBreakdown[]): StoredBreakdown {
+  return breakdown.map((row) => ({
+    ...row,
+    teamTurnoverCents: String(row.teamTurnoverCents),
+    amountCents: String(row.amountCents),
+  }));
+}
+
+function deserializeBreakdown(value: unknown): SubagentBreakdown[] {
+  if (!Array.isArray(value)) return [];
+  return (value as StoredBreakdown).map((row) => ({
+    agentId: row.agentId,
+    label: row.label,
+    uid: row.uid,
+    sharePoints: row.sharePoints,
+    diffPoints: row.diffPoints,
+    teamTurnoverCents: BigInt(row.teamTurnoverCents ?? 0),
+    amountCents: BigInt(row.amountCents ?? 0),
+  }));
+}
+
 /**
  * 计算某日利润池全貌（不落库）。
- * 已结算日：直接回放 ProfitPoolDaily + 分配明细，保证展示与账一致；
- * 未结算日（含当天）：按当前配置实时估算。
+ * 已生成日（PENDING/SETTLED/NO_DISTRIBUTION）：回放 ProfitPoolDaily + 分配明细，保证展示与账一致；
+ * 未生成日（含当天）：按当前配置与代理树实时估算。
  */
 export async function computeProfitPool(date: string): Promise<PoolComputation> {
   const existing = await prisma.profitPoolDaily.findUnique({
@@ -181,8 +365,10 @@ export async function computeProfitPool(date: string): Promise<PoolComputation> 
     },
   });
   if (existing) {
+    const status = (existing.status as PoolStatus) ?? 'SETTLED';
     return {
       date,
+      status,
       rakePlayerCents: existing.rakePlayerCents,
       rakeBankerCents: existing.rakeBankerCents,
       rakeTotalCents: existing.rakeTotalCents,
@@ -204,13 +390,18 @@ export async function computeProfitPool(date: string): Promise<PoolComputation> 
         uid: share.agent.user.uid,
         nickname: share.agent.user.nickname,
         sharePoints: share.sharePointsSnapshot,
+        parentAgentId: share.agent.parentAgentId,
         playerCount: share.agent._count.players,
-        turnoverCents: share.turnoverCents,
+        selfTurnoverCents: share.turnoverCents,
+        teamTurnoverCents: share.teamTurnoverCents,
         contributionBp:
           share.companyTurnoverCents > 0n
-            ? Number((share.turnoverCents * 10_000n) / share.companyTurnoverCents)
+            ? Number((share.teamTurnoverCents * 10_000n) / share.companyTurnoverCents)
             : 0,
+        selfAmountCents: share.selfAmountCents,
+        overrideAmountCents: share.overrideAmountCents,
         amountCents: share.amountCents,
+        breakdown: deserializeBreakdown(share.breakdown),
       })),
       settled: true,
     };
@@ -251,10 +442,15 @@ export async function computeProfitPool(date: string): Promise<PoolComputation> 
     : 0n;
   const netPoolCents = rakeTotalCents - expenseCents + carryInCents;
 
-  const boundUserIds = agents.flatMap((agent) => agent.players.map((p) => p.userId));
-  const turnoverRows = boundUserIds.length
+  // 需要流水的用户：所有归属玩家 + 代理本人（本人若被绑为他人玩家则只计一次）
+  const boundPlayerIds = new Set(
+    agents.flatMap((agent) => agent.players.map((p) => p.userId)),
+  );
+  const turnoverUserIds = new Set(boundPlayerIds);
+  for (const agent of agents) turnoverUserIds.add(agent.userId);
+  const turnoverRows = turnoverUserIds.size
     ? await prisma.turnoverDaily.findMany({
-        where: { date, userId: { in: boundUserIds } },
+        where: { date, userId: { in: [...turnoverUserIds] } },
         select: { userId: true, selfCents: true },
       })
     : [];
@@ -263,23 +459,44 @@ export async function computeProfitPool(date: string): Promise<PoolComputation> 
     turnoverByUser.set(row.userId, (turnoverByUser.get(row.userId) ?? 0n) + row.selfCents);
   }
 
-  let distributed = 0n;
-  const agentRows: AgentComputation[] = agents.map((agent) => {
-    const agentTurnover = agent.players.reduce(
+  const shareInputs: AgentShareInput[] = agents.map((agent) => {
+    let selfTurnover = agent.players.reduce(
       (sum, player) => sum + (turnoverByUser.get(player.userId) ?? 0n),
       0n,
     );
-    const eligible = agent.status === 'ACTIVE';
-    const amount = eligible
-      ? bucketShareCents({
-          netPoolCents,
-          agentTurnoverCents: agentTurnover,
-          companyTurnoverCents: turnoverCents,
-          sharePoints: agent.sharePoints,
-          bucketBase: config.bucketBase,
-        })
-      : 0n;
-    distributed += amount;
+    // 代理本人的流水计入自身流水（除非本人被绑定为其他代理的归属玩家，避免重复计算）
+    if (!boundPlayerIds.has(agent.userId)) {
+      selfTurnover += turnoverByUser.get(agent.userId) ?? 0n;
+    }
+    return {
+      agentId: agent.id,
+      parentAgentId: agent.parentAgentId,
+      sharePoints: agent.sharePoints,
+      status: agent.status,
+      selfTurnoverCents: selfTurnover,
+      label: agent.label,
+      uid: agent.user.uid,
+    };
+  });
+
+  const shareResults = computeAgentShares({
+    netPoolCents,
+    companyTurnoverCents: turnoverCents,
+    bucketBase: config.bucketBase,
+    agents: shareInputs,
+  });
+
+  let distributed = 0n;
+  const agentRows: AgentComputation[] = agents.map((agent, index) => {
+    const input = shareInputs[index];
+    const result = shareResults.get(agent.id) ?? {
+      teamTurnoverCents: 0n,
+      selfAmountCents: 0n,
+      overrideAmountCents: 0n,
+      amountCents: 0n,
+      breakdown: [],
+    };
+    distributed += result.amountCents;
     return {
       agentId: agent.id,
       label: agent.label,
@@ -288,17 +505,25 @@ export async function computeProfitPool(date: string): Promise<PoolComputation> 
       uid: agent.user.uid,
       nickname: agent.user.nickname,
       sharePoints: agent.sharePoints,
+      parentAgentId: agent.parentAgentId,
       playerCount: agent.players.length,
-      turnoverCents: agentTurnover,
+      selfTurnoverCents: input.selfTurnoverCents,
+      teamTurnoverCents: result.teamTurnoverCents,
       contributionBp:
-        turnoverCents > 0n ? Number((agentTurnover * 10_000n) / turnoverCents) : 0,
-      amountCents: amount,
+        turnoverCents > 0n
+          ? Number((result.teamTurnoverCents * 10_000n) / turnoverCents)
+          : 0,
+      selfAmountCents: result.selfAmountCents,
+      overrideAmountCents: result.overrideAmountCents,
+      amountCents: result.amountCents,
+      breakdown: result.breakdown,
     };
   });
 
   const distributable = netPoolCents > 0n ? netPoolCents : 0n;
   return {
     date,
+    status: 'ESTIMATED',
     rakePlayerCents,
     rakeBankerCents,
     rakeTotalCents,
@@ -318,17 +543,15 @@ export async function computeProfitPool(date: string): Promise<PoolComputation> 
 }
 
 /**
- * 结算某日利润池：写入池记录与代理分配明细，并把分成转入代理用户可用余额。
- * 幂等：ProfitPoolDaily.date 唯一；转账幂等键 profit-share:{date}:{agentId}。
- * 只允许结算已结束的马来日（date < 今天）。
+ * 第一阶段：生成某日称桶报表（PENDING，待后台确认；净池 ≤ 0 直接落 NO_DISTRIBUTION）。
+ * 不做任何转账。幂等：ProfitPoolDaily.date 唯一。只允许生成已结束的马来日。
  */
-export async function settleProfitPool(date: string, actorId?: string) {
+export async function generateProfitPool(date: string, actorId?: string) {
   if (date >= malaysiaDay()) throw new ProfitPoolError('DATE_NOT_CLOSED');
   const computation = await computeProfitPool(date);
-  if (computation.settled) return null;
+  if (computation.status !== 'ESTIMATED') return null;
 
-  const payable = computation.agents.filter((agent) => agent.amountCents > 0n);
-  const result = await serializable(async (tx) => {
+  return serializable(async (tx) => {
     const existing = await tx.profitPoolDaily.findUnique({ where: { date } });
     if (existing) return null;
     const pool = await tx.profitPoolDaily.create({
@@ -346,65 +569,111 @@ export async function settleProfitPool(date: string, actorId?: string) {
         residualCents: computation.residualCents,
         carryOutCents: computation.carryOutCents,
         bucketBaseSnapshot: computation.bucketBase,
-        status: computation.netPoolCents > 0n ? 'SETTLED' : 'NO_DISTRIBUTION',
+        status: computation.netPoolCents > 0n ? 'PENDING' : 'NO_DISTRIBUTION',
         settledBy: actorId ?? 'SYSTEM',
       },
     });
-    for (const agent of payable) {
-      const ledgerRef = `profit-share:${date}:${agent.agentId}`;
+    // 全量存 ACTIVE 代理明细（含 0 金额），保证前台报表回放完整
+    for (const agent of computation.agents) {
+      if (agent.status !== 'ACTIVE') continue;
       await tx.agentProfitShare.create({
         data: {
           poolId: pool.id,
           agentId: agent.agentId,
           date,
-          turnoverCents: agent.turnoverCents,
+          turnoverCents: agent.selfTurnoverCents,
+          teamTurnoverCents: agent.teamTurnoverCents,
           companyTurnoverCents: computation.turnoverCents,
           sharePointsSnapshot: agent.sharePoints,
           bucketBaseSnapshot: computation.bucketBase,
+          selfAmountCents: agent.selfAmountCents,
+          overrideAmountCents: agent.overrideAmountCents,
           amountCents: agent.amountCents,
-          ledgerRef,
+          breakdown: serializeBreakdown(agent.breakdown) as Prisma.InputJsonValue,
+          ledgerRef:
+            agent.amountCents > 0n ? `profit-share:${date}:${agent.agentId}` : null,
         },
-      });
-      await transfer(tx, {
-        amountCents: agent.amountCents,
-        from: { accountType: AccountType.PLATFORM_PROFIT_POOL },
-        to: { userId: agent.userId, accountType: AccountType.USER_AVAILABLE },
-        refType: 'profit_share',
-        refId: agent.agentId,
-        idempotencyKey: ledgerRef,
-        operatorId: actorId,
       });
     }
     return pool;
   });
+}
+
+/**
+ * 第二阶段：确认发放。PENDING → SETTLED，逐笔从 PLATFORM_PROFIT_POOL 转入代理可用余额。
+ * 幂等：状态条件更新 + 转账幂等键 profit-share:{date}:{agentId}。
+ */
+export async function confirmProfitPool(date: string, adminId: string) {
+  const pool = await prisma.profitPoolDaily.findUnique({ where: { date } });
+  if (!pool) throw new ProfitPoolError('POOL_NOT_GENERATED');
+  if (pool.status === 'SETTLED') return null;
+  if (pool.status !== 'PENDING') throw new ProfitPoolError('POOL_NOT_CONFIRMABLE');
+
+  const result = await serializable(async (tx) => {
+    const updated = await tx.profitPoolDaily.updateMany({
+      where: { id: pool.id, status: 'PENDING' },
+      data: { status: 'SETTLED', confirmedBy: adminId, confirmedAt: new Date() },
+    });
+    if (updated.count !== 1) return null;
+    const shares = await tx.agentProfitShare.findMany({
+      where: { poolId: pool.id, amountCents: { gt: 0n } },
+      include: { agent: { select: { userId: true, sharePoints: true } } },
+    });
+    for (const share of shares) {
+      await transfer(tx, {
+        amountCents: share.amountCents,
+        from: { accountType: AccountType.PLATFORM_PROFIT_POOL },
+        to: { userId: share.agent.userId, accountType: AccountType.USER_AVAILABLE },
+        refType: 'profit_share',
+        refId: share.agentId,
+        idempotencyKey: share.ledgerRef ?? `profit-share:${date}:${share.agentId}`,
+        operatorId: adminId,
+      });
+    }
+    return { pool, shares };
+  });
 
   if (result) {
-    for (const agent of payable) {
-      const amount = `${agent.amountCents / 100n}.${(agent.amountCents % 100n)
+    for (const share of result.shares) {
+      const amount = `${share.amountCents / 100n}.${(share.amountCents % 100n)
         .toString()
         .padStart(2, '0')}`;
       void pushService.sendCustom(
-        agent.userId,
-        `💼 ${date} 称桶分成已结算\n占成 ${agent.sharePoints}/${computation.bucketBase}，分成 RM${amount} 已发放到可用余额。`,
+        share.agent.userId,
+        `💼 ${date} 称桶分成已发放\n占成 ${share.sharePointsSnapshot}/${share.bucketBaseSnapshot}，分成 RM${amount} 已发放到可用余额。`,
       );
     }
+    return result.pool;
   }
-  return result;
+  return null;
 }
 
-/** 后台任务入口：自动结算前一马来日（配置可关） */
-export async function autoSettleProfitPool(date: string) {
+/** 作废待确认报表（未发生转账，可安全删除后重新生成） */
+export async function discardPendingProfitPool(date: string) {
+  const discarded = await serializable(async (tx) => {
+    const pool = await tx.profitPoolDaily.findUnique({ where: { date } });
+    if (!pool) throw new ProfitPoolError('POOL_NOT_GENERATED');
+    if (pool.status === 'SETTLED') throw new ProfitPoolError('POOL_ALREADY_SETTLED');
+    await tx.agentProfitShare.deleteMany({ where: { poolId: pool.id } });
+    await tx.profitPoolDaily.delete({ where: { id: pool.id } });
+    return pool;
+  });
+  return discarded;
+}
+
+/** 后台任务入口：自动生成前一马来日报表（配置可关；发放始终需后台确认） */
+export async function autoGenerateProfitPool(date: string) {
   const config = await getProfitPoolConfig();
   if (!config.autoSettle) return null;
   try {
-    return await settleProfitPool(date);
+    return await generateProfitPool(date);
   } catch (error) {
     if (error instanceof ProfitPoolError) return null;
     throw error;
   }
 }
 
-/** 近 N 日趋势（含未结算日的实时估算），供后台图表 */
+/** 近 N 日趋势（含未生成日的实时估算），供后台图表 */
 export async function profitPoolTrend(days: number, endDate = malaysiaDay()) {
   const dates: string[] = [];
   let cursor = endDate;
@@ -420,6 +689,7 @@ export async function profitPoolTrend(days: number, endDate = malaysiaDay()) {
   const trend = [] as Array<{
     date: string;
     settled: boolean;
+    status: string;
     rakeTotalCents: string;
     turnoverCents: string;
     expenseCents: string;
@@ -432,6 +702,7 @@ export async function profitPoolTrend(days: number, endDate = malaysiaDay()) {
       trend.push({
         date: day,
         settled: true,
+        status: settledRow.status,
         rakeTotalCents: String(settledRow.rakeTotalCents),
         turnoverCents: String(settledRow.turnoverCents),
         expenseCents: String(settledRow.expenseCents),
@@ -444,6 +715,7 @@ export async function profitPoolTrend(days: number, endDate = malaysiaDay()) {
     trend.push({
       date: day,
       settled: false,
+      status: 'ESTIMATED',
       rakeTotalCents: String(estimate.rakeTotalCents),
       turnoverCents: String(estimate.turnoverCents),
       expenseCents: String(estimate.expenseCents),
@@ -456,7 +728,8 @@ export async function profitPoolTrend(days: number, endDate = malaysiaDay()) {
 
 const AGENT_INCLUDE = {
   user: { select: { uid: true, nickname: true, avatarUrl: true } },
-  _count: { select: { players: true } },
+  parent: { select: { id: true, label: true, sharePoints: true } },
+  _count: { select: { players: true, children: true } },
 } satisfies Prisma.AgentInclude;
 
 export async function listAgents() {
@@ -466,6 +739,14 @@ export async function listAgents() {
   });
 }
 
+export async function getAgentByUserId(userId: string) {
+  return prisma.agent.findUnique({
+    where: { userId },
+    include: AGENT_INCLUDE,
+  });
+}
+
+/** 后台建立第一层代理（无上级；下级代理由上级在前台升级产生） */
 export async function createAgent(params: {
   uid: string;
   label: string;
@@ -474,19 +755,81 @@ export async function createAgent(params: {
 }) {
   const config = await getProfitPoolConfig();
   assertSharePoints(params.sharePoints, config.bucketBase);
-  const user = await prisma.user.findUnique({ where: { uid: params.uid } });
+  const user = await prisma.user.findUnique({
+    where: { uid: params.uid },
+    include: { agentBinding: true },
+  });
   if (!user) throw new ProfitPoolError('USER_NOT_FOUND');
   if (user.kind === 'VIRTUAL') throw new ProfitPoolError('VIRTUAL_NOT_ALLOWED');
   const existing = await prisma.agent.findUnique({ where: { userId: user.id } });
   if (existing) throw new ProfitPoolError('AGENT_ALREADY_EXISTS');
-  return prisma.agent.create({
-    data: {
-      userId: user.id,
-      label: params.label.trim() || `代理-${user.uid}`,
-      sharePoints: params.sharePoints,
-    },
-    include: AGENT_INCLUDE,
+  if (user.agentBinding) throw new ProfitPoolError('USER_IS_BOUND_PLAYER');
+  return serializable(async (tx) => {
+    const agent = await tx.agent.create({
+      data: {
+        userId: user.id,
+        label: params.label.trim() || `代理-${user.uid}`,
+        sharePoints: params.sharePoints,
+        createdBy: params.actorId ?? 'ADMIN',
+      },
+      include: AGENT_INCLUDE,
+    });
+    // 加成代理前已经邀请过的直属好友，补绑到该代理名下，避免只对「之后」的邀请生效
+    const invitees = await tx.user.findMany({
+      where: {
+        inviterId: user.id,
+        kind: 'HUMAN',
+        agentProfile: { is: null },
+        agentBinding: { is: null },
+      },
+      select: { id: true },
+    });
+    if (invitees.length) {
+      await tx.agentPlayer.createMany({
+        data: invitees.map((invitee) => ({
+          agentId: agent.id,
+          userId: invitee.id,
+          boundBy: params.actorId ?? 'ADMIN',
+          source: 'REFERRAL',
+        })),
+        skipDuplicates: true,
+      });
+    }
+    return agent;
   });
+}
+
+/**
+ * 校验代理点数在树中的合法区间：
+ * - 有上级：点数 ≤ 上级点数 − 最低预留；
+ * - 有下级：点数 ≥ 最大下级点数 + 最低预留。
+ */
+async function assertPointsInTree(params: {
+  points: number;
+  parentPoints: number | null;
+  agentId?: string;
+  config: ProfitPoolConfig;
+}) {
+  const { points, parentPoints, agentId, config } = params;
+  assertSharePoints(points, config.bucketBase);
+  const max =
+    parentPoints !== null ? parentPoints - config.minReservePoints : config.bucketBase;
+  let min = 0;
+  if (agentId) {
+    const topChild = await prisma.agent.findFirst({
+      where: { parentAgentId: agentId },
+      orderBy: { sharePoints: 'desc' },
+      select: { sharePoints: true },
+    });
+    if (topChild) min = topChild.sharePoints + config.minReservePoints;
+  }
+  if (points > max || points < min) {
+    throw new ProfitPoolError('SHARE_POINTS_OUT_OF_RANGE', {
+      min,
+      max: Math.max(min, max),
+      minReservePoints: config.minReservePoints,
+    });
+  }
 }
 
 export async function updateAgent(params: {
@@ -495,12 +838,20 @@ export async function updateAgent(params: {
   sharePoints?: number;
   status?: 'ACTIVE' | 'DISABLED';
 }) {
+  const agent = await prisma.agent.findUnique({
+    where: { id: params.agentId },
+    include: { parent: { select: { sharePoints: true } } },
+  });
+  if (!agent) throw new ProfitPoolError('AGENT_NOT_FOUND');
   if (params.sharePoints !== undefined) {
     const config = await getProfitPoolConfig();
-    assertSharePoints(params.sharePoints, config.bucketBase);
+    await assertPointsInTree({
+      points: params.sharePoints,
+      parentPoints: agent.parent?.sharePoints ?? null,
+      agentId: agent.id,
+      config,
+    });
   }
-  const agent = await prisma.agent.findUnique({ where: { id: params.agentId } });
-  if (!agent) throw new ProfitPoolError('AGENT_NOT_FOUND');
   return prisma.agent.update({
     where: { id: params.agentId },
     data: {
@@ -522,19 +873,29 @@ export async function bindAgentPlayer(params: {
   agentId: string;
   uid: string;
   actorId?: string;
+  source?: 'MANUAL' | 'REFERRAL';
 }) {
   const agent = await prisma.agent.findUnique({ where: { id: params.agentId } });
   if (!agent) throw new ProfitPoolError('AGENT_NOT_FOUND');
-  const user = await prisma.user.findUnique({ where: { uid: params.uid } });
+  const user = await prisma.user.findUnique({
+    where: { uid: params.uid },
+    include: { agentProfile: true },
+  });
   if (!user) throw new ProfitPoolError('USER_NOT_FOUND');
   if (user.kind === 'VIRTUAL') throw new ProfitPoolError('VIRTUAL_NOT_ALLOWED');
+  if (user.agentProfile) throw new ProfitPoolError('AGENT_CANNOT_BE_PLAYER');
   const existing = await prisma.agentPlayer.findUnique({ where: { userId: user.id } });
   if (existing) {
     if (existing.agentId === params.agentId) return existing;
     throw new ProfitPoolError('PLAYER_ALREADY_BOUND');
   }
   return prisma.agentPlayer.create({
-    data: { agentId: params.agentId, userId: user.id, boundBy: params.actorId },
+    data: {
+      agentId: params.agentId,
+      userId: user.id,
+      boundBy: params.actorId,
+      source: params.source ?? 'MANUAL',
+    },
   });
 }
 
@@ -553,4 +914,119 @@ export async function listAgentPlayers(agentId: string) {
     },
     orderBy: { boundAt: 'desc' },
   });
+}
+
+/**
+ * 上级代理把直属玩家升级为下级代理：
+ * - 占成 ≤ 上级占成 − 最低预留；
+ * - 原玩家归属记录转换为代理（删除 AgentPlayer，其后续流水计入自己名下）。
+ */
+export async function promoteAgentPlayer(params: {
+  parentAgentId: string;
+  playerUserId: string;
+  sharePoints: number;
+  label?: string;
+  actorId?: string;
+}) {
+  const config = await getProfitPoolConfig();
+  const parent = await prisma.agent.findUnique({ where: { id: params.parentAgentId } });
+  if (!parent || parent.status !== 'ACTIVE') throw new ProfitPoolError('AGENT_NOT_FOUND');
+  await assertPointsInTree({
+    points: params.sharePoints,
+    parentPoints: parent.sharePoints,
+    config,
+  });
+  return serializable(async (tx) => {
+    const binding = await tx.agentPlayer.findUnique({
+      where: { userId: params.playerUserId },
+      include: { user: { select: { uid: true, nickname: true, kind: true } } },
+    });
+    if (!binding || binding.agentId !== params.parentAgentId) {
+      throw new ProfitPoolError('BINDING_NOT_FOUND');
+    }
+    if (binding.user.kind === 'VIRTUAL') throw new ProfitPoolError('VIRTUAL_NOT_ALLOWED');
+    const existingAgent = await tx.agent.findUnique({
+      where: { userId: params.playerUserId },
+    });
+    if (existingAgent) throw new ProfitPoolError('AGENT_ALREADY_EXISTS');
+    await tx.agentPlayer.delete({ where: { id: binding.id } });
+    return tx.agent.create({
+      data: {
+        userId: params.playerUserId,
+        label:
+          params.label?.trim() ||
+          binding.user.nickname?.trim() ||
+          `代理-${binding.user.uid}`,
+        sharePoints: params.sharePoints,
+        parentAgentId: params.parentAgentId,
+        createdBy: params.actorId ?? params.parentAgentId,
+      },
+      include: { user: { select: { uid: true, nickname: true } } },
+    });
+  });
+}
+
+/** 上级调整直属下级占成（分成管理） */
+export async function updateSubagentPoints(params: {
+  parentAgentId: string;
+  subagentId: string;
+  sharePoints: number;
+}) {
+  const config = await getProfitPoolConfig();
+  const [parent, child] = await Promise.all([
+    prisma.agent.findUnique({ where: { id: params.parentAgentId } }),
+    prisma.agent.findUnique({ where: { id: params.subagentId } }),
+  ]);
+  if (!parent || parent.status !== 'ACTIVE') throw new ProfitPoolError('AGENT_NOT_FOUND');
+  if (!child || child.parentAgentId !== params.parentAgentId) {
+    throw new ProfitPoolError('SUBAGENT_NOT_FOUND');
+  }
+  await assertPointsInTree({
+    points: params.sharePoints,
+    parentPoints: parent.sharePoints,
+    agentId: child.id,
+    config,
+  });
+  return prisma.agent.update({
+    where: { id: child.id },
+    data: { sharePoints: params.sharePoints },
+    include: { user: { select: { uid: true, nickname: true } } },
+  });
+}
+
+/**
+ * 推荐注册自动归属：沿邀请链向上找最近的 ACTIVE 代理（含邀请人本人），
+ * 找到则把新玩家自动绑定到该代理名下。已被绑定/本人是代理时跳过。
+ * 在绑定邀请人的事务内调用，失败不阻断注册主流程（由调用方兜底）。
+ */
+export async function autoBindReferralPlayer(
+  tx: Prisma.TransactionClient,
+  userId: string,
+  inviterId: string,
+): Promise<{ agentId: string } | null> {
+  const [existingBinding, selfAgent] = await Promise.all([
+    tx.agentPlayer.findUnique({ where: { userId } }),
+    tx.agent.findUnique({ where: { userId } }),
+  ]);
+  if (existingBinding || selfAgent) return null;
+
+  let cursor: string | null = inviterId;
+  for (let depth = 0; cursor && depth < 20; depth += 1) {
+    const agent: { id: string; status: string } | null = await tx.agent.findUnique({
+      where: { userId: cursor },
+      select: { id: true, status: true },
+    });
+    if (agent?.status === 'ACTIVE') {
+      await tx.agentPlayer.create({
+        data: { agentId: agent.id, userId, boundBy: 'REFERRAL', source: 'REFERRAL' },
+      });
+      return { agentId: agent.id };
+    }
+    const upline: { inviterId: string | null } | null = await tx.user.findUnique({
+      where: { id: cursor },
+      select: { inviterId: true },
+    });
+    cursor = upline?.inviterId ?? null;
+  }
+  return null;
 }
