@@ -266,10 +266,19 @@ export default function App() {
       else navigate('/', { replace: true });
     };
 
+    // BackButton 需要 Bot API 6.1+；老客户端 show() 只告警不抛错，
+    // 若不显式判版本会误加隐藏类，把页内返回键也藏掉导致无法返回。
+    let backButtonSupported = false;
+    try {
+      backButtonSupported = app.isVersionAtLeast?.('6.1') === true;
+    } catch {
+      backButtonSupported = false;
+    }
+
     const syncNativeBack = () => {
-      const shouldShow =
-        location.pathname !== '/'
-        && app.isFullscreen !== true;
+      // 全屏（Bot API 8.0+）下同样生效：左上角胶囊会从「关闭」切换成返回箭头，
+      // iOS 与安卓行为一致；主页保持隐藏，让用户可以直接关闭小程序。
+      const shouldShow = backButtonSupported && location.pathname !== '/';
       if (!shouldShow) {
         document.body.classList.remove(nativeClass);
         try {
