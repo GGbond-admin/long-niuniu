@@ -159,17 +159,48 @@ export async function authRoutes(app: FastifyInstance) {
     // 支付密码校验：沿用统一的失败计数与锁定机制（连错锁定，全局错误处理器返回码）
     await verifyPaymentPin(user.id, body.paymentPin);
 
-    await prisma.device.update({
-      where: { id: user.device.id },
+    const reboundAt = new Date();
+    const changed = await prisma.device.updateMany({
+      where: {
+        id: user.device.id,
+        status: 'ACTIVE',
+        deviceId: user.device.deviceId,
+        OR: [
+          { lastSelfRebindAt: null },
+          {
+            lastSelfRebindAt: {
+              lte: new Date(reboundAt.getTime() - SELF_REBIND_COOLDOWN_MS),
+            },
+          },
+        ],
+      },
       data: {
         deviceId: body.deviceId,
         status: 'ACTIVE',
-        boundAt: new Date(),
-        lastSelfRebindAt: new Date(),
+        boundAt: reboundAt,
+        lastSelfRebindAt: reboundAt,
         // 作废旧设备上的所有登录态
         authVersion: { increment: 1 },
       },
     });
+    if (changed.count !== 1) {
+      const current = await prisma.device.findUnique({
+        where: { id: user.device.id },
+        select: { deviceId: true, lastSelfRebindAt: true },
+      });
+      if (current?.deviceId === body.deviceId) {
+        return { ok: true, alreadyBound: true };
+      }
+      const nextAllowedAt = new Date(
+        (current?.lastSelfRebindAt?.getTime() ?? reboundAt.getTime())
+          + SELF_REBIND_COOLDOWN_MS,
+      );
+      return reply.code(429).send({
+        error: 'REBIND_COOLDOWN',
+        message: '另一台设备刚完成换绑，本次请求未生效',
+        nextAllowedAt: nextAllowedAt.toISOString(),
+      });
+    }
     await invalidateUserConnections(user.id);
     await prisma.auditLog.create({
       data: {

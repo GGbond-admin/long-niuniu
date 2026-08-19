@@ -33,6 +33,101 @@ type ChatMessage = {
   at: string;
 };
 
+type ScoreboardPresentation = {
+  title?: string;
+  playerAliases?: Record<string, string>;
+  playerNotes?: Record<string, string>;
+  bankerAlias?: string;
+  bankerNote?: string;
+  footer?: string;
+};
+
+type ScoreboardRevision = {
+  id: string;
+  revision: number;
+  presentation: ScoreboardPresentation;
+  renderedChunks: string[];
+  reason: string;
+  adminId: string;
+  createdAt: string;
+};
+
+type ScoreboardData = {
+  id: string;
+  roundId: string;
+  roomId: string;
+  seqNo: number;
+  playerLines: Row[];
+  bankerSummary: Row;
+  presentation: ScoreboardPresentation;
+  presentationRevision: number;
+  presentationUpdatedBy: string | null;
+  presentationSyncStatus: 'LEGACY' | 'PENDING' | 'SYNCED' | 'FAILED' | 'MESSAGE_EXPIRED';
+  presentationSyncError: string | null;
+  presentationSyncedAt: string | null;
+  publishedChatMessageIds: string[];
+  previewChunks: string[];
+  createdAt: string;
+  updatedAt: string;
+  revisions: ScoreboardRevision[];
+};
+
+type ScoreboardDraft = {
+  title: string;
+  playerAliases: Record<string, string>;
+  playerNotes: Record<string, string>;
+  bankerAlias: string;
+  bankerNote: string;
+  footer: string;
+};
+
+function scoreboardDraftOf(presentation: ScoreboardPresentation): ScoreboardDraft {
+  return {
+    title: presentation.title ?? '',
+    playerAliases: { ...(presentation.playerAliases ?? {}) },
+    playerNotes: { ...(presentation.playerNotes ?? {}) },
+    bankerAlias: presentation.bankerAlias ?? '',
+    bankerNote: presentation.bankerNote ?? '',
+    footer: presentation.footer ?? '',
+  };
+}
+
+function scoreboardPresentationOfDraft(
+  draft: ScoreboardDraft,
+): ScoreboardPresentation {
+  return {
+    title: draft.title,
+    playerAliases: draft.playerAliases,
+    playerNotes: draft.playerNotes,
+    bankerAlias: draft.bankerAlias,
+    bankerNote: draft.bankerNote,
+    footer: draft.footer,
+  };
+}
+
+function scoreboardSyncCopy(status: ScoreboardData['presentationSyncStatus']) {
+  if (status === 'SYNCED') return '已同步';
+  if (status === 'PENDING') return '待同步';
+  if (status === 'FAILED') return '同步失败';
+  if (status === 'MESSAGE_EXPIRED') return '原消息已过期';
+  return '历史成绩单';
+}
+
+function scoreboardName(line: Row, override?: string) {
+  const name = override?.trim() || line.nickname?.trim() || line.tgUsername || `UID${line.uid ?? ''}`;
+  return `@${String(name).replace(/^@+/, '')}`;
+}
+
+function scoreboardMoney(value: unknown) {
+  return value == null ? '—' : `RM ${rm(String(value))}`;
+}
+
+function scoreboardOutcome(outcome: unknown) {
+  if (outcome === 'PLAYER_WIN') return { symbol: '🟢', label: '赢' };
+  if (outcome === 'BANKER_WIN') return { symbol: '🔴', label: '输' };
+  return { symbol: '⚪', label: '平' };
+}
+
 const packetModeLabel: Record<string, string> = {
   RANDOM: '拼手气',
   EQUAL: '均分',
@@ -133,6 +228,24 @@ const phaseLabels: Record<string, string> = {
   CANCELLED: '已取消',
 };
 
+const scoreboardHandLabels: Record<string, string> = {
+  BAOZI: '豹子',
+  MANNIU: '满牛',
+  FANSHUN: '反顺',
+  SHUNZI: '顺子',
+  DUIZI: '对子',
+  JINNIU: '金牛',
+  NIUNIU: '牛牛',
+  NORMAL: '普通',
+  MIANSI: '免死',
+};
+
+function scoreboardResultSummary(line: Row) {
+  const hand = scoreboardHandLabels[String(line.handType ?? '')] ?? String(line.handType ?? '—');
+  const points = Number.isFinite(Number(line.points)) ? `${Number(line.points)} 点` : '';
+  return `${hand}${points ? ` · ${points}` : ''} · ${scoreboardOutcome(line.outcome).label}`;
+}
+
 const bannerLabels: Record<string, string> = {
   'bet-start': '开始下注',
   'bet-stop': '停止下注',
@@ -181,6 +294,18 @@ function explainOpsError(cause: unknown): string {
     return `该链接域名不被允许（${error.details.hostname}）。请使用 links.tngdigital.com.my 的 Money Packet 分享链接`;
   }
   return opsErrorMessages[code] ?? error.message ?? '操作失败，请稍后重试';
+}
+
+function explainScoreboardError(cause: unknown): string {
+  const error = cause as Error & { code?: string };
+  const messages: Record<string, string> = {
+    VALIDATION: '成绩单展示格式不正确：请检查文本长度、单行展示名和必填修改原因。',
+    SCOREBOARD_PLAYER_NOT_FOUND: '展示配置包含不属于本局的玩家，请刷新成绩单后重试。',
+    SCOREBOARD_NOT_FINISHED: '本局尚未完成结算，暂时不能修订成绩单。',
+    SCOREBOARD_REVISION_NOT_FOUND: '所选历史版本不存在或已变化，请刷新后重试。',
+    SCOREBOARD_SYNC_FAILED: '互动群原成绩单同步失败，请稍后重试。',
+  };
+  return messages[error.code ?? ''] ?? error.message ?? '成绩单操作失败，请稍后重试';
 }
 
 function extractHttpsUrl(value: string): string {
@@ -356,6 +481,10 @@ function ChatBubble({
 export default function GameOperationsCenter({ admin }: { admin: Admin }) {
   const canOperate = admin.role === 'SUPER' || admin.role === 'OPERATOR';
   const canReconcile = admin.role === 'SUPER' || admin.role === 'FINANCE';
+  const canViewScoreboard =
+    admin.role === 'SUPER'
+    || admin.role === 'OPERATOR'
+    || admin.role === 'REVIEWER';
   /** catalog：游戏目录落地页；ops：进入某游戏唯一互动群后的三栏运营台 */
   const [screen, setScreen] = useState<'catalog' | 'ops'>('catalog');
   const [activeTab, setActiveTab] = useState<
@@ -393,15 +522,33 @@ export default function GameOperationsCenter({ admin }: { admin: Admin }) {
   const [botAutoStart, setBotAutoStart] = useState(false);
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
+  const [scoreboard, setScoreboard] = useState<ScoreboardData | null>(null);
+  const [scoreboardDraft, setScoreboardDraft] = useState<ScoreboardDraft | null>(null);
+  const [scoreboardReason, setScoreboardReason] = useState('');
+  const [scoreboardOpen, setScoreboardOpen] = useState(false);
+  const [scoreboardLoading, setScoreboardLoading] = useState(false);
+  const [scoreboardError, setScoreboardError] = useState('');
+  const [scoreboardPreviewChunks, setScoreboardPreviewChunks] = useState<string[]>([]);
+  const [scoreboardPreviewLoading, setScoreboardPreviewLoading] = useState(false);
+  const [scoreboardPreviewError, setScoreboardPreviewError] = useState('');
   const [now, setNow] = useState(Date.now());
   const streamRef = useRef<HTMLDivElement | null>(null);
+  const chatDeleteTombstonesRef = useRef(new Set<string>());
   const selectedRoomIdRef = useRef('');
   const selectedRoundIdRef = useRef('');
   const roundPinnedRef = useRef(false);
   const roundPageRef = useRef(1);
   const draftRoundIdRef = useRef('');
   const loadGenerationRef = useRef(0);
+  const scoreboardRequestSeqRef = useRef(0);
+  const scoreboardPreviewSeqRef = useRef(0);
+  const scoreboardDirtyRef = useRef(false);
   const roundsTotalPages = Math.max(1, Math.ceil(roundsTotal / ROUND_PAGE_SIZE));
+  const scoreboardDirty = !!scoreboard && !!scoreboardDraft && (
+    JSON.stringify(scoreboardDraft) !== JSON.stringify(scoreboardDraftOf(scoreboard.presentation))
+    || scoreboardReason.trim().length > 0
+  );
+  scoreboardDirtyRef.current = scoreboardDirty;
 
   const selectedRoom = rooms.find((room) => room.id === selectedRoomId) ?? null;
   /** 内部红包模式：小助手自动发包、玩家群内直抢并即时入余额，无需登记链接与认额 */
@@ -566,7 +713,7 @@ export default function GameOperationsCenter({ admin }: { admin: Admin }) {
       }>(
         `/api/admin/rounds?roomId=${encodeURIComponent(roomId)}&page=${pageToLoad}&pageSize=${ROUND_PAGE_SIZE}`,
       ),
-      request<{ items: Row[] }>('/api/admin/tng/accounts'),
+      request<{ items: Row[] }>('/api/admin/tng/accounts').catch(() => ({ items: [] })),
       request<LeaseState>(`/api/admin/rooms/${roomId}/assistant/status`).catch(
         () => ({ mode: 'UNAVAILABLE' as const, lease: null, heldByMe: false }),
       ),
@@ -605,10 +752,25 @@ export default function GameOperationsCenter({ admin }: { admin: Admin }) {
       selectedRoundIdRef.current = '';
       setSelectedRoundId('');
       setDetail(null);
+      scoreboardRequestSeqRef.current += 1;
+      setScoreboard(null);
+      setScoreboardDraft(null);
+      setScoreboardReason('');
+      setScoreboardOpen(false);
       return;
     }
+    const changingRound = selectedRoundIdRef.current !== nextRound.id;
     selectedRoundIdRef.current = nextRound.id;
     setSelectedRoundId(nextRound.id);
+    if (changingRound) {
+      scoreboardRequestSeqRef.current += 1;
+      setDetail(null);
+      setScoreboard(null);
+      setScoreboardDraft(null);
+      setScoreboardReason('');
+      setScoreboardError('');
+      setScoreboardOpen(false);
+    }
     const nextDetail = await request<Row>(`/api/admin/rounds/${nextRound.id}`);
     if (
       generation !== loadGenerationRef.current
@@ -619,6 +781,58 @@ export default function GameOperationsCenter({ admin }: { admin: Admin }) {
     }
     setDetail(nextDetail);
     mergeClaimDrafts(nextDetail);
+  }
+
+  async function loadScoreboard(roundId: string, preserveDraft = false) {
+    const requestSeq = ++scoreboardRequestSeqRef.current;
+    if (!preserveDraft) {
+      setScoreboard(null);
+      setScoreboardDraft(null);
+    }
+    setScoreboardLoading(true);
+    try {
+      const response = await request<{ scoreboard: ScoreboardData }>(
+        `/api/admin/rounds/${roundId}/scoreboard`,
+      );
+      if (
+        selectedRoundIdRef.current !== roundId
+        || scoreboardRequestSeqRef.current !== requestSeq
+      ) {
+        return;
+      }
+      setScoreboard(response.scoreboard);
+      setScoreboardDraft((current) =>
+        preserveDraft && scoreboardDirtyRef.current && current
+          ? current
+          : scoreboardDraftOf(response.scoreboard.presentation),
+      );
+      setScoreboardError('');
+    } catch (cause) {
+      if (
+        selectedRoundIdRef.current !== roundId
+        || scoreboardRequestSeqRef.current !== requestSeq
+      ) {
+        return;
+      }
+      const code = (cause as { code?: string }).code;
+      if (code === 'SCOREBOARD_NOT_FOUND') {
+        setScoreboard(null);
+        setScoreboardDraft(null);
+      } else if (code === 'FORBIDDEN') {
+        setScoreboard(null);
+        setScoreboardDraft(null);
+        setScoreboardError('当前角色没有查看运营成绩单的权限。');
+      } else {
+        setScoreboardError((cause as Error).message);
+      }
+    } finally {
+      if (
+        selectedRoundIdRef.current === roundId
+        && scoreboardRequestSeqRef.current === requestSeq
+      ) {
+        setScoreboardLoading(false);
+      }
+    }
   }
 
   useEffect(() => {
@@ -633,6 +847,7 @@ export default function GameOperationsCenter({ admin }: { admin: Admin }) {
     selectedRoomIdRef.current = selectedRoomId;
     loadGenerationRef.current += 1;
     setChat([]);
+    chatDeleteTombstonesRef.current.clear();
     setOnline(0);
     setDetail(null);
     selectedRoundIdRef.current = '';
@@ -672,6 +887,126 @@ export default function GameOperationsCenter({ admin }: { admin: Admin }) {
   ]);
 
   useEffect(() => {
+    scoreboardRequestSeqRef.current += 1;
+    setScoreboardOpen(false);
+    setScoreboardReason('');
+    setScoreboardError('');
+    if (detail?.phase === 'FINISHED' && detail.id && canViewScoreboard) {
+      void loadScoreboard(detail.id);
+      return;
+    }
+    setScoreboard(null);
+    setScoreboardDraft(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [detail?.id, detail?.phase, canViewScoreboard]);
+
+  useEffect(() => {
+    if (
+      !canViewScoreboard
+      || detail?.phase !== 'FINISHED'
+      || !detail.id
+      || !scoreboard
+      || scoreboard.roundId !== detail.id
+      || !detail.scoreboard
+    ) {
+      return;
+    }
+    if (
+      detail.scoreboard.presentationRevision !== scoreboard.presentationRevision
+      || detail.scoreboard.presentationSyncStatus !== scoreboard.presentationSyncStatus
+      || String(detail.scoreboard.updatedAt ?? '') !== String(scoreboard.updatedAt ?? '')
+    ) {
+      void loadScoreboard(detail.id, true);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    detail?.id,
+    detail?.phase,
+    detail?.scoreboard?.presentationRevision,
+    detail?.scoreboard?.presentationSyncStatus,
+    detail?.scoreboard?.updatedAt,
+    canViewScoreboard,
+  ]);
+
+  useEffect(() => {
+    if (
+      !canViewScoreboard
+      || detail?.phase !== 'FINISHED'
+      || !detail.id
+      || !detail.scoreboard
+      || scoreboard
+      || scoreboardLoading
+    ) {
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      void loadScoreboard(detail.id, true);
+    }, 5_000);
+    return () => window.clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    detail?.id,
+    detail?.phase,
+    detail?.scoreboard?.presentationRevision,
+    detail?.scoreboard?.presentationSyncStatus,
+    detail?.scoreboard?.updatedAt,
+    scoreboard,
+    scoreboardLoading,
+    canViewScoreboard,
+  ]);
+
+  useEffect(() => {
+    const requestSeq = ++scoreboardPreviewSeqRef.current;
+    setScoreboardPreviewError('');
+    if (!scoreboard || !scoreboardDraft) {
+      setScoreboardPreviewChunks([]);
+      setScoreboardPreviewLoading(false);
+      return;
+    }
+    if (!canOperate) {
+      setScoreboardPreviewChunks(scoreboard.previewChunks);
+      setScoreboardPreviewLoading(false);
+      return;
+    }
+    const roundId = scoreboard.roundId;
+    setScoreboardPreviewLoading(true);
+    const timer = window.setTimeout(() => {
+      void post<{ previewChunks: string[] }>(
+        `/api/admin/rounds/${roundId}/scoreboard/preview`,
+        { presentation: scoreboardPresentationOfDraft(scoreboardDraft) },
+      )
+        .then((response) => {
+          if (
+            scoreboardPreviewSeqRef.current !== requestSeq
+            || selectedRoundIdRef.current !== roundId
+          ) {
+            return;
+          }
+          setScoreboardPreviewChunks(response.previewChunks);
+          setScoreboardPreviewError('');
+        })
+        .catch((cause) => {
+          if (
+            scoreboardPreviewSeqRef.current !== requestSeq
+            || selectedRoundIdRef.current !== roundId
+          ) {
+            return;
+          }
+          setScoreboardPreviewError(explainScoreboardError(cause));
+        })
+        .finally(() => {
+          if (
+            scoreboardPreviewSeqRef.current === requestSeq
+            && selectedRoundIdRef.current === roundId
+          ) {
+            setScoreboardPreviewLoading(false);
+          }
+        });
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [scoreboard, scoreboardDraft, canOperate]);
+
+  useEffect(() => {
     if (!selectedRoomId || screen !== 'ops' || activeTab !== 'live') return;
     let stopped = false;
     let socket: WebSocket | null = null;
@@ -704,6 +1039,7 @@ export default function GameOperationsCenter({ admin }: { admin: Admin }) {
             type?: string;
             messages?: ChatMessage[];
             message?: ChatMessage;
+            messageId?: string;
             online?: number;
             mode?: 'AUTO' | 'ASSISTED' | 'UNAVAILABLE';
             lease?: AssistantLease | null;
@@ -712,16 +1048,24 @@ export default function GameOperationsCenter({ admin }: { admin: Admin }) {
             assistantEnabled?: boolean;
           };
           if (payload.type === 'chat_history' && payload.messages) {
-            setChat(payload.messages);
+            const tombstones = chatDeleteTombstonesRef.current;
+            setChat(payload.messages.filter((message) => !tombstones.has(message.id)));
           } else if (payload.type === 'chat' && payload.message) {
+            chatDeleteTombstonesRef.current.delete(payload.message.id);
             setChat((previous) => {
               if (previous.some((item) => item.id === payload.message?.id)) return previous;
               return [...previous.slice(-99), payload.message!];
             });
           } else if (payload.type === 'chat_update' && payload.message) {
             const updated = payload.message;
+            if (chatDeleteTombstonesRef.current.has(updated.id)) return;
             setChat((previous) =>
               previous.map((item) => (item.id === updated.id ? { ...item, ...updated } : item)),
+            );
+          } else if (payload.type === 'chat_delete' && payload.messageId) {
+            chatDeleteTombstonesRef.current.add(payload.messageId);
+            setChat((previous) =>
+              previous.filter((message) => message.id !== payload.messageId),
             );
           } else if (payload.type === 'presence' && typeof payload.online === 'number') {
             setOnline(payload.online);
@@ -805,6 +1149,135 @@ export default function GameOperationsCenter({ admin }: { admin: Admin }) {
     }
   }
 
+  function acceptScoreboard(next: ScoreboardData, preserveDraft = false) {
+    if (selectedRoundIdRef.current !== next.roundId) return;
+    setScoreboard(next);
+    setScoreboardDraft((current) =>
+      preserveDraft && scoreboardDirtyRef.current && current
+        ? current
+        : scoreboardDraftOf(next.presentation),
+    );
+    setRounds((current) =>
+      current.map((round) =>
+        round.id === next.roundId
+          ? {
+              ...round,
+              scoreboard: {
+                ...(round.scoreboard ?? {}),
+                id: next.id,
+                presentationRevision: next.presentationRevision,
+                presentationSyncStatus: next.presentationSyncStatus,
+                presentationSyncError: next.presentationSyncError,
+              },
+            }
+          : round,
+      ),
+    );
+  }
+
+  async function saveScoreboard() {
+    if (!scoreboard || !scoreboardDraft || scoreboardReason.trim().length < 4) return;
+    const roundId = scoreboard.roundId;
+    scoreboardRequestSeqRef.current += 1;
+    setBusy('scoreboard-save');
+    setScoreboardError('');
+    try {
+      const response = await patch<{ ok: true; scoreboard: ScoreboardData }>(
+        `/api/admin/rounds/${roundId}/scoreboard`,
+        {
+          expectedRevision: scoreboard.presentationRevision,
+          reason: scoreboardReason.trim(),
+          presentation: scoreboardPresentationOfDraft(scoreboardDraft),
+        },
+      );
+      if (selectedRoundIdRef.current !== roundId) return;
+      acceptScoreboard(response.scoreboard);
+      setScoreboardReason('');
+    } catch (cause) {
+      if (selectedRoundIdRef.current !== roundId) return;
+      const code = (cause as { code?: string }).code;
+      if (code === 'SCOREBOARD_REVISION_CONFLICT') {
+        await loadScoreboard(roundId, true);
+        if (selectedRoundIdRef.current !== roundId) return;
+        setScoreboardError('该成绩单已被其他管理员修改。已为你刷新最新版本，请核对后重新保存。');
+      } else if (code === 'SCOREBOARD_SYNC_FAILED') {
+        await loadScoreboard(roundId, true);
+        if (selectedRoundIdRef.current !== roundId) return;
+        setScoreboardError('展示版本已经保存，但互动群原消息同步失败。请检查状态后点击“重试同步”。');
+      } else {
+        setScoreboardError(explainScoreboardError(cause));
+      }
+    } finally {
+      setBusy('');
+    }
+  }
+
+  async function retryScoreboardSync() {
+    if (!scoreboard) return;
+    const roundId = scoreboard.roundId;
+    scoreboardRequestSeqRef.current += 1;
+    setBusy('scoreboard-sync');
+    setScoreboardError('');
+    try {
+      const response = await post<{ ok: true; scoreboard: ScoreboardData }>(
+        `/api/admin/rounds/${roundId}/scoreboard/sync`,
+        {},
+      );
+      if (selectedRoundIdRef.current !== roundId) return;
+      acceptScoreboard(response.scoreboard, true);
+    } catch (cause) {
+      if (selectedRoundIdRef.current !== roundId) return;
+      const message = explainScoreboardError(cause);
+      await loadScoreboard(roundId, true);
+      if (selectedRoundIdRef.current !== roundId) return;
+      setScoreboardError(message);
+    } finally {
+      setBusy('');
+    }
+  }
+
+  async function restoreScoreboardRevision(revision: number) {
+    if (
+      !scoreboard
+      || scoreboardReason.trim().length < 4
+      || !window.confirm(`恢复到展示版本 v${revision}？系统会创建一个新版本并同步小助手原消息。`)
+    ) {
+      return;
+    }
+    const roundId = scoreboard.roundId;
+    scoreboardRequestSeqRef.current += 1;
+    setBusy(`scoreboard-restore-${revision}`);
+    setScoreboardError('');
+    try {
+      const response = await post<{ ok: true; scoreboard: ScoreboardData }>(
+        `/api/admin/rounds/${roundId}/scoreboard/revisions/${revision}/restore`,
+        {
+          expectedRevision: scoreboard.presentationRevision,
+          reason: scoreboardReason.trim(),
+        },
+      );
+      if (selectedRoundIdRef.current !== roundId) return;
+      acceptScoreboard(response.scoreboard);
+      setScoreboardReason('');
+    } catch (cause) {
+      if (selectedRoundIdRef.current !== roundId) return;
+      const code = (cause as { code?: string }).code;
+      if (code === 'SCOREBOARD_REVISION_CONFLICT') {
+        await loadScoreboard(roundId, true);
+        if (selectedRoundIdRef.current !== roundId) return;
+        setScoreboardError('恢复失败：成绩单已有新版本，已刷新最新数据。');
+      } else if (code === 'SCOREBOARD_SYNC_FAILED') {
+        await loadScoreboard(roundId, true);
+        if (selectedRoundIdRef.current !== roundId) return;
+        setScoreboardError('旧版本已恢复为新的展示版本，但互动群同步失败，请重试同步。');
+      } else {
+        setScoreboardError(explainScoreboardError(cause));
+      }
+    } finally {
+      setBusy('');
+    }
+  }
+
   function enterGame(roomId: string) {
     selectedRoomIdRef.current = roomId;
     setSelectedRoomId(roomId);
@@ -827,6 +1300,13 @@ export default function GameOperationsCenter({ admin }: { admin: Admin }) {
     const roomId = selectedRoomIdRef.current;
     selectedRoundIdRef.current = id;
     setSelectedRoundId(id);
+    scoreboardRequestSeqRef.current += 1;
+    setDetail(null);
+    setScoreboard(null);
+    setScoreboardDraft(null);
+    setScoreboardReason('');
+    setScoreboardError('');
+    setScoreboardOpen(false);
     roundPinnedRef.current = true;
     setRoundPinned(true);
     setError('');
@@ -944,7 +1424,13 @@ export default function GameOperationsCenter({ admin }: { admin: Admin }) {
     };
     if (confirmations[action] && !window.confirm(confirmations[action])) return;
     await run(`round-${action}`, async () => {
-      await post(`/api/admin/rounds/${detail.id}/action`, { action, ...extra });
+      const response = await post<{ warnings?: string[] }>(
+        `/api/admin/rounds/${detail.id}/action`,
+        { action, ...extra },
+      );
+      if (response.warnings?.length) {
+        setError(`主操作已完成，但后续任务异常：${response.warnings.join('、')}。系统将自动补偿，请值班人员复核。`);
+      }
       if (action === 'cancel') setCancelReason('');
     });
   }
@@ -1411,7 +1897,28 @@ export default function GameOperationsCenter({ admin }: { admin: Admin }) {
                     {typeof round._count?.bets === 'number' ? ` / 下注 ${round._count.bets}` : ''}
                   </small>
                 </span>
-                <PhaseBadge value={round.phase} />
+                <span className="ops-round-statuses">
+                  {round.phase === 'FINISHED' && canViewScoreboard && (
+                    <span
+                      className={`ops-scoreboard-mini-status ${
+                        String(round.scoreboard?.presentationSyncStatus ?? 'missing').toLowerCase()
+                      }`}
+                    >
+                      {round.scoreboard
+                        ? (
+                          <>
+                            成绩单 {round.scoreboard.presentationRevision > 0
+                              ? `v${round.scoreboard.presentationRevision}`
+                              : '原始 v0'}
+                            {' · '}
+                            {scoreboardSyncCopy(round.scoreboard.presentationSyncStatus)}
+                          </>
+                        )
+                        : '成绩单待生成'}
+                    </span>
+                  )}
+                  <PhaseBadge value={round.phase} />
+                </span>
               </button>
             ))}
             {!rounds.length && (
@@ -1583,6 +2090,152 @@ export default function GameOperationsCenter({ admin }: { admin: Admin }) {
                   本局已取消
                   {detail.cancelReason ? `：${detail.cancelReason}` : '，无庄家与领取记录。'}
                 </div>
+              )}
+
+              {detail.phase === 'FINISHED' && canViewScoreboard && (
+                <section className="ops-scoreboard-card">
+                  <header>
+                    <div>
+                      <small>不可变结算 · 可修订展示</small>
+                      <strong>本局成绩单</strong>
+                    </div>
+                    {scoreboard ? (
+                      <span
+                        className={`ops-scoreboard-sync ${scoreboard.presentationSyncStatus.toLowerCase()}`}
+                      >
+                        {scoreboard.presentationRevision > 0
+                          ? `已修改 v${scoreboard.presentationRevision} · `
+                          : ''}
+                        {scoreboardSyncCopy(scoreboard.presentationSyncStatus)}
+                      </span>
+                    ) : null}
+                  </header>
+                  {scoreboardLoading ? (
+                    <p className="ops-scoreboard-empty">正在读取成绩单…</p>
+                  ) : scoreboard ? (
+                    <>
+                      <div className="ops-scoreboard-finance-note">
+                        抢包、下注、净输赢和余额均来自结算快照，后台展示编辑无法改动。
+                      </div>
+                      <div className="ops-scoreboard-table-wrap">
+                        <table className="ops-scoreboard-table">
+                          <thead>
+                            <tr>
+                              <th>玩家</th>
+                              <th>抢</th>
+                              <th>下注</th>
+                              <th>牌型 / 结果</th>
+                              <th>应赔 / 实赔</th>
+                              <th>免赔</th>
+                              <th>抽水</th>
+                              <th>净输赢</th>
+                              <th>余额前 → 后</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {scoreboard.playerLines.map((line) => (
+                              <tr key={line.userId}>
+                                <td>
+                                  {scoreboardName(line)}
+                                  {scoreboard.presentation.playerAliases?.[line.userId] && (
+                                    <small>
+                                      展示 {scoreboardName(
+                                        line,
+                                        scoreboard.presentation.playerAliases[line.userId],
+                                      )}
+                                    </small>
+                                  )}
+                                </td>
+                                <td>RM {rm(line.claimCents ?? 0)}</td>
+                                <td>RM {rm(line.betCents ?? 0)}</td>
+                                <td>{scoreboardResultSummary(line)}</td>
+                                <td>
+                                  {scoreboardMoney(line.payableCents)}
+                                  {' / '}
+                                  {scoreboardMoney(line.paidCents)}
+                                </td>
+                                <td>{scoreboardMoney(line.shortfallCents)}</td>
+                                <td>{scoreboardMoney(line.rakeCents)}</td>
+                                <td className={BigInt(String(line.netCents ?? 0)) >= 0n ? 'positive' : 'negative'}>
+                                  {BigInt(String(line.netCents ?? 0)) > 0n ? '+' : ''}RM {rm(line.netCents ?? 0)}
+                                </td>
+                                <td>RM {rm(line.balanceBeforeCents ?? 0)} → {rm(line.balanceAfterCents ?? 0)}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                      <div className="ops-scoreboard-banker">
+                        <span>
+                          庄家 {scoreboardName(scoreboard.bankerSummary)}
+                          {scoreboard.presentation.bankerAlias && (
+                            <small>
+                              展示 {scoreboardName(
+                                scoreboard.bankerSummary,
+                                scoreboard.presentation.bankerAlias,
+                              )}
+                            </small>
+                          )}
+                        </span>
+                        <strong className={BigInt(String(scoreboard.bankerSummary.netCents ?? 0)) >= 0n ? 'positive' : 'negative'}>
+                          净输赢 {BigInt(String(scoreboard.bankerSummary.netCents ?? 0)) > 0n ? '+' : ''}RM {rm(scoreboard.bankerSummary.netCents ?? 0)}
+                        </strong>
+                        <small>
+                          {scoreboardHandLabels[String(scoreboard.bankerSummary.handType ?? '')]
+                            ?? scoreboard.bankerSummary.handType
+                            ?? '牌型 —'}
+                          {scoreboard.bankerSummary.points != null
+                            ? ` · ${scoreboard.bankerSummary.points} 点`
+                            : ''}
+                          {' · '}
+                          抢 RM {rm(scoreboard.bankerSummary.claimCents ?? 0)} ·
+                          余额 RM {rm(scoreboard.bankerSummary.balanceBeforeCents ?? 0)}
+                          {' → '}
+                          {rm(scoreboard.bankerSummary.balanceAfterCents ?? 0)}
+                          {' · '}
+                          毛输赢 {scoreboardMoney(scoreboard.bankerSummary.grossCents)}
+                          {' · '}
+                          上庄费 {scoreboardMoney(scoreboard.bankerSummary.fees?.seatFeeCents)}
+                          {' · '}
+                          服务费 {scoreboardMoney(scoreboard.bankerSummary.fees?.serviceFeeCents)}
+                          {' · '}
+                          红包费 {scoreboardMoney(scoreboard.bankerSummary.fees?.packetFeeCents)}
+                        </small>
+                      </div>
+                      {scoreboard.presentationSyncError && (
+                        <p className="ops-scoreboard-inline-error">
+                          {scoreboard.presentationSyncError}
+                        </p>
+                      )}
+                      <div className="ops-scoreboard-card-actions">
+                        <button type="button" onClick={() => setScoreboardOpen(true)}>
+                          {canOperate ? '查看与编辑成绩单' : '查看成绩单与历史'}
+                        </button>
+                        {canOperate && ['FAILED', 'PENDING'].includes(scoreboard.presentationSyncStatus) && (
+                          <button
+                            type="button"
+                            disabled={!!busy}
+                            onClick={() => void retryScoreboardSync()}
+                          >
+                            {busy === 'scoreboard-sync' ? '同步中…' : '重试同步'}
+                          </button>
+                        )}
+                      </div>
+                    </>
+                  ) : (
+                    <div className="ops-scoreboard-empty">
+                      <p>{scoreboardError || '本局尚未生成结构化成绩单。'}</p>
+                      {scoreboardError && (
+                        <button
+                          type="button"
+                          onClick={() => void loadScoreboard(detail.id, true)}
+                        >
+                          重新加载
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </section>
               )}
 
               {canMutateRound && (
@@ -1808,16 +2461,377 @@ export default function GameOperationsCenter({ admin }: { admin: Admin }) {
             <GameRulesAndConfig gameCode={selectedRoom.gameCode} />
           )}
           {activeTab === 'rewards' && (
-            <GameRewardsAdmin gameCode={selectedRoom.gameCode} />
+            <GameRewardsAdmin
+              gameCode={selectedRoom.gameCode}
+              canManageMoney={admin.role === 'SUPER' || admin.role === 'FINANCE'}
+            />
           )}
           {activeTab === 'leaderboards' && (
-            <GameLeaderboardsAdmin gameCode={selectedRoom.gameCode} />
+            <GameLeaderboardsAdmin
+              gameCode={selectedRoom.gameCode}
+              canManageMoney={admin.role === 'SUPER' || admin.role === 'FINANCE'}
+            />
           )}
           {activeTab === 'virtuals' && (
-            <VirtualPlayers roomId={selectedRoom.id} embedded />
+            <VirtualPlayers
+              roomId={selectedRoom.id}
+              embedded
+              canManageFunds={admin.role === 'SUPER' || admin.role === 'FINANCE'}
+              canOperate={admin.role === 'SUPER' || admin.role === 'OPERATOR'}
+            />
           )}
         </div>
       ) : null}
+      {scoreboardOpen && scoreboard && scoreboardDraft && (
+        <ScoreboardEditorModal
+          scoreboard={scoreboard}
+          draft={scoreboardDraft}
+          reason={scoreboardReason}
+          previewChunks={scoreboardPreviewChunks}
+          previewLoading={scoreboardPreviewLoading}
+          previewError={scoreboardPreviewError}
+          canOperate={canOperate}
+          busy={busy}
+          error={scoreboardError}
+          onDraft={setScoreboardDraft}
+          onReason={setScoreboardReason}
+          onClose={() => {
+            if (!busy) setScoreboardOpen(false);
+          }}
+          onSave={() => void saveScoreboard()}
+          onRetry={() => void retryScoreboardSync()}
+          onRestore={(revision) => void restoreScoreboardRevision(revision)}
+        />
+      )}
+    </div>
+  );
+}
+
+function ScoreboardEditorModal({
+  scoreboard,
+  draft,
+  reason,
+  previewChunks,
+  previewLoading,
+  previewError,
+  canOperate,
+  busy,
+  error,
+  onDraft,
+  onReason,
+  onClose,
+  onSave,
+  onRetry,
+  onRestore,
+}: {
+  scoreboard: ScoreboardData;
+  draft: ScoreboardDraft;
+  reason: string;
+  previewChunks: string[];
+  previewLoading: boolean;
+  previewError: string;
+  canOperate: boolean;
+  busy: string;
+  error: string;
+  onDraft: (draft: ScoreboardDraft) => void;
+  onReason: (reason: string) => void;
+  onClose: () => void;
+  onSave: () => void;
+  onRetry: () => void;
+  onRestore: (revision: number) => void;
+}) {
+  const dialogRef = useRef<HTMLElement | null>(null);
+  const closeButtonRef = useRef<HTMLButtonElement | null>(null);
+  const onCloseRef = useRef(onClose);
+  const busyRef = useRef(busy);
+  onCloseRef.current = onClose;
+  busyRef.current = busy;
+
+  useEffect(() => {
+    const previousOverflow = document.body.style.overflow;
+    const previousFocus =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    document.body.style.overflow = 'hidden';
+    closeButtonRef.current?.focus();
+    const handleDialogKeys = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !busyRef.current) {
+        onCloseRef.current();
+        return;
+      }
+      if (event.key !== 'Tab' || !dialogRef.current) return;
+      const focusable = Array.from(
+        dialogRef.current.querySelectorAll<HTMLElement>(
+          'button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), details > summary, [tabindex]:not([tabindex="-1"])',
+        ),
+      );
+      if (!focusable.length) return;
+      const first = focusable[0]!;
+      const last = focusable[focusable.length - 1]!;
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    window.addEventListener('keydown', handleDialogKeys);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener('keydown', handleDialogKeys);
+      previousFocus?.focus();
+    };
+  }, []);
+
+  function setPlayerField(
+    field: 'playerAliases' | 'playerNotes',
+    userId: string,
+    value: string,
+  ) {
+    onDraft({
+      ...draft,
+      [field]: {
+        ...draft[field],
+        [userId]: value,
+      },
+    });
+  }
+
+  return (
+    <div className="ops-scoreboard-overlay" role="presentation" onMouseDown={onClose}>
+      <section
+        ref={dialogRef}
+        className="ops-scoreboard-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="scoreboard-editor-title"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <header className="ops-scoreboard-modal-head">
+          <div>
+            <small>第 {scoreboard.seqNo} 局 · 展示修订 v{scoreboard.presentationRevision}</small>
+            <h2 id="scoreboard-editor-title">
+              {canOperate ? '成绩单编辑与小助手同步' : '成绩单与修订历史'}
+            </h2>
+            <p>仅标题、展示名、备注和页脚可修改；结算与钱包数据永久只读。</p>
+          </div>
+          <div className="ops-scoreboard-modal-state">
+            <span className={`ops-scoreboard-sync ${scoreboard.presentationSyncStatus.toLowerCase()}`}>
+              {scoreboardSyncCopy(scoreboard.presentationSyncStatus)}
+            </span>
+            <button
+              ref={closeButtonRef}
+              type="button"
+              aria-label="关闭成绩单编辑器"
+              onClick={onClose}
+            >
+              ×
+            </button>
+          </div>
+        </header>
+
+        {error && <div className="ops-scoreboard-modal-error" role="alert">{error}</div>}
+        {scoreboard.presentationSyncStatus === 'MESSAGE_EXPIRED' && (
+          <div className="ops-scoreboard-expired-note">
+            原成绩单已超过 7 天聊天保留期。展示版本会继续保存在后台，但不会把旧成绩单重新插入当前互动群。
+          </div>
+        )}
+
+        <div className="ops-scoreboard-modal-body">
+          <div className="ops-scoreboard-editor">
+            <section>
+              <header>
+                <span>01</span>
+                <div><strong>标题与玩家展示</strong><small>只影响小助手成绩单文字</small></div>
+              </header>
+              <label>
+                成绩单标题
+                <input
+                  value={draft.title}
+                  maxLength={120}
+                  disabled={!canOperate || !!busy}
+                  onChange={(event) => onDraft({ ...draft, title: event.target.value })}
+                  placeholder={`至尊牛牛 · 第 ${scoreboard.seqNo} 局成绩单`}
+                />
+              </label>
+              <div className="ops-scoreboard-player-edit-list">
+                {scoreboard.playerLines.map((line) => (
+                  <article key={line.userId}>
+                    <div>
+                      <strong>{scoreboardName(line)}</strong>
+                      <small>
+                        抢 RM {rm(line.claimCents ?? 0)} ·
+                        {line.isAllIn ? '梭哈' : '下注'} RM {rm(line.betCents ?? 0)}
+                      </small>
+                    </div>
+                    <label>
+                      展示名
+                      <input
+                        value={draft.playerAliases[line.userId] ?? ''}
+                        maxLength={80}
+                        disabled={!canOperate || !!busy}
+                        onChange={(event) =>
+                          setPlayerField('playerAliases', line.userId, event.target.value)
+                        }
+                        placeholder="留空沿用玩家昵称"
+                      />
+                    </label>
+                    <label>
+                      行备注
+                      <input
+                        value={draft.playerNotes[line.userId] ?? ''}
+                        maxLength={160}
+                        disabled={!canOperate || !!busy}
+                        onChange={(event) =>
+                          setPlayerField('playerNotes', line.userId, event.target.value)
+                        }
+                        placeholder="可选，仅作展示说明"
+                      />
+                    </label>
+                  </article>
+                ))}
+              </div>
+            </section>
+
+            <section>
+              <header>
+                <span>02</span>
+                <div><strong>庄家与页脚</strong><small>补充运营说明，不改变庄家输赢</small></div>
+              </header>
+              <div className="ops-scoreboard-two-fields">
+                <label>
+                  庄家展示名
+                  <input
+                    value={draft.bankerAlias}
+                    maxLength={80}
+                    disabled={!canOperate || !!busy}
+                    onChange={(event) => onDraft({ ...draft, bankerAlias: event.target.value })}
+                    placeholder={scoreboardName(scoreboard.bankerSummary)}
+                  />
+                </label>
+                <label>
+                  庄家备注
+                  <input
+                    value={draft.bankerNote}
+                    maxLength={160}
+                    disabled={!canOperate || !!busy}
+                    onChange={(event) => onDraft({ ...draft, bankerNote: event.target.value })}
+                    placeholder="可选"
+                  />
+                </label>
+              </div>
+              <label>
+                页脚说明
+                <textarea
+                  value={draft.footer}
+                  maxLength={500}
+                  disabled={!canOperate || !!busy}
+                  onChange={(event) => onDraft({ ...draft, footer: event.target.value })}
+                  placeholder="例如：本次仅更正展示名称，不影响结算与流水。"
+                />
+              </label>
+            </section>
+
+            {canOperate && (
+              <section className="ops-scoreboard-save-section">
+                <header>
+                  <span>03</span>
+                  <div><strong>保存依据</strong><small>原因会进入审计日志和修订历史</small></div>
+                </header>
+                <label>
+                  修改原因 <em>{reason.trim().length}/500</em>
+                  <textarea
+                    value={reason}
+                    maxLength={500}
+                    disabled={!!busy}
+                    onChange={(event) => onReason(event.target.value)}
+                    placeholder="至少 4 个字符，例如：应玩家本人要求更正展示昵称"
+                  />
+                </label>
+                <div className="ops-scoreboard-save-actions">
+                  {['FAILED', 'PENDING'].includes(scoreboard.presentationSyncStatus) && (
+                    <button type="button" disabled={!!busy} onClick={onRetry}>
+                      {busy === 'scoreboard-sync' ? '正在重试…' : '重试当前版本同步'}
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className="primary-action"
+                    disabled={!!busy || reason.trim().length < 4}
+                    onClick={onSave}
+                  >
+                    {busy === 'scoreboard-save' ? '保存并同步中…' : '保存并同步小助手'}
+                  </button>
+                </div>
+              </section>
+            )}
+          </div>
+
+          <aside className="ops-scoreboard-preview-column">
+            <section className="ops-scoreboard-preview">
+              <header>
+                <div><strong>互动群实时预览</strong><small>金融数字始终来自不可变结算快照</small></div>
+                <span>{previewLoading ? '格式化中…' : `${previewChunks.length} 条消息`}</span>
+              </header>
+              {previewError && (
+                <p className="ops-scoreboard-preview-error">{previewError}</p>
+              )}
+              {previewChunks.map((chunk, index) => (
+                <div className="ops-scoreboard-preview-chunk" key={`preview-${index}`}>
+                  <small>消息 {index + 1}/{previewChunks.length}</small>
+                  <pre>{chunk}</pre>
+                </div>
+              ))}
+              {!previewChunks.length && !previewLoading && !previewError && (
+                <p className="ops-scoreboard-preview-empty">暂无可预览内容</p>
+              )}
+            </section>
+
+            <section className="ops-scoreboard-revisions">
+              <header>
+                <div><strong>展示修订历史</strong><small>恢复旧版会创建新的修订版本</small></div>
+                <span>{scoreboard.revisions.length} 个版本</span>
+              </header>
+              {scoreboard.revisions.length ? (
+                <ol>
+                  {scoreboard.revisions.map((revision) => (
+                    <li key={revision.id}>
+                      <span className="ops-scoreboard-revision-dot" />
+                      <div>
+                        <strong>v{revision.revision}</strong>
+                        <p>{revision.reason}</p>
+                        <small>
+                          {new Date(revision.createdAt).toLocaleString('zh-MY')}
+                          {' · '}
+                          管理员 {revision.adminId.slice(-8)}
+                        </small>
+                        <details className="ops-scoreboard-revision-preview">
+                          <summary>查看 v{revision.revision} 消息预览</summary>
+                          <pre>{revision.renderedChunks.join('\n\n')}</pre>
+                        </details>
+                      </div>
+                      {canOperate && revision.revision !== scoreboard.presentationRevision && (
+                        <button
+                          type="button"
+                          disabled={!!busy || reason.trim().length < 4}
+                          onClick={() => onRestore(revision.revision)}
+                          title={reason.trim().length < 4 ? '请先填写本次恢复原因' : ''}
+                        >
+                          {busy === `scoreboard-restore-${revision.revision}` ? '恢复中…' : '恢复'}
+                        </button>
+                      )}
+                    </li>
+                  ))}
+                </ol>
+              ) : (
+                <p className="ops-scoreboard-empty">
+                  当前仍是系统原始展示，尚无人工修订。
+                </p>
+              )}
+            </section>
+          </aside>
+        </div>
+      </section>
     </div>
   );
 }

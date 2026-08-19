@@ -6,6 +6,7 @@
  * - 打赏：余额直接转入平台费用科目，群内播报感谢
  */
 import { AccountType, KycStatus, UserStatus } from '@prisma/client';
+import { randomInt } from 'node:crypto';
 import { prisma } from '../lib/prisma.js';
 import { serializable } from '../lib/transaction.js';
 import { GameError } from './game.js';
@@ -43,7 +44,7 @@ function randomShare(remainingCents: bigint, remainingCount: number): bigint {
   if (remainingCount <= 1) return remainingCents;
   const remaining = Number(remainingCents);
   const cap = Math.max(1, Math.floor((remaining / remainingCount) * 2));
-  const roll = 1 + Math.floor(Math.random() * cap);
+  const roll = randomInt(1, cap + 1);
   return BigInt(Math.min(remaining - (remainingCount - 1), Math.max(1, roll)));
 }
 
@@ -261,13 +262,26 @@ export async function tipSupport(params: {
   userId: string;
   amountCents: bigint;
   requestId: string;
+  paymentPin: string;
 }) {
   if (params.amountCents < TIP_MIN_CENTS || params.amountCents > TIP_MAX_CENTS) {
     throw new GameError('INVALID_TIP_AMOUNT');
   }
+  const idempotencyKey = `tip:${params.userId}:${params.requestId}`;
+  const replay = await prisma.ledgerEntry.findUnique({
+    where: { idempotencyKey: `${idempotencyKey}:out` },
+  });
+  if (replay) {
+    if (replay.amountCents !== params.amountCents) {
+      throw new GameError('IDEMPOTENCY_CONFLICT');
+    }
+    return { duplicate: true };
+  }
+
+  const paymentPinVersion = await verifyPaymentPin(params.userId, params.paymentPin);
+
   return serializable(async (tx) => {
-    const user = await requireMember(tx, params.userId, params.roomId);
-    const idempotencyKey = `tip:${params.userId}:${params.requestId}`;
+    await requireMember(tx, params.userId, params.roomId);
     const existing = await tx.ledgerEntry.findUnique({
       where: { idempotencyKey: `${idempotencyKey}:out` },
     });
@@ -275,8 +289,9 @@ export async function tipSupport(params: {
       if (existing.amountCents !== params.amountCents) {
         throw new GameError('IDEMPOTENCY_CONFLICT');
       }
-      return { nickname: user.nickname ?? user.uid, duplicate: true };
+      return { duplicate: true };
     }
+    await assertPaymentPinVersion(tx, params.userId, paymentPinVersion);
     await transfer(tx, {
       amountCents: params.amountCents,
       from: { userId: params.userId, accountType: AccountType.USER_AVAILABLE },
@@ -286,6 +301,6 @@ export async function tipSupport(params: {
       idempotencyKey,
       memo: '打赏客服',
     });
-    return { nickname: user.nickname ?? user.uid, duplicate: false };
+    return { duplicate: false };
   });
 }

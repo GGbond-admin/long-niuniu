@@ -3,7 +3,7 @@ import { createHash, timingSafeEqual } from 'node:crypto';
 import { compare, hash } from 'bcryptjs';
 import { z } from 'zod';
 import { prisma } from '../lib/prisma.js';
-import { setGameConfig } from '../services/gameConfig.js';
+import { deepMerge, setGameConfig } from '../services/gameConfig.js';
 import {
   decryptSecret,
   encryptSecret,
@@ -35,6 +35,7 @@ import {
   VPAY_TRADE_CODE_CATALOG,
 } from '../services/paymentProviders.js';
 import { queryVpayBalance } from '../services/vpay.js';
+import { resolveDepositCreditCents } from '../services/vpayDeposits.js';
 
 export function hashPassword(pw: string): Promise<string> {
   return hash(pw, 12);
@@ -88,7 +89,14 @@ const adminRoleSchema = z.enum(['SUPER', 'OPERATOR', 'REVIEWER', 'FINANCE']);
 function revealTargetSnapshot(value: unknown): unknown {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
   const snapshot = { ...(value as Record<string, unknown>) };
-  for (const field of ['duitnowId', 'name', 'bankAccount', 'holder']) {
+  for (const field of [
+    'duitnowId',
+    'name',
+    'bankAccount',
+    'holder',
+    'accountNo',
+    'accountName',
+  ]) {
     if (typeof snapshot[field] === 'string') snapshot[field] = safeDecryptSecret(snapshot[field]);
   }
   return snapshot;
@@ -116,7 +124,15 @@ export async function adminRoutes(app: FastifyInstance) {
         data: { passwordHash: await hashPassword(password) },
       });
     }
-    const token = app.jwt.sign({ sub: admin.id, role: admin.role, kind: 'admin' }, { expiresIn: '8h' });
+    const token = app.jwt.sign(
+      {
+        sub: admin.id,
+        role: admin.role,
+        kind: 'admin',
+        ver: admin.tokenVersion,
+      },
+      { expiresIn: '8h' },
+    );
     return { token, admin: { id: admin.id, username: admin.username, role: admin.role } };
   });
 
@@ -186,47 +202,62 @@ export async function adminRoutes(app: FastifyInstance) {
         })
         .refine((value) => Object.keys(value).length > 0)
         .parse(req.body);
-      const target = await prisma.admin.findUnique({ where: { id } });
-      if (!target) return reply.code(404).send({ error: 'ADMIN_NOT_FOUND' });
-      if (id === actorId && body.status === 'DISABLED') {
-        return reply.code(409).send({ error: 'CANNOT_DISABLE_SELF' });
-      }
-      const removesActiveSuper =
-        target.role === 'SUPER' &&
-        target.status === 'ACTIVE' &&
-        (body.role !== undefined && body.role !== 'SUPER' || body.status === 'DISABLED');
-      if (removesActiveSuper) {
-        const activeSupers = await prisma.admin.count({
-          where: { role: 'SUPER', status: 'ACTIVE' },
+      const passwordHash = body.password ? await hashPassword(body.password) : undefined;
+      try {
+        const updated = await serializable(async (tx) => {
+          const target = await tx.admin.findUnique({ where: { id } });
+          if (!target) throw new Error('ADMIN_NOT_FOUND');
+          if (id === actorId && body.status === 'DISABLED') {
+            throw new Error('CANNOT_DISABLE_SELF');
+          }
+          const removesActiveSuper =
+            target.role === 'SUPER' &&
+            target.status === 'ACTIVE' &&
+            ((body.role !== undefined && body.role !== 'SUPER')
+              || body.status === 'DISABLED');
+          if (removesActiveSuper) {
+            const activeSupers = await tx.admin.count({
+              where: { role: 'SUPER', status: 'ACTIVE' },
+            });
+            if (activeSupers <= 1) throw new Error('LAST_ACTIVE_SUPER');
+          }
+          const next = await tx.admin.update({
+            where: { id },
+            data: {
+              role: body.role,
+              status: body.status,
+              passwordHash,
+              tokenVersion: body.password ? { increment: 1 } : undefined,
+            },
+            select: { id: true, username: true, role: true, status: true, createdAt: true },
+          });
+          await tx.auditLog.create({
+            data: {
+              adminId: actorId,
+              action: 'admin_update',
+              target: id,
+              before: { role: target.role, status: target.status },
+              after: {
+                role: next.role,
+                status: next.status,
+                passwordChanged: !!body.password,
+              },
+              ip: req.ip,
+            },
+          });
+          return next;
         });
-        if (activeSupers <= 1) {
-          return reply.code(409).send({ error: 'LAST_ACTIVE_SUPER' });
+        return { ok: true, item: updated };
+      } catch (error) {
+        const code = (error as Error).message;
+        if (code === 'ADMIN_NOT_FOUND') {
+          return reply.code(404).send({ error: code });
         }
+        if (code === 'CANNOT_DISABLE_SELF' || code === 'LAST_ACTIVE_SUPER') {
+          return reply.code(409).send({ error: code });
+        }
+        throw error;
       }
-      const updated = await prisma.admin.update({
-        where: { id },
-        data: {
-          role: body.role,
-          status: body.status,
-          passwordHash: body.password ? await hashPassword(body.password) : undefined,
-        },
-        select: { id: true, username: true, role: true, status: true, createdAt: true },
-      });
-      await prisma.auditLog.create({
-        data: {
-          adminId: actorId,
-          action: 'admin_update',
-          target: id,
-          before: { role: target.role, status: target.status },
-          after: {
-            role: updated.role,
-            status: updated.status,
-            passwordChanged: !!body.password,
-          },
-          ip: req.ip,
-        },
-      });
-      return { ok: true, item: updated };
     },
   );
 
@@ -363,7 +394,7 @@ export async function adminRoutes(app: FastifyInstance) {
 
   // ── 游戏配置（06 文档 §11 配置清单） ──
   app.get('/api/admin/games/:gameCode/config', {
-    preHandler: [app.authAdmin, app.requireAdminRoles('SUPER', 'OPERATOR')],
+    preHandler: [app.authAdmin, app.requireAdminRoles('SUPER', 'OPERATOR', 'FINANCE')],
   }, async (req) => {
     const { gameCode } = z.object({ gameCode: gameCodeSchema }).parse(req.params);
     const rows = await prisma.gameConfig.findMany({
@@ -381,15 +412,23 @@ export async function adminRoutes(app: FastifyInstance) {
   });
 
   app.put('/api/admin/games/:gameCode/config', {
-    preHandler: [app.authAdmin, app.requireAdminRoles('SUPER', 'OPERATOR')],
-  }, async (req) => {
+    preHandler: [app.authAdmin, app.requireAdminRoles('SUPER', 'OPERATOR', 'FINANCE')],
+  }, async (req, reply) => {
     const adminId = (req.user as { sub: string }).sub;
     const { gameCode } = z.object({ gameCode: gameCodeSchema }).parse(req.params);
     const { key, value } = configSchema.parse(req.body);
-    const validated = validateGameConfig(key as GameConfigKey, value);
+    const role = (req.user as { role?: string }).role;
+    const financialKey = key === 'fees' || key === 'rebate';
+    if ((financialKey && role === 'OPERATOR') || (!financialKey && role === 'FINANCE')) {
+      return reply.code(403).send({ error: 'FORBIDDEN' });
+    }
     const before = await prisma.gameConfig.findUnique({
       where: { gameCode_key: { gameCode, key } },
     });
+    const validated = validateGameConfig(
+      key as GameConfigKey,
+      deepMerge(before?.value ?? {}, value),
+    );
     await setGameConfig(gameCode, key, validated, adminId);
     await prisma.auditLog.create({
       data: {
@@ -406,7 +445,7 @@ export async function adminRoutes(app: FastifyInstance) {
 
   /** @deprecated 管理端旧入口；固定映射至尊牛牛，避免无游戏上下文写入。 */
   app.get('/api/admin/config', {
-    preHandler: [app.authAdmin, app.requireAdminRoles('SUPER', 'OPERATOR')],
+    preHandler: [app.authAdmin, app.requireAdminRoles('SUPER', 'OPERATOR', 'FINANCE')],
   }, async () => {
     const rows = await prisma.gameConfig.findMany({
       where: { gameCode: SUPREME_NIUNIU_GAME_CODE },
@@ -415,11 +454,24 @@ export async function adminRoutes(app: FastifyInstance) {
   });
 
   app.put('/api/admin/config', {
-    preHandler: [app.authAdmin, app.requireAdminRoles('SUPER', 'OPERATOR')],
+    preHandler: [app.authAdmin, app.requireAdminRoles('SUPER', 'OPERATOR', 'FINANCE')],
   }, async (req, reply) => {
     const adminId = (req.user as { sub: string }).sub;
     const { key, value } = configSchema.parse(req.body);
-    const validated = validateGameConfig(key as GameConfigKey, value);
+    const role = (req.user as { role?: string }).role;
+    const financialKey = key === 'fees' || key === 'rebate';
+    if ((financialKey && role === 'OPERATOR') || (!financialKey && role === 'FINANCE')) {
+      return reply.code(403).send({ error: 'FORBIDDEN' });
+    }
+    const before = await prisma.gameConfig.findUnique({
+      where: {
+        gameCode_key: { gameCode: SUPREME_NIUNIU_GAME_CODE, key },
+      },
+    });
+    const validated = validateGameConfig(
+      key as GameConfigKey,
+      deepMerge(before?.value ?? {}, value),
+    );
     await setGameConfig(SUPREME_NIUNIU_GAME_CODE, key, validated, adminId);
     await prisma.auditLog.create({
       data: {
@@ -450,7 +502,7 @@ export async function adminRoutes(app: FastifyInstance) {
       return {
         items: items.map(({ payeeSnapshot, ...item }) => ({
           ...item,
-          payeeSnapshot,
+          payeeSnapshot: revealTargetSnapshot(payeeSnapshot),
         })),
       };
     }
@@ -473,14 +525,24 @@ export async function adminRoutes(app: FastifyInstance) {
     if (!order || order.status !== 'PENDING') return reply.code(409).send({ error: 'INVALID_ORDER' });
 
     if (body.action === 'complete') {
+      const creditAmountCents = resolveDepositCreditCents(order);
+      if (creditAmountCents <= 0n) {
+        return reply.code(409).send({ error: 'INVALID_PAID_AMOUNT' });
+      }
       const completed = await serializable(async (tx) => {
         const updated = await tx.depositOrder.updateMany({
           where: { id, status: 'PENDING' },
-          data: { status: 'COMPLETED', reviewedBy: adminId, reviewedAt: new Date(), rejectReason: null },
+          data: {
+            status: 'COMPLETED',
+            reviewedBy: adminId,
+            reviewedAt: new Date(),
+            rejectReason: null,
+            creditedAmountCents: creditAmountCents,
+          },
         });
         if (updated.count !== 1) return false;
         await transfer(tx, {
-          amountCents: order.amountCents,
+          amountCents: creditAmountCents,
           from: { accountType: 'ADJUST_CLEARING' },
           to: { userId: order.userId, accountType: 'USER_AVAILABLE' },
           refType: 'deposit',
@@ -488,7 +550,21 @@ export async function adminRoutes(app: FastifyInstance) {
           idempotencyKey: `deposit:${id}`,
           operatorId: adminId,
         });
-        await tx.auditLog.create({ data: { adminId, action: 'deposit_complete', target: id } });
+        await tx.auditLog.create({
+          data: {
+            adminId,
+            action: 'deposit_complete',
+            target: id,
+            after: {
+              orderedCents: String(order.amountCents),
+              paidCents:
+                order.paidAmountCents === null
+                  ? null
+                  : String(order.paidAmountCents),
+              creditedCents: String(creditAmountCents),
+            },
+          },
+        });
         return true;
       });
       if (!completed) return reply.code(409).send({ error: 'INVALID_ORDER' });
@@ -504,7 +580,9 @@ export async function adminRoutes(app: FastifyInstance) {
       });
       if (!rejected) return reply.code(409).send({ error: 'INVALID_ORDER' });
     }
-    const amount = formatCents(order.amountCents);
+    const amount = formatCents(
+      body.action === 'complete' ? resolveDepositCreditCents(order) : order.amountCents,
+    );
     if (body.action === 'complete') {
       app.pushService?.notifyDepositCompleted(order.userId, amount).catch(() => undefined);
     } else {
@@ -703,7 +781,7 @@ export async function adminRoutes(app: FastifyInstance) {
   });
 
   // ── 充值收款账户（可多账户，切换当前展示） ──
-  const payeeManagers = [app.authAdmin, app.requireAdminRoles('SUPER', 'FINANCE', 'OPERATOR')];
+  const payeeManagers = [app.authAdmin, app.requireAdminRoles('SUPER', 'FINANCE')];
 
   const payeeBodySchema = z.object({
     bankName: z.string().trim().min(1).max(80),

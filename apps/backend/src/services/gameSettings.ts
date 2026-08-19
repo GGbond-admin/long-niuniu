@@ -75,7 +75,7 @@ export function isAssistantEnabledSync(roomId: string): boolean {
     expiresAt: 0,
   };
   if (gate.expiresAt <= Date.now()) {
-    void refreshAssistantGate(roomId);
+    void refreshAssistantGate(roomId).catch(() => undefined);
   }
   return gate.enabled;
 }
@@ -186,7 +186,7 @@ export const DEFAULT_MESSAGE_TEMPLATES: MessageTemplates = {
   bankerSelected:
     '【庄家锁定】\n恭喜 {{banker}} 拿下第 {{seqNo}} 局庄家！\n本局庄钱：RM {{pot}}\n\n庄钱已冻结入池，闲家准备开注。',
   betStart:
-    '【第 {{seqNo}} 局 · 开注】\n\n本局庄家：{{banker}}\n庄钱：RM {{pot}}\n下注时长：{{betSeconds}} 秒\n\n普通下注：RM {{betMin}} ~ {{betMax}}\n梭哈范围：RM {{shMin}} ~ {{shMax}}\n\n操作说明：\n· 发送金额 = 下注\n· 发送 sh金额 = 梭哈（如 sh200）\n· 发送 0 = 撤回本局下注\n\n时间一到立刻封盘，请抓紧出手。',
+    '【第 {{seqNo}} 局 · 开注】\n\n本局庄家：{{banker}}\n庄钱：RM {{pot}}\n下注时长：{{betSeconds}} 秒\n\n普通下注：RM {{betMin}} ~ {{betMax}}\n梭哈：最低 RM {{shMin}}，上限为当前余额\n\n操作说明：\n· 发送金额 = 下注\n· 发送 sh金额 = 梭哈（如 sh200）\n· 发送 0 = 撤回本局下注\n\n时间一到立刻封盘，请抓紧出手。',
   sealed:
     '【封盘 · 等待发包】\n下注已截止。\n请各位留在本页，勿退出，以免错过抢包。\n小助手正在准备本局红包…',
   sealedSummary:
@@ -195,9 +195,9 @@ export const DEFAULT_MESSAGE_TEMPLATES: MessageTemplates = {
     '【庄家投骰】\n请庄家 {{banker}} 在 60 秒内投出 3 颗骰子。\n投骰后进入发包与抢包流程。\n如需重开本局，可发送 /重推。',
   betCountdown: '下注倒计时 · 还剩 {{remaining}} 秒\n未出手的抓紧了，时间到立刻封盘！',
   claimStart:
-    '【红包已发出 · 开始抢包】\n仅本局庄家与已下注闲家可领。\n倒计时 {{claimSeconds}} 秒，过期无法再领。\n点开红包立刻抢，手慢无！',
+    '【开始抢包 · {{claimSeconds}} 秒】\n仅庄家与已下注闲家可领，过期即止。',
   claimWarning:
-    '【领包提醒 · {{claimSeconds}} 秒】\n请尽快领取本局红包。\n超时未领将按尾包规则由系统补录，结果不得争议。\n恶意卡包、拖延认额，将按平台规则处理。',
+    '【领包提醒】\n未领玩家请尽快，超时按尾包规则补录。',
   claimCountdown:
     '抢包进行中 · 还剩 {{remaining}} 秒\n仅本局庄家与已下注闲家可领，过期即止。',
   claimExpiredEdit: '【抢包结束】\n红包已过期，正在核对领取明细，请稍候成绩单。',
@@ -215,6 +215,10 @@ export const DEFAULT_MESSAGE_TEMPLATES: MessageTemplates = {
 
 const LEGACY_BID_FINAL_LIST =
   '【竞标结束 · 最终名单】\n\n本局出价名单：\n{{bidList}}\n\n最高有效出价：{{leader}} · RM {{high}}';
+const LEGACY_CLAIM_START =
+  '【红包已发出 · 开始抢包】\n仅本局庄家与已下注闲家可领。\n倒计时 {{claimSeconds}} 秒，过期无法再领。\n点开红包立刻抢，手慢无！';
+const LEGACY_CLAIM_WARNING =
+  '【领包提醒 · {{claimSeconds}} 秒】\n请尽快领取本局红包。\n超时未领将按尾包规则由系统补录，结果不得争议。\n恶意卡包、拖延认额，将按平台规则处理。';
 
 function defaultMessageTemplates(gameCode: string): MessageTemplates {
   const game = GAME_CATALOG[gameCode as SupportedGameCode];
@@ -396,6 +400,18 @@ export async function ensureGameConfigDefaults(): Promise<void> {
               bidFinalList: DEFAULT_MESSAGE_TEMPLATES.bidFinalList,
             };
           }
+          if (raw?.claimStart === LEGACY_CLAIM_START) {
+            merged = {
+              ...merged,
+              claimStart: DEFAULT_MESSAGE_TEMPLATES.claimStart,
+            };
+          }
+          if (raw?.claimWarning === LEGACY_CLAIM_WARNING) {
+            merged = {
+              ...merged,
+              claimWarning: DEFAULT_MESSAGE_TEMPLATES.claimWarning,
+            };
+          }
         }
         return prisma.gameConfig.upsert({
           where: { gameCode_key: { gameCode, key } },
@@ -492,7 +508,46 @@ const configSchemas = {
         .max(20)
         .optional(),
     })
-    .strict(),
+    .strict()
+    .superRefine((value, ctx) => {
+      if (
+        value.betMinCents !== undefined
+        && value.shMinCents !== undefined
+        && value.betMinCents > value.shMinCents
+      ) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'BET_MIN_EXCEEDS_ALL_IN_MIN',
+          path: ['betMinCents'],
+        });
+      }
+      const tiers = value.playerCoefTiers;
+      if (!tiers) return;
+      for (let index = 1; index < tiers.length; index += 1) {
+        if (tiers[index]!.maxPlayers <= tiers[index - 1]!.maxPlayers) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: 'PLAYER_TIERS_MUST_ASCEND',
+            path: ['playerCoefTiers', index, 'maxPlayers'],
+          });
+        }
+      }
+      const terminalIndex = tiers.findIndex((tier) => tier.maxPlayers >= 100);
+      if (terminalIndex >= 0 && terminalIndex !== tiers.length - 1) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'PLAYER_TIER_AFTER_TERMINAL',
+          path: ['playerCoefTiers', terminalIndex + 1],
+        });
+      }
+      if (tiers[tiers.length - 1]!.maxPlayers < 100) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'PLAYER_TIERS_MUST_COVER_ROOM_CAPACITY',
+          path: ['playerCoefTiers', tiers.length - 1, 'maxPlayers'],
+        });
+      }
+    }),
   fees: z
     .object({
       bankerSeatFeeRatio: z.number().min(0).max(1).optional(),
@@ -528,14 +583,40 @@ const configSchemas = {
       tailPackerBankerName: z.string().min(1).max(80).optional(),
       tailPackerPlayerName: z.string().min(1).max(80).optional(),
     })
-    .strict(),
+    .strict()
+    .superRefine((value, ctx) => {
+      if (
+        value.bankerBidMinCents !== undefined
+        && value.bankerBidMaxCents !== undefined
+        && value.bankerBidMinCents > value.bankerBidMaxCents
+      ) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'BANKER_BID_MIN_EXCEEDS_MAX',
+          path: ['bankerBidMinCents'],
+        });
+      }
+    }),
   rewards: z
     .object({
       minBetCents: z.number().int().min(1).max(100_000_000).optional(),
       minAllInCents: z.number().int().min(1).max(100_000_000).optional(),
       bankerInstantAmountCents: z.number().int().min(1).max(1_000_000).optional(),
     })
-    .strict(),
+    .strict()
+    .superRefine((value, ctx) => {
+      if (
+        value.minBetCents !== undefined
+        && value.minAllInCents !== undefined
+        && value.minBetCents > value.minAllInCents
+      ) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'REWARD_BET_MIN_EXCEEDS_ALL_IN_MIN',
+          path: ['minBetCents'],
+        });
+      }
+    }),
   leaderboard: z
     .object({
       topN: z.number().int().min(1).max(500).optional(),
@@ -590,6 +671,27 @@ const configSchemas = {
 
 export type GameConfigKey = keyof typeof configSchemas;
 
+const validationDefaults: Record<GameConfigKey, object> = {
+  hand: DEFAULT_HAND_CONFIG,
+  betting: DEFAULT_BETTING_CONFIG,
+  fees: DEFAULT_FEE_CONFIG,
+  rebate: DEFAULT_REBATE_CONFIG,
+  round: DEFAULT_ROUND_CONFIG,
+  rewards: DEFAULT_REWARD_RULES,
+  leaderboard: {
+    topN: 100,
+    maskNames: true,
+    pointsMetric: 'turnover',
+    enabledTypes: ['points', 'hands', 'banker'],
+    labels: {
+      points: '积分榜',
+      hands: '牌型榜',
+      banker: '打桩榜',
+    },
+  },
+  messages: DEFAULT_MESSAGE_TEMPLATES,
+};
+
 export function validateGameConfig(key: GameConfigKey, value: unknown): object {
-  return configSchemas[key].parse(value);
+  return configSchemas[key].parse(deepMerge(validationDefaults[key], value));
 }

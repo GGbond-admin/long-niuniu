@@ -1,6 +1,20 @@
+import { config as loadEnv } from 'dotenv';
+import { fileURLToPath } from 'node:url';
+import { resolve } from 'node:path';
 import { DEFAULT_TNG_PACKET_HOSTS } from './lib/tngPacketUrl.js';
 
+// README 要求在 apps/backend 维护 .env；不能依赖启动命令的 cwd。
+// 已由部署平台注入的变量优先，不覆盖。
+loadEnv({
+  path: resolve(fileURLToPath(new URL('.', import.meta.url)), '../.env'),
+  quiet: true,
+});
+
 const nodeEnv = process.env.NODE_ENV ?? 'development';
+const trustedProxyCidrs = (process.env.TRUSTED_PROXY_CIDRS ?? '')
+  .split(',')
+  .map((value) => value.trim())
+  .filter(Boolean);
 
 function resolveTngPacketHosts(): string[] {
   const fromEnv = (process.env.TNG_PACKET_HOSTS ?? '')
@@ -28,8 +42,9 @@ export const env = {
     .map((origin) => origin.trim())
     .filter(Boolean),
   seedAdminUsername: process.env.SEED_ADMIN_USERNAME ?? 'admin',
-  seedAdminPassword: process.env.SEED_ADMIN_PASSWORD ?? (nodeEnv === 'development' ? 'admin123' : ''),
+  seedAdminPassword: process.env.SEED_ADMIN_PASSWORD ?? '',
   trustProxy: process.env.TRUST_PROXY === 'true',
+  trustedProxyCidrs,
   uploadDir: process.env.UPLOAD_DIR ?? './uploads',
   publicApiUrl: process.env.PUBLIC_API_URL ?? `http://localhost:${process.env.PORT ?? '8080'}`,
   tngPacketHosts: resolveTngPacketHosts(),
@@ -63,6 +78,11 @@ if (nodeEnv === 'production') {
   }
   if (env.corsOrigins.length === 0 || env.corsOrigins.some((origin) => origin === '*')) {
     throw new Error('CORS_ORIGINS must contain explicit trusted origins in production');
+  }
+  if (env.trustProxy && env.trustedProxyCidrs.length === 0) {
+    throw new Error(
+      'TRUSTED_PROXY_CIDRS must list the reverse proxy addresses when TRUST_PROXY=true',
+    );
   }
   // 手机端回调可选：未配置则整套 ingest 接口关闭；一旦配置就必须足够强且两者独立
   if (env.tngIngestToken || env.tngIngestSecret) {

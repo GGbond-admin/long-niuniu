@@ -1,5 +1,5 @@
 import { RoundPhase } from '@prisma/client';
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyReply } from 'fastify';
 import type { WebSocket } from 'ws';
 import { z } from 'zod';
 import { HAND_LABEL } from '../engine/hand.js';
@@ -76,8 +76,25 @@ import {
   buildRoundAnnounceMessages,
   type AnnounceBanner,
 } from '../services/roomAnnounce.js';
+import {
+  getScoreboardPresentation,
+  previewScoreboardPresentation,
+  restoreAndSyncScoreboardPresentation,
+  saveAndSyncScoreboardPresentation,
+  scoreboardPresentationInput,
+  scoreboardPresentationMutationInput,
+  ScoreboardPresentationError,
+  syncScoreboardPresentation,
+} from '../services/scoreboardPresentation.js';
 
 const idSchema = z.string().cuid();
+
+function scoreboardErrorReply(reply: FastifyReply, error: unknown) {
+  if (error instanceof ScoreboardPresentationError) {
+    return reply.code(error.statusCode).send({ error: error.code });
+  }
+  throw error;
+}
 // 兼容早期种子数据的可读房间 / 牌局 ID，同时限制为安全 URL 标识符。
 const resourceIdSchema = z.string().min(1).max(100).regex(/^[A-Za-z0-9_-]+$/);
 const amountSchema = z.string().regex(/^[1-9]\d*$/);
@@ -158,6 +175,14 @@ async function requireSupportedRound(roundId: string) {
   });
   if (!round) throw new GameError('GAME_NOT_SUPPORTED');
   return round;
+}
+
+async function hasActiveRoomMembership(userId: string, roomId: string): Promise<boolean> {
+  const member = await prisma.roomMember.findUnique({
+    where: { roomId_userId: { roomId, userId } },
+    select: { status: true },
+  });
+  return member?.status === 'ACTIVE';
 }
 
 function emitTransition(
@@ -297,10 +322,14 @@ export async function gameRoutes(app: FastifyInstance) {
     };
   });
 
-  app.get('/api/game/rooms/:id/round', { preHandler: [app.authUser] }, async (req, reply) => {
+  app.get('/api/game/rooms/:id/round', { preHandler: [app.authUser, app.requireKyc] }, async (req, reply) => {
     const { id } = req.params as { id: string };
+    const userId = (req.user as { sub: string }).sub;
     const room = await supportedRoomById(id);
     if (!room) return reply.code(404).send({ error: 'GAME_NOT_SUPPORTED' });
+    if (!(await hasActiveRoomMembership(userId, id))) {
+      return reply.code(403).send({ error: 'NOT_IN_ROOM' });
+    }
     const round = await currentRoundForRoom(id);
     if (!round) return { round: null };
     return {
@@ -320,13 +349,15 @@ export async function gameRoutes(app: FastifyInstance) {
   });
 
   /** 红包结束后仍可点开查看抢包/认额名单（微信式手气榜） */
-  app.get('/api/game/packets/:id', { preHandler: [app.authUser] }, async (req, reply) => {
+  app.get('/api/game/packets/:id', { preHandler: [app.authUser, app.requireKyc] }, async (req, reply) => {
     const { id } = req.params as { id: string };
+    const userId = (req.user as { sub: string }).sub;
     const packet = await prisma.packet.findUnique({
       where: { id },
       include: {
         round: {
           select: {
+            roomId: true,
             bankerId: true,
             phase: true,
             claims: {
@@ -340,6 +371,9 @@ export async function gameRoutes(app: FastifyInstance) {
       },
     });
     if (!packet) return reply.code(404).send({ error: 'PACKET_NOT_FOUND' });
+    if (!(await hasActiveRoomMembership(userId, packet.round.roomId))) {
+      return reply.code(403).send({ error: 'NOT_IN_ROOM' });
+    }
     return {
       id: packet.id,
       channel: packet.channel,
@@ -408,7 +442,11 @@ export async function adminGameRoutes(app: FastifyInstance) {
   const operations = [app.authAdmin, app.requireAdminRoles('SUPER', 'OPERATOR')];
   const roomObservers = [
     app.authAdmin,
-    app.requireAdminRoles('SUPER', 'OPERATOR', 'FINANCE'),
+    app.requireAdminRoles('SUPER', 'OPERATOR', 'REVIEWER', 'FINANCE'),
+  ];
+  const scoreboardObservers = [
+    app.authAdmin,
+    app.requireAdminRoles('SUPER', 'OPERATOR', 'REVIEWER'),
   ];
 
   /** 短时观察票据：避免把 8 小时 admin JWT 放进 WebSocket query。 */
@@ -472,7 +510,7 @@ export async function adminGameRoutes(app: FastifyInstance) {
     if (
       !admin ||
       admin.status !== 'ACTIVE' ||
-      !['SUPER', 'OPERATOR', 'FINANCE'].includes(admin.role)
+      !['SUPER', 'OPERATOR', 'REVIEWER', 'FINANCE'].includes(admin.role)
     ) {
       socket.close(4403, 'FORBIDDEN');
       return;
@@ -494,7 +532,7 @@ export async function adminGameRoutes(app: FastifyInstance) {
       if (
         !current ||
         current.status !== 'ACTIVE' ||
-        !['SUPER', 'OPERATOR', 'FINANCE'].includes(current.role)
+        !['SUPER', 'OPERATOR', 'REVIEWER', 'FINANCE'].includes(current.role)
       ) {
         socket.close(4403, 'FORBIDDEN');
         return false;
@@ -1162,6 +1200,10 @@ export async function adminGameRoutes(app: FastifyInstance) {
   });
 
   app.get('/api/admin/rounds', { preHandler: roomObservers }, async (req) => {
+    const adminRole = (req.user as { role?: string }).role;
+    const canReadScoreboard = ['SUPER', 'OPERATOR', 'REVIEWER'].includes(
+      adminRole ?? '',
+    );
     const query = z
       .object({
         phase: z.nativeEnum(RoundPhase).optional(),
@@ -1195,6 +1237,14 @@ export async function adminGameRoutes(app: FastifyInstance) {
         include: {
           room: { select: { title: true, gameCode: true } },
           packet: true,
+          scoreboard: {
+            select: {
+              id: true,
+              presentationRevision: true,
+              presentationSyncStatus: true,
+              presentationSyncError: true,
+            },
+          },
           _count: { select: { bids: true, bets: true, claims: true, settlements: true } },
         },
         orderBy: [{ seqNo: 'desc' }, { createdAt: 'desc' }],
@@ -1223,6 +1273,7 @@ export async function adminGameRoutes(app: FastifyInstance) {
     return {
       items: items.map((item) => ({
         ...item,
+        scoreboard: canReadScoreboard ? item.scoreboard : null,
         banker: item.bankerId ? bankerById.get(item.bankerId) ?? null : null,
         room: {
           ...item.room,
@@ -1238,6 +1289,10 @@ export async function adminGameRoutes(app: FastifyInstance) {
 
   app.get('/api/admin/rounds/:id', { preHandler: roomObservers }, async (req, reply) => {
     const { id } = req.params as { id: string };
+    const adminRole = (req.user as { role?: string }).role;
+    const canReadScoreboard = ['SUPER', 'OPERATOR', 'REVIEWER'].includes(
+      adminRole ?? '',
+    );
     const round = await prisma.round.findFirst({
       where: {
         id,
@@ -1250,7 +1305,7 @@ export async function adminGameRoutes(app: FastifyInstance) {
         claims: { include: { user: { select: { uid: true, nickname: true } } } },
         packet: true,
         settlements: true,
-        scoreboard: true,
+        ...(canReadScoreboard ? { scoreboard: true } : {}),
         events: { orderBy: { createdAt: 'asc' } },
       },
     });
@@ -1263,6 +1318,122 @@ export async function adminGameRoutes(app: FastifyInstance) {
       })),
     };
   });
+
+  app.get(
+    '/api/admin/rounds/:id/scoreboard',
+    { preHandler: scoreboardObservers },
+    async (req, reply) => {
+      const { id } = z.object({ id: resourceIdSchema }).parse(req.params);
+      try {
+        return { scoreboard: await getScoreboardPresentation(id) };
+      } catch (error) {
+        return scoreboardErrorReply(reply, error);
+      }
+    },
+  );
+
+  app.post(
+    '/api/admin/rounds/:id/scoreboard/preview',
+    { preHandler: operations },
+    async (req, reply) => {
+      const { id } = z.object({ id: resourceIdSchema }).parse(req.params);
+      const { presentation } = z
+        .object({ presentation: scoreboardPresentationInput })
+        .strict()
+        .parse(req.body);
+      try {
+        return await previewScoreboardPresentation(id, presentation);
+      } catch (error) {
+        return scoreboardErrorReply(reply, error);
+      }
+    },
+  );
+
+  app.patch(
+    '/api/admin/rounds/:id/scoreboard',
+    { preHandler: operations },
+    async (req, reply) => {
+      const { id } = z.object({ id: resourceIdSchema }).parse(req.params);
+      const adminId = (req.user as { sub: string }).sub;
+      const input = scoreboardPresentationMutationInput.parse(req.body);
+      try {
+        return {
+          ok: true,
+          scoreboard: await saveAndSyncScoreboardPresentation({
+            roundId: id,
+            adminId,
+            ip: req.ip,
+            input,
+          }),
+        };
+      } catch (error) {
+        return scoreboardErrorReply(reply, error);
+      }
+    },
+  );
+
+  app.post(
+    '/api/admin/rounds/:id/scoreboard/sync',
+    { preHandler: operations },
+    async (req, reply) => {
+      const { id } = z.object({ id: resourceIdSchema }).parse(req.params);
+      const adminId = (req.user as { sub: string }).sub;
+      try {
+        const scoreboard = await syncScoreboardPresentation(id, adminId);
+        await prisma.auditLog.create({
+          data: {
+            adminId,
+            action: 'scoreboard_presentation_sync_retry',
+            target: id,
+            after: {
+              revision: scoreboard.presentationRevision,
+              syncStatus: scoreboard.presentationSyncStatus,
+            },
+            ip: req.ip,
+          },
+        });
+        return { ok: true, scoreboard };
+      } catch (error) {
+        return scoreboardErrorReply(reply, error);
+      }
+    },
+  );
+
+  app.post(
+    '/api/admin/rounds/:id/scoreboard/revisions/:revision/restore',
+    { preHandler: operations },
+    async (req, reply) => {
+      const { id, revision } = z
+        .object({
+          id: resourceIdSchema,
+          revision: z.coerce.number().int().min(0),
+        })
+        .parse(req.params);
+      const body = z
+        .object({
+          expectedRevision: z.number().int().min(1),
+          reason: z.string().trim().min(4).max(500),
+        })
+        .strict()
+        .parse(req.body);
+      const adminId = (req.user as { sub: string }).sub;
+      try {
+        return {
+          ok: true,
+          scoreboard: await restoreAndSyncScoreboardPresentation({
+            roundId: id,
+            revision,
+            expectedRevision: body.expectedRevision,
+            reason: body.reason,
+            adminId,
+            ip: req.ip,
+          }),
+        };
+      } catch (error) {
+        return scoreboardErrorReply(reply, error);
+      }
+    },
+  );
 
   app.post('/api/admin/rooms/:id/start', { preHandler: operations }, async (req) => {
     const { id } = req.params as { id: string };

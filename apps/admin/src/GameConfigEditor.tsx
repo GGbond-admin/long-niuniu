@@ -142,7 +142,7 @@ function HandForm({
   const normal = value.normalMultipliers ?? {};
   return (
     <>
-      <Section title="特殊牌型倍数（0.01免死；全表最高倍数=赔付预留倍数，默认17倍）">
+      <Section title="特殊牌型倍数（0.01免死；全表最高倍数=普通下注赔付预留倍数，默认17倍；梭哈固定1:1、预留1倍）">
         {HAND_TYPES.map((item) => (
           <Field key={item.key} label={item.label} hint="倍">
             <input
@@ -247,7 +247,7 @@ function BettingForm({
             }
           />
         </Field>
-        <Field label="梭哈最低" hint="RM">
+        <Field label="梭哈最低" hint="RM；梭哈固定 1:1，最高额等于玩家当前余额，不再按庄钱封顶">
           <input
             inputMode="decimal"
             value={value.shMinCents ?? ''}
@@ -266,7 +266,7 @@ function BettingForm({
             }
           />
         </Field>
-        <Field label="梭哈比例" hint="% ，例如 5 表示庄钱的 5%">
+        <Field label="梭哈比例" hint="已停用：梭哈不再按庄钱比例封顶，此值仅保留兼容旧配置">
           <input
             value={value.shRatio ?? ''}
             onChange={(event) =>

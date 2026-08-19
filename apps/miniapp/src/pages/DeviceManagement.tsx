@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { api } from '../api';
 import { IconDevice, IconShield, IconSupport } from '../components/Icons';
+import { formatDateTime } from '../lib/datetime';
 import { goBack } from '../lib/nav';
 
 type DeviceResult = Awaited<ReturnType<typeof api.deviceSettings>>;
@@ -52,7 +53,7 @@ export default function DeviceManagement() {
           <div><dt>设备标识</dt><dd>{device?.maskedId ?? '—'}</dd></div>
           <div>
             <dt>绑定时间</dt>
-            <dd>{device?.boundAt ? new Date(device.boundAt).toLocaleString('zh-MY') : '—'}</dd>
+            <dd>{formatDateTime(device?.boundAt) || '—'}</dd>
           </div>
           <div><dt>绑定规则</dt><dd>一账号一设备</dd></div>
         </dl>

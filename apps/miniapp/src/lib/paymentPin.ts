@@ -21,6 +21,7 @@ export function paymentPinErrorMessage(error: unknown): string {
       const lockedUntil = issue.details?.lockedUntil;
       return lockedUntil
         ? `支付密码已锁定，请在 ${new Date(lockedUntil).toLocaleTimeString('zh-MY', {
+            hour12: false,
             hour: '2-digit',
             minute: '2-digit',
           })} 后重试`

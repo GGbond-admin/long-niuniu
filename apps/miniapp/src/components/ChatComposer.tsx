@@ -1,5 +1,6 @@
-import { useRef, useState, type FormEvent, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { CHAT_EMOJIS } from '../constants/emojis';
+import { disposeChatInputFocus, setChatInputFocus } from '../telegram';
 
 export type ChatSticker = { id: string; name: string; url: string };
 
@@ -24,6 +25,8 @@ type Props = {
   onSendSticker: (stickerId: string) => void;
   /** 游戏房投骰等内容，放在骰子页 */
   dicePanel?: ReactNode;
+  /** 当前是否可执行投骰，用于收紧不可用状态的面板 */
+  diceAvailable?: boolean;
   /** 默认打开的工具页 */
   defaultToolTab?: 'dice' | 'emoji' | 'sticker';
   /** 右侧 + 菜单（不含发红包时由调用方自行过滤） */
@@ -31,10 +34,89 @@ type Props = {
   maxLength?: number;
   /** 掷骰阶段等：高亮工具按钮 */
   toolsHighlight?: boolean;
+  /** 竞庄/下注阶段：输入数字时显示金额预览，发送键改为对应动作 */
+  amountMode?: 'bet' | 'bid' | null;
 };
 
+function ToolGridIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <rect x="3.5" y="3.5" width="6.5" height="6.5" rx="2" />
+      <rect x="14" y="3.5" width="6.5" height="6.5" rx="2" />
+      <rect x="3.5" y="14" width="6.5" height="6.5" rx="2" />
+      <rect x="14" y="14" width="6.5" height="6.5" rx="2" />
+    </svg>
+  );
+}
+
+function KeyboardIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <rect x="2.75" y="5.25" width="18.5" height="13.5" rx="3" />
+      <path d="M6.25 9h.01M9.5 9h.01M12.75 9h.01M16 9h.01M18.5 9h.01" />
+      <path d="M6.25 12.25h.01M9.5 12.25h.01M12.75 12.25h.01M16 12.25h.01M18.5 12.25h.01" />
+      <path d="M7.25 15.5h9.5" />
+    </svg>
+  );
+}
+
+function DiceToolIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <rect x="3.5" y="3.5" width="17" height="17" rx="4.5" />
+      <circle cx="8.25" cy="8.25" r="1" />
+      <circle cx="15.75" cy="8.25" r="1" />
+      <circle cx="12" cy="12" r="1" />
+      <circle cx="8.25" cy="15.75" r="1" />
+      <circle cx="15.75" cy="15.75" r="1" />
+    </svg>
+  );
+}
+
+function EmojiToolIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <circle cx="12" cy="12" r="8.5" />
+      <path d="M8.5 10h.01M15.5 10h.01" />
+      <path d="M8.5 14.25c1.05 1.25 2.18 1.75 3.5 1.75s2.45-.5 3.5-1.75" />
+    </svg>
+  );
+}
+
+function StickerToolIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M5 3.75h8.9c2.84 0 5.35 2.35 5.35 5.25v5.9a5.35 5.35 0 0 1-5.35 5.35H9A5.25 5.25 0 0 1 3.75 15V5A1.25 1.25 0 0 1 5 3.75Z" />
+      <path d="M19.15 14.6h-3.3a1.25 1.25 0 0 0-1.25 1.25v4.3" />
+      <path d="M8.1 9.25h.01M14.9 9.25h.01M8.8 13.1c.9.8 1.97 1.2 3.2 1.2" />
+    </svg>
+  );
+}
+
+function formatComposerRm(cents: number) {
+  return (cents / 100).toLocaleString('en-MY', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+}
+
+function readComposerAmount(value: string): {
+  kind: 'withdraw' | 'all_in' | 'amount';
+  cents: number;
+} | null {
+  const trimmed = value.trim();
+  if (trimmed === '0') return { kind: 'withdraw', cents: 0 };
+  const match = trimmed.match(/^(sh\s*)?(\d+)(?:\.(\d{1,2}))?$/i);
+  if (!match) return null;
+  const whole = Number(match[2]);
+  const fraction = Number((match[3] ?? '').padEnd(2, '0'));
+  const cents = whole * 100 + fraction;
+  if (!Number.isSafeInteger(cents) || cents <= 0) return null;
+  return { kind: match[1] ? 'all_in' : 'amount', cents };
+}
+
 /**
- * 统一聊天底部：🎮/⌨️ 工具栏 + 输入 + 发送 + 可选 +
+ * 统一聊天底部：工具/键盘切换 + 输入 + 发送 + 可选 +
  * 表情插入输入框；贴纸直接发送。
  */
 export default function ChatComposer({
@@ -45,10 +127,12 @@ export default function ChatComposer({
   stickers,
   onSendSticker,
   dicePanel,
+  diceAvailable = false,
   defaultToolTab = 'emoji',
   plusActions,
   maxLength = 200,
   toolsHighlight = false,
+  amountMode = null,
 }: Props) {
   const [value, setValue] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -60,6 +144,40 @@ export default function ChatComposer({
   const showPlus = (plusActions?.length ?? 0) > 0;
   const showDice = !!dicePanel;
   const sendBusy = busy || submitting;
+  const parsedAmount = amountMode ? readComposerAmount(value) : null;
+  const sendLabel = submitting
+    ? '发送中'
+    : parsedAmount?.kind === 'withdraw'
+      ? '撤回'
+      : parsedAmount?.kind === 'all_in'
+        ? '梭哈'
+        : parsedAmount
+          ? amountMode === 'bid'
+            ? '上庄'
+            : '下注'
+          : '发送';
+  const amountPreview = parsedAmount
+    ? parsedAmount.kind === 'withdraw'
+      ? { title: '撤回本局下注', detail: '冻结金额原路退回' }
+      : parsedAmount.kind === 'all_in'
+        ? { title: `梭哈 RM ${formatComposerRm(parsedAmount.cents)}`, detail: '按梭哈规则提交' }
+        : {
+            title: `${amountMode === 'bid' ? '竞庄' : '下注'} RM ${formatComposerRm(parsedAmount.cents)}`,
+            detail: '点右侧按钮提交',
+          }
+    : null;
+
+  useEffect(() => {
+    return disposeChatInputFocus;
+  }, []);
+
+  function markInputFocus(focused: boolean) {
+    setChatInputFocus(focused);
+    if (!focused) return;
+    requestAnimationFrame(() => {
+      inputRef.current?.scrollIntoView({ block: 'end', inline: 'nearest' });
+    });
+  }
 
   function insertEmoji(emoji: string) {
     if (disabled) return;
@@ -125,7 +243,13 @@ export default function ChatComposer({
 
   return (
     <div className="chat-composer-shell">
-      <form className="game-room-composer" onSubmit={submit}>
+      {amountPreview && (
+        <div className="composer-amount-preview" role="status">
+          <strong>{amountPreview.title}</strong>
+          <small>{amountPreview.detail}</small>
+        </div>
+      )}
+      <form className={`game-room-composer${showPlus ? ' has-plus' : ''}`} onSubmit={submit}>
         <button
           type="button"
           className={`composer-icon ${panel === 'tools' ? 'active' : ''} ${toolsHighlight && panel !== 'tools' ? 'highlight' : ''}`}
@@ -133,20 +257,31 @@ export default function ChatComposer({
           onClick={toggleTools}
           disabled={sendBusy}
         >
-          {panel === 'tools' ? '⌨️' : '🎮'}
+          {panel === 'tools' ? <KeyboardIcon /> : <ToolGridIcon />}
         </button>
         <input
           ref={inputRef}
           value={value}
           onChange={(e) => setValue(e.target.value.slice(0, maxLength))}
-          onFocus={() => setPanel(null)}
+          onFocus={() => {
+            setPanel(null);
+            markInputFocus(true);
+          }}
+          onBlur={() => markInputFocus(false)}
           placeholder={placeholder}
           disabled={disabled || submitting}
           maxLength={maxLength}
+          inputMode="text"
           enterKeyHint="send"
+          autoComplete="off"
+          autoCorrect="off"
         />
-        <button type="submit" disabled={disabled || sendBusy || !value.trim()}>
-          {submitting ? '发送中' : '发送'}
+        <button
+          type="submit"
+          disabled={disabled || sendBusy || !value.trim()}
+          onMouseDown={(event) => event.preventDefault()}
+        >
+          {sendLabel}
         </button>
         {showPlus && (
           <button
@@ -171,15 +306,18 @@ export default function ChatComposer({
 
       {panel === 'tools' && (
         <div className="tool-drawer">
-          <div className="tool-tabs">
+          <div className={`tool-tabs${showDice ? ' has-dice' : ''}`} role="tablist">
             {showDice && (
               <button
                 type="button"
                 className={toolTab === 'dice' ? 'active' : ''}
                 onClick={() => setToolTab('dice')}
                 aria-label="骰子"
+                aria-selected={toolTab === 'dice'}
+                role="tab"
               >
-                🎲
+                <DiceToolIcon />
+                <span>骰子</span>
               </button>
             )}
             <button
@@ -187,23 +325,37 @@ export default function ChatComposer({
               className={toolTab === 'emoji' ? 'active' : ''}
               onClick={() => setToolTab('emoji')}
               aria-label="表情"
+              aria-selected={toolTab === 'emoji'}
+              role="tab"
             >
-              😀
+              <EmojiToolIcon />
+              <span>表情</span>
             </button>
             <button
               type="button"
               className={toolTab === 'sticker' ? 'active' : ''}
               onClick={() => setToolTab('sticker')}
               aria-label="贴纸"
+              aria-selected={toolTab === 'sticker'}
+              role="tab"
             >
-              ✦
+              <StickerToolIcon />
+              <span>贴纸</span>
             </button>
           </div>
 
-          {showDice && toolTab === 'dice' && <div className="dice-panel">{dicePanel}</div>}
+          {showDice && toolTab === 'dice' && (
+            <div
+              className={`dice-panel ${diceAvailable ? 'ready' : 'unavailable'}`}
+              role="tabpanel"
+              aria-label="骰子"
+            >
+              {dicePanel}
+            </div>
+          )}
 
           {toolTab === 'emoji' && (
-            <div className="expression-panel emoji-panel">
+            <div className="expression-panel emoji-panel" role="tabpanel" aria-label="表情">
               {disabled ? (
                 <div className="empty-inline">当前不可发言</div>
               ) : (
@@ -217,7 +369,7 @@ export default function ChatComposer({
           )}
 
           {toolTab === 'sticker' && (
-            <div className="expression-panel sticker-panel">
+            <div className="expression-panel sticker-panel" role="tabpanel" aria-label="贴纸">
               {disabled ? (
                 <div className="empty-inline">当前不可发言</div>
               ) : stickers.length === 0 ? (

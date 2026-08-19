@@ -109,6 +109,7 @@ export default function SystemNotices() {
                     <strong>{item.title}</strong>
                     <time>
                       {new Date(item.publishedAt).toLocaleString('zh-MY', {
+                        hour12: false,
                         month: 'numeric',
                         day: 'numeric',
                         hour: '2-digit',

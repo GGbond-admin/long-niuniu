@@ -10,6 +10,7 @@ const memory = vi.hoisted(() => {
       roomId: 'room-1',
       phase: 'SENDING_PACKET',
       bankerId: 'banker-1',
+      bankerReservedCents: 0n,
       claimEndsAt: null as Date | null,
       version: 1,
       configSnapshot: { round: { claimDurationSeconds: 30 } },
@@ -45,7 +46,12 @@ const memory = vi.hoisted(() => {
 
 const tx = vi.hoisted(() => ({
   round: {
-    findUnique: vi.fn(async () => ({ ...memory.round, packet: { ...memory.packet } })),
+    findUnique: vi.fn(async () => ({
+      ...memory.round,
+      packet: { ...memory.packet },
+      bets: [],
+      _count: { claims: memory.claims.length },
+    })),
     update: vi.fn(async ({ data }: { data: Record<string, unknown> }) => {
       const { version, ...rest } = data;
       Object.assign(memory.round, rest);
@@ -65,17 +71,43 @@ const tx = vi.hoisted(() => ({
       round: { ...memory.round, claims: memory.claims.map((claim) => ({ ...claim })) },
     })),
     update: vi.fn(async ({ data }: { data: Record<string, unknown> }) => {
+      if (
+        typeof data.participantCount === 'object'
+        && data.participantCount !== null
+        && 'decrement' in data.participantCount
+      ) {
+        memory.packet.participantCount -= Number(data.participantCount.decrement);
+        const { participantCount: _participantCount, ...rest } = data;
+        Object.assign(memory.packet, rest);
+        return { ...memory.packet };
+      }
       Object.assign(memory.packet, data);
       return { ...memory.packet };
     }),
   },
   bet: {
     findUnique: vi.fn(
-      async ({ where }: { where: { roundId_userId: { userId: string } } }) =>
-        memory.bets.get(where.roundId_userId.userId) ?? null,
+      async ({ where }: { where: { roundId_userId: { userId: string } } }) => {
+        const userId = where.roundId_userId.userId;
+        const row = memory.bets.get(userId);
+        return row ? { id: `bet-${userId}`, userId, ...row } : null;
+      },
+    ),
+    update: vi.fn(
+      async ({ where, data }: { where: { roundId_userId?: { userId: string }; id?: string }; data: { status: string } }) => {
+        const userId = where.roundId_userId?.userId ?? where.id?.replace('bet-', '');
+        if (!userId || !memory.bets.has(userId)) throw new Error('BET_NOT_FOUND');
+        const next = { ...memory.bets.get(userId)!, status: data.status };
+        memory.bets.set(userId, next);
+        return { id: `bet-${userId}`, userId, ...next };
+      },
     ),
   },
   claim: {
+    findUnique: vi.fn(
+      async ({ where }: { where: { roundId_userId: { userId: string } } }) =>
+        memory.claims.find((claim) => claim.userId === where.roundId_userId.userId) ?? null,
+    ),
     create: vi.fn(async ({ data }: { data: Record<string, unknown> }) => {
       memory.claimSeq += 1;
       const claim = { id: `claim-${memory.claimSeq}`, ...data } as {
@@ -115,7 +147,14 @@ vi.mock('./wallet.js', () => ({
   unfreeze: vi.fn(),
 }));
 
-import { claimInternalPacket, GameError, publishInternalPacket } from './game.js';
+import {
+  cancelRound,
+  claimInternalPacket,
+  forfeitMissingPlayer,
+  GameError,
+  publishInternalPacket,
+  splitRemainingCents,
+} from './game.js';
 
 describe('内部红包发包与抢包', () => {
   beforeEach(() => {
@@ -132,7 +171,24 @@ describe('内部红包发包与抢包', () => {
     memory.transfers.length = 0;
     memory.diceReady = false;
     memory.claimSeq = 0;
+    memory.bets.set('player-1', { status: 'FROZEN' });
+    memory.bets.set('player-2', { status: 'FROZEN' });
+    memory.packet.participantCount = 3;
     transferMock.mockClear();
+  });
+
+  it('自动认尾拆分不再调用可预测的 Math.random', () => {
+    const random = vi.spyOn(Math, 'random').mockImplementation(() => {
+      throw new Error('MATH_RANDOM_MUST_NOT_BE_USED');
+    });
+    try {
+      const parts = splitRemainingCents(1_000n, 3);
+      expect(parts).toHaveLength(3);
+      expect(parts.reduce((sum, amount) => sum + amount, 0n)).toBe(1_000n);
+      expect(parts.every((amount) => amount >= 1n)).toBe(true);
+    } finally {
+      random.mockRestore();
+    }
   });
 
   it('骰子未投完前不允许发内部红包', async () => {
@@ -205,5 +261,28 @@ describe('内部红包发包与抢包', () => {
     await expect(claimInternalPacket('packet-1', 'player-1')).rejects.toMatchObject<
       Partial<GameError>
     >({ code: 'PACKET_EXPIRED' });
+  });
+
+  it('内部红包已有领取记录后禁止取消，避免已入账红包变成平台损失', async () => {
+    memory.diceReady = true;
+    await publishInternalPacket({ roundId: 'round-1' });
+    await claimInternalPacket('packet-1', 'player-1');
+
+    await expect(cancelRound('round-1', 'MANUAL_CANCEL')).rejects.toMatchObject<
+      Partial<GameError>
+    >({ code: 'INTERNAL_PACKET_ALREADY_CLAIMED' });
+    expect(memory.round.phase).toBe('CLAIMING');
+    expect(memory.packet.status).toBe('SENT');
+  });
+
+  it('内部红包玩家弃权时同步减少发包人数，避免自动结算永远等不到该认额', async () => {
+    memory.round.phase = 'CLAIM_EXPIRED';
+    memory.packet.channel = 'INTERNAL';
+    memory.packet.status = 'EXPIRED';
+
+    await forfeitMissingPlayer('round-1', 'player-1', 'admin-1');
+
+    expect(memory.bets.get('player-1')?.status).toBe('FORFEITED');
+    expect(memory.packet.participantCount).toBe(2);
   });
 });

@@ -1,5 +1,8 @@
-import { RoundPhase } from '@prisma/client';
-import { bankerContinuationError } from '../engine/bankerContinuation.js';
+import { PacketChannel, RoundPhase } from '@prisma/client';
+import {
+  bankerContinuationError,
+  shouldStartWaitingRound,
+} from '../engine/bankerContinuation.js';
 import { redis, withRedisLock } from '../lib/redis.js';
 import { prisma } from '../lib/prisma.js';
 import { env } from '../config.js';
@@ -20,6 +23,7 @@ import { gameBus } from './gameBus.js';
 import { getGameSettings, parseSettingsSnapshot } from './gameSettings.js';
 import { expireGroupPackets } from './groupPacket.js';
 import {
+  appendSystemChatOnce,
   appendGamePacketMessage,
   ensureRoundAnnouncement,
   rebroadcastRoomState,
@@ -150,7 +154,7 @@ export class RoundScheduler {
               roomId: true,
               configSnapshot: true,
               room: { select: { gameCode: true } },
-              packet: { select: { id: true } },
+              packet: { select: { id: true, channel: true } },
             },
             take: 50,
           }),
@@ -171,7 +175,7 @@ export class RoundScheduler {
               id: true,
               roomId: true,
               phase: true,
-              packet: { select: { id: true } },
+              packet: { select: { id: true, channel: true } },
               events: {
                 where: { type: { startsWith: 'ROOM_ANNOUNCED_' } },
                 select: { type: true },
@@ -258,6 +262,25 @@ export class RoundScheduler {
             // 小助手暂停或 Redis 暂不可用时留待下一轮恢复，不阻塞其它牌局。
           }
         }
+
+        // CLAIM_EXPIRED 不再进入 dueClaims；若上一次自动认尾或结算遇到瞬时
+        // 故障，必须在后续 tick 继续补偿，否则牌局和冻结资金会永久卡住。
+        for (const round of activeRounds) {
+          if (
+            round.phase !== RoundPhase.CLAIM_EXPIRED
+            || round.packet?.channel !== PacketChannel.INTERNAL
+          ) {
+            continue;
+          }
+          try {
+            await applyAutoTailClaims(round.id);
+            const finalized = await finalizeInternalRound(round.id);
+            if (finalized) await cacheRound(round.id);
+          } catch (error) {
+            console.error('[scheduler] retry internal finalization failed', round.id, error);
+          }
+        }
+
         if (lastRoundBroadcastAt.size > 1_000) {
           const staleBefore = now.getTime() - 60_000;
           for (const [roundId, timestamp] of lastRoundBroadcastAt) {
@@ -408,50 +431,65 @@ export class RoundScheduler {
             settings = await getGameSettings(room.gameCode);
             settingsByGame.set(room.gameCode, settings);
           }
-          // 自动开局需同时：小助手开启 + autoStart 打开；与「游戏入口」无关。
           if (
-            settings.round.assistantEnabled !== false
-            && settings.round.autoStart
-            && waiting.phase === RoundPhase.WAITING
+            settings.round.assistantEnabled === false
+            || waiting.phase !== RoundPhase.WAITING
           ) {
-            const previous =
-              waiting.seqNo > 1
-                ? await prisma.round.findUnique({
-                    where: {
-                      roomId_seqNo: { roomId: room.id, seqNo: waiting.seqNo - 1 },
-                    },
-                    select: {
-                      roomId: true,
-                      seqNo: true,
-                      phase: true,
-                      bankerId: true,
-                      isContinued: true,
-                      continuationUsed: true,
-                      finishedAt: true,
-                      configSnapshot: true,
-                    },
-                  })
-                : null;
-            let continuationOpen = false;
-            if (previous?.bankerId && previous.configSnapshot) {
-              const continuationSettings = parseSettingsSnapshot(previous.configSnapshot);
-              continuationOpen =
-                bankerContinuationError({
-                  previous,
-                  next: waiting,
-                  userId: previous.bankerId,
-                  windowSeconds: continuationSettings.round.continuationWindowSeconds,
-                  now,
-                }) === null;
-            }
-            if (continuationOpen) continue;
-            await transition(waiting.id, room.id, RoundPhase.WAITING, () =>
-              startRound(waiting.id),
-            ).catch((error) => {
-              if (error instanceof GameError && error.code === 'NOT_ENOUGH_PLAYERS') return;
-              throw error;
+            continue;
+          }
+
+          const previous =
+            waiting.seqNo > 1
+              ? await prisma.round.findUnique({
+                  where: {
+                    roomId_seqNo: { roomId: room.id, seqNo: waiting.seqNo - 1 },
+                  },
+                  select: {
+                    id: true,
+                    roomId: true,
+                    seqNo: true,
+                    phase: true,
+                    bankerId: true,
+                    isContinued: true,
+                    continuationUsed: true,
+                    finishedAt: true,
+                    configSnapshot: true,
+                  },
+                })
+              : null;
+          let continuationError: ReturnType<typeof bankerContinuationError> | undefined;
+          if (previous?.bankerId && previous.configSnapshot) {
+            const continuationSettings = parseSettingsSnapshot(previous.configSnapshot);
+            continuationError = bankerContinuationError({
+              previous,
+              next: waiting,
+              userId: previous.bankerId,
+              windowSeconds: continuationSettings.round.continuationWindowSeconds,
+              now,
             });
           }
+          if (
+            !shouldStartWaitingRound({
+              autoStart: Boolean(settings.round.autoStart),
+              continuationError,
+            })
+          ) {
+            continue;
+          }
+
+          if (continuationError === 'CONTINUATION_WINDOW_EXPIRED' && previous) {
+            await appendSystemChatOnce(
+              room.id,
+              `round:${previous.id}:continuation:expired`,
+              '【续庄确认超时】\n庄家未在规定时间内确认，下一局转入公开竞标。',
+            ).catch(() => undefined);
+          }
+          await transition(waiting.id, room.id, RoundPhase.WAITING, () =>
+            startRound(waiting.id),
+          ).catch((error) => {
+            if (error instanceof GameError && error.code === 'NOT_ENOUGH_PLAYERS') return;
+            throw error;
+          });
         }
       });
     } catch (error) {

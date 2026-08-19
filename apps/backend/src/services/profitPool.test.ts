@@ -94,6 +94,25 @@ describe('利润池与称桶分配（需求文档核对）', () => {
     expect(amount).toBe(16n);
   });
 
+  it('代理占成超过称桶基准时拒绝计算，禁止利润池超发', () => {
+    expect(() =>
+      computeAgentShares({
+        netPoolCents: 10_000n,
+        companyTurnoverCents: 10_000n,
+        bucketBase: 50,
+        agents: [
+          {
+            agentId: 'agent-over-limit',
+            parentAgentId: null,
+            sharePoints: 70,
+            status: 'ACTIVE',
+            selfTurnoverCents: 10_000n,
+          },
+        ],
+      }),
+    ).toThrow('INVALID_SHARE_POINTS');
+  });
+
   it('previousDay 跨月跨年正确（马来西亚时区）', () => {
     expect(previousDay('2026-08-15')).toBe('2026-08-14');
     expect(previousDay('2026-08-01')).toBe('2026-07-31');

@@ -328,14 +328,24 @@ export const api = {
       nextCursor?: string | null;
     }>(`/api/wallet${qs ? `?${qs}` : ''}`);
   },
-  walletOrders: () =>
-    request<{
+  walletOrders: (params?: {
+    cursor?: string;
+    limit?: number;
+  }) => {
+    const search = new URLSearchParams();
+    if (params?.cursor) search.set('cursor', params.cursor);
+    if (params?.limit) search.set('limit', String(params.limit));
+    const qs = search.toString();
+    return request<{
+      nextCursor?: string | null;
       deposits: Array<{
         id: string;
+        channel: 'MANUAL' | 'VPAY';
         amountCents: string;
         status: string;
         rejectReason?: string;
         proofUrl?: string;
+        payUrl?: string | null;
         createdAt: string;
       }>;
       withdrawals: Array<{
@@ -348,7 +358,8 @@ export const api = {
         rejectReason?: string;
         createdAt: string;
       }>;
-    }>('/api/wallet/orders'),
+    }>(`/api/wallet/orders${qs ? `?${qs}` : ''}`);
+  },
   uploadProof: (file: File) => upload<{ url: string }>('/api/uploads/proof', file),
   depositPayee: () =>
     request<{
@@ -503,6 +514,12 @@ export const api = {
   leaveRoom: (roomId: string) =>
     request<{ ok: boolean }>(`/api/game/rooms/${roomId}/leave`, { method: 'POST', body: '{}' }),
   roomState: (roomId: string) => request<RoomState>(`/api/game/rooms/${roomId}/state`),
+  roomWsTicket: (roomId: string) =>
+    request<{ ticket: string; expiresIn: number }>(
+      `/api/game/rooms/${roomId}/ws-ticket`,
+      { method: 'POST', body: '{}' },
+      { timeoutMs: 8_000, retries: 1 },
+    ),
   placeBid: (roomId: string, amount: string) =>
     request<RoomState>(`/api/game/rooms/${roomId}/bid`, {
       method: 'POST',
@@ -594,7 +611,12 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ ids }),
     }),
-  tipSupport: (roomId: string, amount: string, requestId: string) =>
+  tipSupport: (
+    roomId: string,
+    amount: string,
+    requestId: string,
+    paymentPin: string,
+  ) =>
     request<{
       ok: boolean;
       duplicate: boolean;
@@ -604,7 +626,7 @@ export const api = {
       avatarUrl: string | null;
     }>(`/api/game/rooms/${roomId}/tip`, {
       method: 'POST',
-      body: JSON.stringify({ amount, requestId }),
+      body: JSON.stringify({ amount, requestId, paymentPin }),
     }),
 
   gameRules: (gameCode: string) =>
@@ -725,7 +747,7 @@ export const api = {
         createdAt: string;
       } | null;
     }>('/api/chat/preview'),
-  chatMessages: () =>
+  chatMessages: (cursor?: string) =>
     request<{
       items: Array<{
         id: string;
@@ -735,7 +757,10 @@ export const api = {
         assetUrl?: string;
         createdAt: string;
       }>;
-    }>('/api/chat/messages'),
+      nextCursor: string | null;
+    }>(
+      `/api/chat/messages${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''}`,
+    ),
   sendChat: (
     payload:
       | { type: 'TEXT' | 'EMOJI'; content: string }
@@ -782,43 +807,114 @@ export const api = {
       } | null;
     }>('/api/agent/me'),
 
-  agentReport: (date?: string) =>
+  agentReport: (poolId?: string) =>
     request<{
-      date: string;
-      today: string;
-      status: 'ESTIMATED' | 'PENDING' | 'SETTLED' | 'NO_DISTRIBUTION';
-      company: {
-        turnoverCents: string;
-        expenseCents: string;
-        rakeTotalCents: string;
-        netPoolCents: string;
-      };
-      mine: {
-        sharePoints: number;
-        bucketBase: number;
-        selfTurnoverCents: string;
-        teamTurnoverCents: string;
-        contributionBp: number;
-        selfAmountCents: string;
-        overrideAmountCents: string;
-        totalAmountCents: string;
-      };
-      subagents: Array<{
+      profile: {
+        id: string;
         label: string;
         uidMasked: string;
+        nickname: string | null;
+        avatarUrl: string | null;
         sharePoints: number;
-        diffPoints: number;
-        teamTurnoverCents: string;
+        directAgentCount: number;
+        teamAgentCount: number;
+        directPlayerCount: number;
+        teamPlayerCount: number;
+        online: boolean;
+        onlineTeamCount: number;
+        lifetimeProfitCents: string;
+      };
+      periods: Array<{
+        poolId: string;
+        poolCode: string;
+        room: { id: string; title: string; gameCode: string };
+        startSeqNo: number;
+        endSeqNo: number;
+        status: 'PENDING' | 'DISTRIBUTED' | 'NO_DISTRIBUTION';
+        generatedAt: string;
         amountCents: string;
       }>;
-      players: Array<{
+      periodsNextCursor: string | null;
+      selected: {
+        pool: {
+          id: string;
+          poolCode: string;
+          room: { id: string; title: string; gameCode: string };
+          startSeqNo: number;
+          endSeqNo: number;
+          status: 'PENDING' | 'DISTRIBUTED' | 'NO_DISTRIBUTION';
+          generatedAt: string;
+        };
+        mine: {
+          sharePoints: number;
+          bucketBase: number;
+          directAgentCount: number;
+          teamAgentCount: number;
+          directPlayerCount: number;
+          teamPlayerCount: number;
+          selfTurnoverCents: string;
+          teamTurnoverCents: string;
+          contributionBp: number;
+          selfAmountCents: string;
+          overrideAmountCents: string;
+          totalAmountCents: string;
+          lifetimeProfitCents: string;
+        };
+        subagents: Array<{
+          agentId: string;
+          label: string;
+          uidMasked: string;
+          sharePoints: number;
+          diffPoints: number;
+          directAgentCount: number;
+          teamAgentCount: number;
+          directPlayerCount: number;
+          teamPlayerCount: number;
+          teamTurnoverCents: string;
+          ownAmountCents: string;
+          contributionAmountCents: string;
+        }>;
+        players: Array<{
+          userId: string;
+          uidMasked: string;
+          nickname: string | null;
+          avatarUrl: string | null;
+          turnoverCents: string;
+          profitCents: string;
+        }>;
+        playersNextCursor: string | null;
+      } | null;
+    }>(`/api/agent/report${poolId ? `?poolId=${encodeURIComponent(poolId)}` : ''}`),
+
+  agentReportHistory: (cursor: string) =>
+    request<{
+      items: Array<{
+        poolId: string;
+        poolCode: string;
+        room: { id: string; title: string; gameCode: string };
+        startSeqNo: number;
+        endSeqNo: number;
+        status: 'PENDING' | 'DISTRIBUTED' | 'NO_DISTRIBUTION';
+        generatedAt: string;
+        amountCents: string;
+      }>;
+      nextCursor: string | null;
+    }>(`/api/agent/report/history?cursor=${encodeURIComponent(cursor)}&limit=50`),
+
+  agentReportPlayers: (poolId: string, cursor: string) =>
+    request<{
+      items: Array<{
+        userId: string;
         uidMasked: string;
         nickname: string | null;
         avatarUrl: string | null;
         turnoverCents: string;
         profitCents: string;
       }>;
-    }>(`/api/agent/report${date ? `?date=${date}` : ''}`),
+      nextCursor: string | null;
+    }>(
+      `/api/agent/report/players?poolId=${encodeURIComponent(poolId)}&cursor=${encodeURIComponent(cursor)}&limit=50`,
+    ),
 
   agentPlayers: () =>
     request<{
@@ -993,14 +1089,16 @@ export type RoomState = {
     roomMaxCents: string;
     maxAcceptedCents: string;
     maxMultiplier: number;
+    /** 本笔预留倍数：普通下注=本局最高牌型倍数，梭哈=1 */
+    liabilityMultiplier?: number;
     adjusted: boolean;
     adjustedBy: string[];
   };
 };
 
-export function roomWsUrl(roomId: string, authToken: string): string {
+export function roomWsUrl(roomId: string, ticket: string): string {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  return `${proto}//${location.host}/api/game/rooms/${roomId}/ws?token=${encodeURIComponent(authToken)}`;
+  return `${proto}//${location.host}/api/game/rooms/${roomId}/ws?ticket=${encodeURIComponent(ticket)}`;
 }
 
 export function rm(cents: string | number | bigint): string {

@@ -3,13 +3,24 @@ import { prisma } from './prisma.js';
 
 type Tx = Prisma.TransactionClient;
 
+interface SerializableOptions {
+  maxWaitMs?: number;
+  timeoutMs?: number;
+}
+
 /** Executes a money/state mutation at serializable isolation and retries conflicts. */
-export async function serializable<T>(work: (tx: Tx) => Promise<T>, retries = 3): Promise<T> {
+export async function serializable<T>(
+  work: (tx: Tx) => Promise<T>,
+  retries = 3,
+  options: SerializableOptions = {},
+): Promise<T> {
   let attempt = 0;
   while (true) {
     try {
       return await prisma.$transaction(work, {
         isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+        ...(options.maxWaitMs === undefined ? {} : { maxWait: options.maxWaitMs }),
+        ...(options.timeoutMs === undefined ? {} : { timeout: options.timeoutMs }),
       });
     } catch (error) {
       const code = (error as { code?: string }).code;

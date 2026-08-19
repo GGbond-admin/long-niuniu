@@ -154,6 +154,7 @@ describe('非竞标/下注阶段纯数字当普通聊天', () => {
       roomMaxCents: 5_000n,
       maxAcceptedCents: 1_100n,
       maxMultiplier: 17,
+      liabilityMultiplier: 17,
       adjusted: true,
       adjustedBy: ['LIABILITY_LIMIT'],
     });
@@ -313,5 +314,19 @@ describe('非竞标/下注阶段纯数字当普通聊天', () => {
     });
     expect(result).toMatchObject({ kind: 'ok', action: 'bid', echo: '8800' });
     expect(memory.placeBankerBid).toHaveBeenCalledOnce();
+  });
+
+  it('竞标倒计时结束后明确提示正在最终确认', async () => {
+    memory.phase = 'BANKER_BID';
+    memory.placeBankerBid.mockRejectedValue(new GameError('PHASE_ENDED'));
+    const result = await handleRoomChatCommand({
+      roomId: 'room-1',
+      userId: 'user-1',
+      content: '8800',
+    });
+    expect(result).toEqual({
+      kind: 'error',
+      message: '竞标已截止，正在进行 3、2、1 最终确认',
+    });
   });
 });

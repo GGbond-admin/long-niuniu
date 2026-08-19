@@ -22,6 +22,9 @@ function commissionPart(cents: bigint, rate: number): bigint {
 }
 
 export async function settleRebates(date: string, gameCode?: string) {
+  if (date >= malaysiaDay()) {
+    throw new Error('REBATE_PERIOD_NOT_CLOSED');
+  }
   const turnovers = await prisma.turnoverDaily.findMany({
     where: { date, gameCode },
   });
@@ -94,10 +97,12 @@ export async function settleRebates(date: string, gameCode?: string) {
       paid.push(result);
       if (commission > 0n) {
         const amount = `${commission / 100n}.${(commission % 100n).toString().padStart(2, '0')}`;
-        void pushService.sendCustom(
-          turnover.userId,
-          `💰 ${date} ${turnover.gameCode} 推广返水已结算\n佣金 RM${amount} 已发放到可用余额。`,
-        );
+        void pushService
+          .sendCustom(
+            turnover.userId,
+            `💰 ${date} ${turnover.gameCode} 推广返水已结算\n佣金 RM${amount} 已发放到可用余额。`,
+          )
+          .catch(() => undefined);
       }
     }
   }

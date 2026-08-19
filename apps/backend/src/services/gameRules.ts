@@ -95,10 +95,11 @@ const supremeSections: GameRuleDocumentInput['sections'] = [
       '无人竞标庄钱：本局取消，不进入下注阶段。\n' +
       '余额不足：系统会拒绝竞标并退回出价。\n' +
       '3. 下注阶段\n' +
-      '除庄家外的玩家可在「下注范围」内下注，倒计时结束即停止。\n' +
-      '系统按本局最高牌型倍数（默认 17 倍）计算余额可承担的最高下注；输入过高时自动降低并显示实际接受金额。\n' +
+      '除庄家外的玩家可在「下注范围」内下注，倒计时结束即停止；也可选择梭哈。\n' +
+      '普通下注：系统按本局最高牌型倍数（默认 17 倍）计算余额可承担的最高下注；输入过高时自动降低并显示实际接受金额。\n' +
+      '梭哈：赔付固定 1:1，最低 RM20，不受「余额 ÷ 最高倍数」和房间庄钱上限限制，最多可押上全部可用余额（精确到分）。\n' +
       '未下注：视为本局弃权，不参与结算（不赢不输）。\n' +
-      '下注成功：系统冻结「实际下注 × 本局最高倍数」作为最大赔付预留金，撤回或结算后退回未使用部分。\n' +
+      '下注成功：系统按「实际下注 × 赔付倍数」冻结最大赔付预留金（普通=本局最高倍数、梭哈=1 倍），撤回或结算后退回未使用部分。\n' +
       '4. 系统发包\n' +
       '下注阶段结束后，系统统一发出 TNG 红包链接到游戏群。庄家与所有已下注的闲家依次抢包；抢到金额即为本人本局的「红包金额」。\n' +
       '5. 抢额识别\n' +
@@ -107,10 +108,11 @@ const supremeSections: GameRuleDocumentInput['sections'] = [
       '系统逐个比对庄家与闲家的牌型 / 点数，按倍数结算并扣除抽水：\n' +
       '闲家赢：庄家从庄池支付倍数 × 下注，平台抽取闲赢抽水（默认 3%）。\n' +
       '闲家输：按庄家牌型倍数从闲家预留金赔付，平台抽取庄家盈利的抽水（默认 5%）。\n' +
+      '梭哈单：无论牌型多大，赢只按 1:1 拿等额下注（同样扣闲赢抽水）、输只赔等额下注。\n' +
       '牌型等级及点数相同：继续比较红包金额；金额完全相同则平局退回。\n' +
       '7. 庄钱不足时的赔付顺序\n' +
-      '庄钱就是庄家本局可赔付的最高金额，赔完即止。当庄钱不够赔付全部赢家时，按以下顺序依次赔付：\n' +
-      '① 倍数高的先赔；② 同倍数时点数大的先赔；③ 同倍数同点数时红包金额大的先赔；④ 以上全同时下注时间早的先赔。\n' +
+      '庄钱就是庄家本局可赔付的最高金额，赔完即止。当庄钱不够赔付全部赢家时，普通与梭哈的赢家一起排队，按以下顺序依次赔付：\n' +
+      '① 牌型等级高的先赔（梭哈也按自己抢到的牌型排队）；② 同牌型时点数大的先赔；③ 同牌型同点数时红包金额大的先赔；④ 以上全同时下注时间早的先赔。\n' +
       '轮到某位赢家时庄钱不足全额，则把剩余庄钱全部赔给他；庄钱归零后，排在后面的赢家「喝水」，不获得任何赔付，但下注冻结金额全额退回、不会倒扣。',
   },
   {
@@ -161,9 +163,10 @@ const supremeSections: GameRuleDocumentInput['sections'] = [
     title: '如果您是闲家',
     body:
       '请在下注倒计时内完成下注；超时未下注视为弃权，不参与结算。\n' +
-      '最高可下注 = 当前可承担余额 ÷ 本局最高牌型倍数（默认 17），向下取整到完整 RM；超过时系统自动按最高可下注额接受。\n' +
-      '赢家：按牌型倍数 × 您的下注获得收益（扣闲赢抽水）。\n' +
-      '输家：按庄家牌型倍数从已冻结的最大赔付预留金扣除，剩余预留金自动退回。\n' +
+      '普通下注最高可下注 = 当前可承担余额 ÷ 本局最高牌型倍数（默认 17），向下取整到完整 RM；超过时系统自动按最高可下注额接受。\n' +
+      '梭哈最高可下注 = 当前可用余额（精确到分，可全押），不受房间庄钱上限限制。\n' +
+      '赢家：普通下注按牌型倍数 × 您的下注获得收益，梭哈固定 1:1（均扣闲赢抽水）。\n' +
+      '输家：普通下注按庄家牌型倍数、梭哈按 1 倍从已冻结的最大赔付预留金扣除，剩余预留金自动退回。\n' +
       '未下注 / 弃权：本局对您不结算，余额不变。',
   },
   {
@@ -255,15 +258,21 @@ function sectionIds(sections: Prisma.JsonValue): string[] {
   });
 }
 
-function isCompactSystemSupremeRules(document: {
+const LEGACY_SUPREME_SECTION_IDS = 'flow,hands,betting,settlement,fairness';
+
+/**
+ * 仍由系统维护的至尊牛牛规则：早期 seed 数据没有写 updatedBy；
+ * 章节结构必须是旧版或当前系统版，管理员发布过的内容不可自动覆盖。
+ */
+function isSystemAuthoredSupremeRules(document: {
   updatedBy: string | null;
   sections: Prisma.JsonValue;
 }): boolean {
-  // 早期 seed 数据没有写 updatedBy；管理员发布过的同名章节不可自动覆盖。
   if (document.updatedBy !== null && document.updatedBy !== 'SYSTEM') return false;
+  const ids = sectionIds(document.sections).join(',');
   return (
-    sectionIds(document.sections).join(',') ===
-    'flow,hands,betting,settlement,fairness'
+    ids === LEGACY_SUPREME_SECTION_IDS ||
+    ids === supremeSections.map((section) => section.id).join(',')
   );
 }
 
@@ -273,10 +282,14 @@ export async function ensureGameRuleDefaults(): Promise<void> {
     const existing = await prisma.gameRuleDocument.findUnique({
       where: { gameCode },
     });
-    const upgradeCompactDefault =
+    // 系统版规则随代码内默认文案演进（如梭哈 1:1），管理员改写过的版本保持不动
+    const refreshSystemDefaults =
       gameCode === SUPREME_NIUNIU_GAME_CODE &&
       !!existing &&
-      isCompactSystemSupremeRules(existing);
+      isSystemAuthoredSupremeRules(existing) &&
+      (existing.title !== defaults.title ||
+        existing.summary !== defaults.summary ||
+        JSON.stringify(existing.sections) !== JSON.stringify(defaults.sections));
     const normalizedTitle = existing
       ? replaceLegacySupremeBrand(existing.title)
       : '';
@@ -304,7 +317,7 @@ export async function ensureGameRuleDefaults(): Promise<void> {
         updatedBy: 'SYSTEM',
         publishedAt: new Date(),
       },
-      update: upgradeCompactDefault
+      update: refreshSystemDefaults
         ? {
             title: defaults.title,
             summary: defaults.summary,

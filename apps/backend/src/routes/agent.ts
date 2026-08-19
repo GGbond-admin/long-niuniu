@@ -6,16 +6,18 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { prisma } from '../lib/prisma.js';
-import { malaysiaDay, previousMalaysiaDay } from '../services/rebates.js';
 import {
   ProfitPoolError,
-  bucketShareCents,
-  computeProfitPool,
   getProfitPoolConfig,
   promoteAgentPlayer,
   updateSubagentPoints,
 } from '../services/profitPool.js';
 import { PROFIT_POOL_ERROR_MESSAGES } from './profitPool.js';
+import {
+  listAgentDashboardPlayers,
+  getAgentSelfDashboard,
+  listAgentDashboardPeriods,
+} from '../services/agentDashboard.js';
 
 function maskUid(uid: string): string {
   if (uid.length <= 6) return uid;
@@ -29,11 +31,6 @@ function sendAgentError(reply: FastifyReply, error: ProfitPoolError) {
     details: error.details,
   });
 }
-
-const dateSchema = z
-  .string()
-  .regex(/^\d{4}-\d{2}-\d{2}$/)
-  .optional();
 
 export async function agentRoutes(app: FastifyInstance) {
   async function requireAgent(req: { user: unknown }, reply: FastifyReply) {
@@ -79,86 +76,69 @@ export async function agentRoutes(app: FastifyInstance) {
     };
   });
 
-  /** 称桶报表（默认昨日；已生成日回放快照，未生成日实时预估） */
-  app.get('/api/agent/report', { preHandler: [app.authUser] }, async (req, reply) => {
-    const agent = await requireAgent(req, reply);
-    if (!agent) return;
-    const { date } = z.object({ date: dateSchema }).parse(req.query);
-    const day = date ?? previousMalaysiaDay();
-
-    try {
-      const pool = await computeProfitPool(day);
-      const mine = pool.agents.find((row) => row.agentId === agent.id);
-      const sharePoints = mine?.sharePoints ?? agent.sharePoints;
-      const bucketBase = pool.bucketBase;
-
-      // 「我的玩家」明细：当前归属玩家在该日的流水与对应利润（按我的占成折算，向下取整）。
-      // 注：玩家集合以当前归属为准，历史日期若归属有变动仅影响明细展示，合计以报表快照为准。
-      const bindings = await prisma.agentPlayer.findMany({
-        where: { agentId: agent.id },
-        include: { user: { select: { uid: true, nickname: true, avatarUrl: true } } },
-      });
-      const playerTurnovers = bindings.length
-        ? await prisma.turnoverDaily.groupBy({
-            by: ['userId'],
-            where: { date: day, userId: { in: bindings.map((b) => b.userId) } },
-            _sum: { selfCents: true },
-          })
-        : [];
-      const turnoverByUser = new Map(
-        playerTurnovers.map((row) => [row.userId, row._sum.selfCents ?? 0n]),
-      );
-      const players = bindings
-        .map((binding) => {
-          const turnover = turnoverByUser.get(binding.userId) ?? 0n;
-          return {
-            uidMasked: maskUid(binding.user.uid),
-            nickname: binding.user.nickname,
-            avatarUrl: binding.user.avatarUrl,
-            turnoverCents: String(turnover),
-            profitCents: String(
-              bucketShareCents({
-                netPoolCents: pool.netPoolCents,
-                agentTurnoverCents: turnover,
-                companyTurnoverCents: pool.turnoverCents,
-                sharePoints,
-                bucketBase,
-              }),
-            ),
-          };
+  /** 代理专属看板：按正式利润池批次回放不可变快照，默认最新批次。 */
+  app.get(
+    '/api/agent/report/history',
+    { preHandler: [app.authUser] },
+    async (req, reply) => {
+      const userId = (req.user as { sub: string }).sub;
+      const { cursor, limit } = z
+        .object({
+          cursor: z.string().optional(),
+          limit: z.coerce.number().int().min(1).max(100).default(50),
         })
-        .sort((a, b) => Number(BigInt(b.turnoverCents) - BigInt(a.turnoverCents)));
+        .parse(req.query);
+      try {
+        return await listAgentDashboardPeriods(userId, cursor, limit);
+      } catch (error) {
+        if (error instanceof ProfitPoolError) return sendAgentError(reply, error);
+        throw error;
+      }
+    },
+  );
 
-      return {
-        date: day,
-        today: malaysiaDay(),
-        status: pool.status,
-        company: {
-          turnoverCents: String(pool.turnoverCents),
-          expenseCents: String(pool.expenseCents),
-          rakeTotalCents: String(pool.rakeTotalCents),
-          netPoolCents: String(pool.netPoolCents),
-        },
-        mine: {
-          sharePoints,
-          bucketBase,
-          selfTurnoverCents: String(mine?.selfTurnoverCents ?? 0n),
-          teamTurnoverCents: String(mine?.teamTurnoverCents ?? 0n),
-          contributionBp: mine?.contributionBp ?? 0,
-          selfAmountCents: String(mine?.selfAmountCents ?? 0n),
-          overrideAmountCents: String(mine?.overrideAmountCents ?? 0n),
-          totalAmountCents: String(mine?.amountCents ?? 0n),
-        },
-        subagents: (mine?.breakdown ?? []).map((row) => ({
-          label: row.label,
-          uidMasked: maskUid(row.uid),
-          sharePoints: row.sharePoints,
-          diffPoints: row.diffPoints,
-          teamTurnoverCents: String(row.teamTurnoverCents),
-          amountCents: String(row.amountCents),
-        })),
-        players,
-      };
+  app.get(
+    '/api/agent/report/players',
+    { preHandler: [app.authUser] },
+    async (req, reply) => {
+      const userId = (req.user as { sub: string }).sub;
+      const { poolId, cursor, limit } = z
+        .object({
+          poolId: z.string().min(1),
+          cursor: z.string().optional(),
+          limit: z.coerce.number().int().min(1).max(100).default(50),
+        })
+        .parse(req.query);
+      try {
+        return await listAgentDashboardPlayers(
+          userId,
+          poolId,
+          cursor,
+          limit,
+        );
+      } catch (error) {
+        if (error instanceof ProfitPoolError) return sendAgentError(reply, error);
+        throw error;
+      }
+    },
+  );
+
+  app.get('/api/agent/report', { preHandler: [app.authUser] }, async (req, reply) => {
+    const userId = (req.user as { sub: string }).sub;
+    const { poolId } = z.object({ poolId: z.string().optional() }).parse(req.query);
+    try {
+      return await getAgentSelfDashboard(userId, poolId);
+    } catch (error) {
+      if (error instanceof ProfitPoolError) return sendAgentError(reply, error);
+      throw error;
+    }
+  });
+
+  app.get('/api/agent/dashboard', { preHandler: [app.authUser] }, async (req, reply) => {
+    const userId = (req.user as { sub: string }).sub;
+    const { poolId } = z.object({ poolId: z.string().optional() }).parse(req.query);
+    try {
+      return await getAgentSelfDashboard(userId, poolId);
     } catch (error) {
       if (error instanceof ProfitPoolError) return sendAgentError(reply, error);
       throw error;

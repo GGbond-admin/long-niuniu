@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { api } from '../api';
+import { formatDateTime } from '../lib/datetime';
 import { goBack } from '../lib/nav';
 import {
   LEDGER_FILTERS,
@@ -113,7 +114,7 @@ export default function FundDetails() {
                   <div className="fd-copy">
                     <strong>{ledgerLabel(entry.refType)}</strong>
                     <small>
-                      {new Date(entry.createdAt).toLocaleString('zh-MY')}
+                      {formatDateTime(entry.createdAt)}
                       {entry.memo ? ` · ${entry.memo}` : ''}
                     </small>
                   </div>

@@ -10,6 +10,7 @@ import {
   UserKind,
   UserStatus,
 } from '@prisma/client';
+import { randomInt } from 'node:crypto';
 import { bankerContinuationError } from '../engine/bankerContinuation.js';
 import {
   acceptBetAmount,
@@ -23,7 +24,11 @@ import {
   effectiveTurnoverForBanker,
   effectiveTurnoverForPlayer,
 } from '../engine/rebate.js';
-import { settleRound as calculateSettlement } from '../engine/settlement.js';
+import {
+  continueRoomBankerTrend,
+  settleRound as calculateSettlement,
+  trendFromBankerSummary,
+} from '../engine/settlement.js';
 import { env } from '../config.js';
 import { blindIndex, decryptSecret, encryptSecret, normalizeIdentity } from '../lib/crypto.js';
 import { prisma } from '../lib/prisma.js';
@@ -493,6 +498,8 @@ export interface PlaceBetResult {
   roomMaxCents: bigint;
   maxAcceptedCents: bigint;
   maxMultiplier: number;
+  /** 本笔按几倍预留最大赔付：普通=本局最高牌型倍数，梭哈=1 */
+  liabilityMultiplier: number;
   adjusted: boolean;
   adjustedBy: BetAdjustmentReason[];
 }
@@ -549,6 +556,7 @@ export async function placeBet(
         maxAffordableCents: String(acceptance.maxAffordableCents),
         maxAcceptedCents: String(acceptance.maxAcceptedCents),
         maxMultiplier,
+        liabilityMultiplier: acceptance.liabilityMultiplier,
       });
     }
 
@@ -565,6 +573,8 @@ export async function placeBet(
               isAllIn,
               status: BetStatus.FROZEN,
               revision,
+              // 撤注后重新下注应重新排队，避免沿用首次下注时间抢占赔付优先级。
+              createdAt: new Date(),
             },
           })
         : await tx.bet.create({
@@ -588,6 +598,7 @@ export async function placeBet(
         maxAffordableCents: String(acceptance.maxAffordableCents),
         maxAcceptedCents: String(acceptance.maxAcceptedCents),
         maxMultiplier,
+        liabilityMultiplier: acceptance.liabilityMultiplier,
         adjustedBy: acceptance.adjustedBy,
         isAllIn,
         revision,
@@ -602,6 +613,7 @@ export async function placeBet(
         roomMaxCents: acceptance.roomMaxCents,
         maxAcceptedCents: acceptance.maxAcceptedCents,
         maxMultiplier,
+        liabilityMultiplier: acceptance.liabilityMultiplier,
         adjusted: acceptance.adjusted,
         adjustedBy: acceptance.adjustedBy,
       };
@@ -642,6 +654,7 @@ export async function placeBet(
       maxAffordableCents: String(acceptance.maxAffordableCents),
       maxAcceptedCents: String(acceptance.maxAcceptedCents),
       maxMultiplier,
+      liabilityMultiplier: acceptance.liabilityMultiplier,
       adjustedBy: acceptance.adjustedBy,
       isAllIn,
       revision,
@@ -656,6 +669,7 @@ export async function placeBet(
       roomMaxCents: acceptance.roomMaxCents,
       maxAcceptedCents: acceptance.maxAcceptedCents,
       maxMultiplier,
+      liabilityMultiplier: acceptance.liabilityMultiplier,
       adjusted: acceptance.adjusted,
       adjustedBy: acceptance.adjustedBy,
     };
@@ -694,11 +708,23 @@ export async function withdrawBet(roundId: string, userId: string) {
 async function cancelRoundTx(tx: Tx, roundId: string, reason: string, actorId?: string) {
   const round = await tx.round.findUnique({
     where: { id: roundId },
-    include: { bets: true, packet: true },
+    include: {
+      bets: true,
+      packet: true,
+      _count: { select: { claims: true } },
+    },
   });
   if (!round) throw new GameError('ROUND_NOT_FOUND');
   if (round.phase === RoundPhase.FINISHED || round.phase === RoundPhase.CANCELLED) return round;
   if (round.phase === RoundPhase.SETTLING) throw new GameError('ROUND_SETTLING');
+  if (
+    round.packet?.channel === PacketChannel.INTERNAL
+    && round._count.claims > 0
+  ) {
+    // 内部红包领取时已从平台备付金即时转入玩家余额。此时取消并全额解冻
+    // 庄家会让平台承担已领取金额；已发生领取的内部局只能继续复核/结算。
+    throw new GameError('INTERNAL_PACKET_ALREADY_CLAIMED');
+  }
 
   for (const bet of round.bets) {
     if (bet.status !== BetStatus.FROZEN) continue;
@@ -1027,8 +1053,8 @@ export async function publishInternalPacket(params: {
 }
 
 /**
- * 「开始抢包」尚未完整播报时重置领取窗口，避免发包副作用重试吞掉玩家时间。
- * 播报完成标记存在后保持原截止时间，防止重复调用无限续时。
+ * 「开始抢包」尚未完整播报时只重置一次领取窗口，避免发包副作用重试吞掉
+ * 玩家时间，也避免播报长期失败时每轮调度都续期、牌局永不过期。
  */
 export async function refreshUnannouncedClaimDeadline(roundId: string): Promise<Date> {
   const initial = await prisma.round.findUnique({
@@ -1044,7 +1070,7 @@ export async function refreshUnannouncedClaimDeadline(roundId: string): Promise<
     : await getGameSettings(initial.room.gameCode);
 
   return serializable(async (tx) => {
-    const [round, announced] = await Promise.all([
+    const [round, announced, refreshed] = await Promise.all([
       tx.round.findUnique({
         where: { id: roundId },
         include: { packet: true },
@@ -1053,12 +1079,16 @@ export async function refreshUnannouncedClaimDeadline(roundId: string): Promise<
         where: { roundId, type: 'ROOM_ANNOUNCED_CLAIMING' },
         select: { id: true },
       }),
+      tx.roundEvent.findFirst({
+        where: { roundId, type: 'CLAIM_DEADLINE_REFRESHED' },
+        select: { id: true },
+      }),
     ]);
     if (!round) throw new GameError('ROUND_NOT_FOUND');
     if (round.phase !== RoundPhase.CLAIMING || !round.packet) {
       throw new GameError('INVALID_PHASE');
     }
-    if (announced && round.claimEndsAt) return round.claimEndsAt;
+    if ((announced || refreshed) && round.claimEndsAt) return round.claimEndsAt;
 
     const claimEndsAt = new Date(
       Date.now() + Math.max(1, settings.round.claimDurationSeconds) * 1_000,
@@ -1070,6 +1100,9 @@ export async function refreshUnannouncedClaimDeadline(roundId: string): Promise<
     await tx.packet.update({
       where: { id: round.packet.id },
       data: { expiresAt: claimEndsAt },
+    });
+    await event(tx, round.id, 'CLAIM_DEADLINE_REFRESHED', {
+      claimEndsAt: claimEndsAt.toISOString(),
     });
     return claimEndsAt;
   });
@@ -1102,7 +1135,7 @@ export async function expirePacket(roundId: string) {
 }
 
 /** 将剩余红包金额随机拆给未认额参与者（自动认尾包） */
-function splitRemainingCents(total: bigint, count: number): bigint[] {
+export function splitRemainingCents(total: bigint, count: number): bigint[] {
   if (count <= 0) return [];
   if (total < BigInt(count)) {
     return Array.from({ length: count }, (_, index) => (index < Number(total) ? 1n : 0n));
@@ -1111,8 +1144,9 @@ function splitRemainingCents(total: bigint, count: number): bigint[] {
   let rest = total - BigInt(count) * base;
   const parts = Array.from({ length: count }, () => base);
   while (rest > 0n) {
-    const idx = Math.floor(Math.random() * count);
-    const take = rest === 1n ? 1n : 1n + BigInt(Math.floor(Math.random() * Number(rest > 100n ? 100n : rest)));
+    const idx = randomInt(count);
+    const maxTake = Number(rest > 100n ? 100n : rest);
+    const take = rest === 1n ? 1n : BigInt(randomInt(1, maxTake + 1));
     const add = take > rest ? rest : take;
     parts[idx]! += add;
     rest -= add;
@@ -1394,7 +1428,8 @@ function internalRandomShare(remainingCents: bigint, remainingCount: number): bi
   if (remainingCount <= 1) return remainingCents;
   const remaining = safeNumber(remainingCents, 'packetRemaining');
   const cap = Math.max(1, Math.floor((remaining / remainingCount) * 2));
-  const roll = 1 + Math.floor(Math.random() * cap);
+  // 红包金额决定牌型，必须使用密码学安全且无取模偏差的随机源。
+  const roll = randomInt(1, cap + 1);
   return BigInt(Math.min(remaining - (remainingCount - 1), Math.max(1, roll)));
 }
 
@@ -1688,7 +1723,10 @@ export async function correctClaim(params: {
 
 export async function forfeitMissingPlayer(roundId: string, userId: string, actorId?: string) {
   return serializable(async (tx) => {
-    const round = await tx.round.findUnique({ where: { id: roundId } });
+    const round = await tx.round.findUnique({
+      where: { id: roundId },
+      include: { packet: { select: { id: true, channel: true, participantCount: true } } },
+    });
     if (!round) throw new GameError('ROUND_NOT_FOUND');
     if (!isClaimReviewPhase(round.phase)) throw new GameError('INVALID_PHASE');
     if (round.bankerId === userId) throw new GameError('BANKER_CANNOT_FORFEIT');
@@ -1713,6 +1751,15 @@ export async function forfeitMissingPlayer(roundId: string, userId: string, acto
       where: { id: bet.id },
       data: { status: BetStatus.FORFEITED },
     });
+    if (round.packet?.channel === PacketChannel.INTERNAL) {
+      if (round.packet.participantCount <= 1) {
+        throw new GameError('INVALID_PACKET_PARTICIPANTS');
+      }
+      await tx.packet.update({
+        where: { id: round.packet.id },
+        data: { participantCount: { decrement: 1 } },
+      });
+    }
     await event(tx, round.id, 'PLAYER_FORFEITED', { userId }, actorId);
     return updated;
   });
@@ -1827,6 +1874,7 @@ export async function settleGameRound(roundId: string, actorId?: string) {
         claimCents: safeNumber(claims.get(bet.userId)!.amountCents, 'claim'),
         reservedCents: safeNumber(reservedCentsOf(bet), 'betReserve'),
         betPlacedAtMs: bet.createdAt.getTime(),
+        isAllIn: bet.isAllIn,
       })),
       participantCount: round.bets.length + 1,
       handConfig: settings.hand,
@@ -2082,17 +2130,35 @@ export async function settleGameRound(roundId: string, actorId?: string) {
       day,
     );
 
-    const existingStat = await tx.bankerStat.findUnique({
-      where: { userId_roomId: { userId: round.bankerId, roomId: round.roomId } },
-    });
-    const previousTrend = Array.isArray(existingStat?.trendRecent)
-      ? (existingStat.trendRecent as string[])
-      : [];
+    const [existingStat, lastFinished] = await Promise.all([
+      tx.bankerStat.findUnique({
+        where: { userId_roomId: { userId: round.bankerId, roomId: round.roomId } },
+      }),
+      tx.round.findFirst({
+        where: {
+          roomId: round.roomId,
+          phase: RoundPhase.FINISHED,
+          id: { not: round.id },
+        },
+        orderBy: { seqNo: 'desc' },
+        select: { scoreboard: { select: { bankerSummary: true } } },
+      }),
+    ]);
+    const roomTrend = trendFromBankerSummary(lastFinished?.scoreboard?.bankerSummary);
+    const previousTrend = roomTrend.length
+      ? roomTrend
+      : Array.isArray(existingStat?.trendRecent)
+        ? (existingStat.trendRecent as string[])
+        : [];
     const bankerLabel =
       calculation.bankerHand.type === 'NORMAL'
         ? `${calculation.bankerHand.points}点`
         : HAND_LABEL[calculation.bankerHand.type];
-    const trend = [...previousTrend, bankerLabel].slice(-settings.round.trendLength);
+    const trend = continueRoomBankerTrend(
+      previousTrend,
+      bankerLabel,
+      settings.round.trendLength,
+    );
     const resetDaily = existingStat?.todayDate !== day;
     const bankerStat = await tx.bankerStat.upsert({
       where: { userId_roomId: { userId: round.bankerId, roomId: round.roomId } },
@@ -2164,6 +2230,9 @@ export async function settleGameRound(roundId: string, actorId?: string) {
         points: pair.playerHand.points,
         isBust: pair.isBustPlayer,
         multiplier: pair.multiplier,
+        payableCents: String(pair.payableCents),
+        paidCents: String(pair.paidCents),
+        rakeCents: String(pair.rakeCents),
         shortfallCents: String(pair.shortfallCents),
         balanceBeforeCents: String(before),
         balanceAfterCents: String(before + BigInt(pair.playerNetCents)),
@@ -2193,6 +2262,7 @@ export async function settleGameRound(roundId: string, actorId?: string) {
         seqNo: round.seqNo,
         playerLines: JSON.parse(JSON.stringify(playerLines)) as Prisma.InputJsonValue,
         bankerSummary: JSON.parse(JSON.stringify(bankerSummary)) as Prisma.InputJsonValue,
+        presentationSyncStatus: 'PENDING',
       },
     });
     await tx.round.update({

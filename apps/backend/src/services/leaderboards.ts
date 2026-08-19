@@ -1,4 +1,5 @@
 import { AccountType, Prisma } from '@prisma/client';
+import { createHash } from 'node:crypto';
 import { prisma } from '../lib/prisma.js';
 import { serializable } from '../lib/transaction.js';
 import { getGameConfig } from './gameConfig.js';
@@ -30,6 +31,10 @@ const DEFAULT_CONFIG: LeaderboardConfig = {
   },
 };
 
+export function leaderboardSnapshotHash(snapshot: Prisma.JsonValue): string {
+  return createHash('sha256').update(JSON.stringify(snapshot)).digest('hex');
+}
+
 function maskName(value: string | null): string {
   if (!value) return '玩家';
   if (value.length <= 1) return `${value}*`;
@@ -55,20 +60,54 @@ function isoWeek(day: string): { year: number; week: number; monday: string; sun
   };
 }
 
-function periodBounds(period: Period, day = malaysiaDay()) {
-  if (period === 'daily') return { key: day, start: day, end: day };
+function periodBounds(period: Period, periodKey?: string) {
+  const currentDay = malaysiaDay();
+  if (period === 'daily') {
+    const day = periodKey ?? currentDay;
+    const parsed = new Date(`${day}T00:00:00Z`);
+    if (
+      !/^\d{4}-\d{2}-\d{2}$/.test(day)
+      || Number.isNaN(parsed.getTime())
+      || parsed.toISOString().slice(0, 10) !== day
+    ) {
+      throw new Error('INVALID_LEADERBOARD_PERIOD_KEY');
+    }
+    return { key: day, start: day, end: day };
+  }
   if (period === 'weekly') {
-    const week = isoWeek(day);
+    if (periodKey) {
+      const match = /^(\d{4})-W(\d{2})$/.exec(periodKey);
+      if (!match) throw new Error('INVALID_LEADERBOARD_PERIOD_KEY');
+      const year = Number(match[1]);
+      const weekNumber = Number(match[2]);
+      if (weekNumber < 1 || weekNumber > 53) {
+        throw new Error('INVALID_LEADERBOARD_PERIOD_KEY');
+      }
+      const jan4 = new Date(Date.UTC(year, 0, 4));
+      const jan4Weekday = jan4.getUTCDay() || 7;
+      const monday = new Date(jan4);
+      monday.setUTCDate(jan4.getUTCDate() - jan4Weekday + 1 + (weekNumber - 1) * 7);
+      const resolved = isoWeek(monday.toISOString().slice(0, 10));
+      const resolvedKey = `${resolved.year}-W${String(resolved.week).padStart(2, '0')}`;
+      if (resolvedKey !== periodKey) throw new Error('INVALID_LEADERBOARD_PERIOD_KEY');
+      return { key: periodKey, start: resolved.monday, end: resolved.sunday };
+    }
+    const week = isoWeek(currentDay);
     return {
       key: `${week.year}-W${String(week.week).padStart(2, '0')}`,
       start: week.monday,
       end: week.sunday,
     };
   }
-  const [year, month] = day.split('-').map(Number);
+  const monthKey = periodKey ?? currentDay.slice(0, 7);
+  const match = /^(\d{4})-(\d{2})$/.exec(monthKey);
+  if (!match) throw new Error('INVALID_LEADERBOARD_PERIOD_KEY');
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  if (month < 1 || month > 12) throw new Error('INVALID_LEADERBOARD_PERIOD_KEY');
   const last = new Date(Date.UTC(year, month, 0)).getUTCDate();
   return {
-    key: `${year}-${String(month).padStart(2, '0')}`,
+    key: monthKey,
     start: `${year}-${String(month).padStart(2, '0')}-01`,
     end: `${year}-${String(month).padStart(2, '0')}-${String(last).padStart(2, '0')}`,
   };
@@ -85,6 +124,7 @@ export async function generateLeaderboard(
   gameCode: string,
   type: BoardType,
   period: Period,
+  periodKey?: string,
 ) {
   const [config, settings] = await Promise.all([
     getGameConfig(gameCode, 'leaderboard', DEFAULT_CONFIG),
@@ -93,7 +133,7 @@ export async function generateLeaderboard(
   if (!config.enabledTypes.includes(type)) {
     throw new Error('LEADERBOARD_TYPE_DISABLED');
   }
-  const bounds = periodBounds(period);
+  const bounds = periodBounds(period, periodKey);
   let scores = new Map<string, bigint>();
 
   if (type === 'points') {
@@ -224,8 +264,10 @@ export async function leaderboardDashboard(
   gameCode: string,
   period: Period = 'daily',
   includeUserIds = false,
+  periodKey?: string,
+  refresh = false,
 ) {
-  const bounds = periodBounds(period);
+  const bounds = periodBounds(period, periodKey);
   const config = await getGameConfig(
     gameCode,
     'leaderboard',
@@ -240,8 +282,8 @@ export async function leaderboardDashboard(
       .map((board) => [board.type, board]),
   );
   for (const type of config.enabledTypes) {
-    if (!boards.has(type)) {
-      boards.set(type, await generateLeaderboard(gameCode, type, period));
+    if (refresh || !boards.has(type)) {
+      boards.set(type, await generateLeaderboard(gameCode, type, period, bounds.key));
     }
   }
   const rankedUserIds = [
@@ -287,7 +329,13 @@ export async function leaderboardDashboard(
     boards: Object.fromEntries(
       [...boards.entries()].map(([type, board]) => [
         type,
-        { generatedAt: board.generatedAt, ranks: sanitize(board.rankSnapshot) },
+        {
+          generatedAt: board.generatedAt,
+          ...(includeUserIds
+            ? { snapshotHash: leaderboardSnapshotHash(board.rankSnapshot) }
+            : {}),
+          ranks: sanitize(board.rankSnapshot),
+        },
       ]),
     ),
   };
@@ -298,10 +346,15 @@ export async function distributeLeaderboardRewards(params: {
   gameCode: string;
   type: BoardType;
   period: Period;
+  periodKey: string;
+  expectedSnapshotHash: string;
   prizes: Array<{ rank: number; amountCents: bigint }>;
   operatorId: string;
 }) {
-  const bounds = periodBounds(params.period);
+  const bounds = periodBounds(params.period, params.periodKey);
+  if (bounds.end >= malaysiaDay()) {
+    throw new Error('LEADERBOARD_PERIOD_NOT_CLOSED');
+  }
   const config = await getGameConfig(
     params.gameCode,
     'leaderboard',
@@ -310,17 +363,16 @@ export async function distributeLeaderboardRewards(params: {
   if (!config.enabledTypes.includes(params.type)) {
     throw new Error('LEADERBOARD_TYPE_DISABLED');
   }
-  const board = await prisma.leaderboard.findUnique({
-    where: {
-      gameCode_type_period_periodKey: {
-        gameCode: params.gameCode,
-        type: params.type,
-        period: params.period,
-        periodKey: bounds.key,
-      },
-    },
-  });
-  if (!board) throw new Error('LEADERBOARD_NOT_GENERATED');
+  // 结算时按已封闭周期重新生成最终快照，避免沿用日切前最后一次定时快照漏掉尾段流水。
+  const board = await generateLeaderboard(
+    params.gameCode,
+    params.type,
+    params.period,
+    bounds.key,
+  );
+  if (leaderboardSnapshotHash(board.rankSnapshot) !== params.expectedSnapshotHash) {
+    throw new Error('LEADERBOARD_SNAPSHOT_CHANGED');
+  }
   const ranks = board.rankSnapshot as Array<{ rank: number; userId?: string }>;
   const results: Array<{ rank: number; userId: string; amountCents: string; granted: boolean }> = [];
   for (const prize of params.prizes) {

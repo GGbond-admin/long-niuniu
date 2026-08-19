@@ -30,6 +30,7 @@ export const LEDGER_LABELS: Record<string, string> = {
   group_packet_refund: '群红包退回',
   packet_create: '对局红包发出',
   packet_claim: '对局红包核销',
+  packet_internal_claim: '领取对局红包',
   packet_return: '对局红包退回',
   cancelled_packet_claim: '取消局红包核销',
   round_cancel_refund: '取消局退款',

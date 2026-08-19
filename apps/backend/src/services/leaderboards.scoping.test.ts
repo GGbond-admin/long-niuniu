@@ -71,6 +71,7 @@ vi.mock('./wallet.js', () => ({ transfer: mocks.transfer }));
 import {
   distributeLeaderboardRewards,
   generateLeaderboard,
+  leaderboardSnapshotHash,
 } from './leaderboards.js';
 
 describe('排行榜游戏隔离', () => {
@@ -118,10 +119,14 @@ describe('排行榜游戏隔离', () => {
   });
 
   it('相同榜型周期名次的发奖幂等键包含 gameCode', async () => {
+    const gameAPreview = await generateLeaderboard('GAME_A', 'points', 'daily', '2026-08-06');
+    const gameBPreview = await generateLeaderboard('GAME_B', 'points', 'daily', '2026-08-06');
     await distributeLeaderboardRewards({
       gameCode: 'GAME_A',
       type: 'points',
       period: 'daily',
+      periodKey: '2026-08-06',
+      expectedSnapshotHash: leaderboardSnapshotHash(gameAPreview.rankSnapshot),
       prizes: [{ rank: 1, amountCents: 888n }],
       operatorId: 'admin-1',
     });
@@ -129,6 +134,8 @@ describe('排行榜游戏隔离', () => {
       gameCode: 'GAME_B',
       type: 'points',
       period: 'daily',
+      periodKey: '2026-08-06',
+      expectedSnapshotHash: leaderboardSnapshotHash(gameBPreview.rankSnapshot),
       prizes: [{ rank: 1, amountCents: 888n }],
       operatorId: 'admin-1',
     });
@@ -137,8 +144,38 @@ describe('排行榜游戏隔离', () => {
       (call) => call[1].idempotencyKey,
     );
     expect(idempotencyKeys).toEqual([
-      'lb-reward:GAME_A:points:daily:2026-08-07:rank1',
-      'lb-reward:GAME_B:points:daily:2026-08-07:rank1',
+      'lb-reward:GAME_A:points:daily:2026-08-06:rank1',
+      'lb-reward:GAME_B:points:daily:2026-08-06:rank1',
     ]);
+  });
+
+  it('当前仍在变化的周期禁止发奖', async () => {
+    await expect(
+      distributeLeaderboardRewards({
+        gameCode: 'GAME_A',
+        type: 'points',
+        period: 'daily',
+        periodKey: '2026-08-07',
+        expectedSnapshotHash: '0'.repeat(64),
+        prizes: [{ rank: 1, amountCents: 888n }],
+        operatorId: 'admin-1',
+      }),
+    ).rejects.toThrow('LEADERBOARD_PERIOD_NOT_CLOSED');
+    expect(mocks.transfer).not.toHaveBeenCalled();
+  });
+
+  it('预览后榜单发生变化时拒绝按旧快照发奖', async () => {
+    await expect(
+      distributeLeaderboardRewards({
+        gameCode: 'GAME_A',
+        type: 'points',
+        period: 'daily',
+        periodKey: '2026-08-06',
+        expectedSnapshotHash: '0'.repeat(64),
+        prizes: [{ rank: 1, amountCents: 888n }],
+        operatorId: 'admin-1',
+      }),
+    ).rejects.toThrow('LEADERBOARD_SNAPSHOT_CHANGED');
+    expect(mocks.transfer).not.toHaveBeenCalled();
   });
 });

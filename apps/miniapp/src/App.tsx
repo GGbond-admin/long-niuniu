@@ -1,5 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
+import {
+  Navigate,
+  Route,
+  Routes,
+  useLocation,
+  useNavigate,
+  type Location,
+} from 'react-router-dom';
 import {
   api,
   DEVICE_SESSION_INVALID_EVENT,
@@ -91,6 +98,9 @@ export default function App() {
   const [canSelfRebind, setCanSelfRebind] = useState(false);
   const navigate = useNavigate();
   const location = useLocation();
+  const backgroundLocation = (
+    location.state as { backgroundLocation?: Location } | null
+  )?.backgroundLocation;
   const bootRef = useRef(false);
 
   useEffect(() => {
@@ -145,7 +155,9 @@ export default function App() {
     app?.expand();
     app?.disableVerticalSwipes?.();
     initTelegramFullscreen();
+  }, []);
 
+  useEffect(() => {
     // Fast Refresh / 严格模式重挂载时不要重复打登录并把界面打回「加载中…」
     if (bootRef.current && getCachedSession() && getToken()) return;
     bootRef.current = true;
@@ -313,7 +325,7 @@ export default function App() {
 
   return (
     <>
-      <Routes>
+      <Routes location={backgroundLocation ?? location}>
         <Route path="/bind-inviter" element={<BindInviter session={session} onDone={refresh} />} />
         <Route path="/bind-device" element={<BindDevice onDone={refresh} />} />
         <Route path="/kyc" element={<KycForm onDone={refresh} />} />
@@ -323,8 +335,12 @@ export default function App() {
         <Route path="/agent/players" element={<AgentPlayers />} />
         <Route path="/agent/sharing" element={<AgentSubagents />} />
         <Route path="/game/:roomId" element={<GameDetail kycStatus={session.onboarding.kycStatus} />} />
-        <Route path="/game/:roomId/play" element={<GameRoom session={session} />} />
+        <Route
+          path="/game/:roomId/play"
+          element={<GameRoom session={session} freezeFeed={!!backgroundLocation} />}
+        />
         <Route path="/game/:roomId/packet" element={<PacketDetail />} />
+        <Route path="/game/:roomId/packets/:packetId" element={<PacketDetail />} />
         <Route
           path="/game/:roomId/send-packet"
           element={
@@ -334,7 +350,17 @@ export default function App() {
             />
           }
         />
-        <Route path="/game/:roomId/tip" element={<TipSupport ownerUid={session.uid} />} />
+        <Route
+          path="/game/:roomId/tip"
+          element={
+            <TipSupport
+              ownerUid={session.uid}
+              paymentPinSet={session.security.paymentPinSet}
+              nickname={session.nickname}
+              avatarUrl={session.avatarUrl}
+            />
+          }
+        />
         <Route path="/game/:roomId/rewards" element={<Rewards />} />
         <Route path="/game/:roomId/leaderboards" element={<Leaderboards />} />
         <Route path="/game-rules" element={<DefaultGameRedirect destination="rules" />} />
@@ -429,6 +455,17 @@ export default function App() {
         />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
+      {backgroundLocation && (
+        <Routes>
+          <Route path="/game/:roomId/packet" element={<PacketDetail overlay />} />
+          <Route
+            path="/game/:roomId/packets/:packetId"
+            element={<PacketDetail overlay />}
+          />
+          <Route path="/game/:roomId/rewards" element={<Rewards />} />
+          <Route path="/game/:roomId/leaderboards" element={<Leaderboards />} />
+        </Routes>
+      )}
       <SupportInboxToast />
     </>
   );

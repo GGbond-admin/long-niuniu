@@ -163,7 +163,9 @@ export async function grantReward(
     const amount = `${granted.config.amountCents / 100n}.${(granted.config.amountCents % 100n)
       .toString()
       .padStart(2, '0')}`;
-    void pushService.notifyRewardGranted(userId, granted.config.title, amount);
+    void pushService
+      .notifyRewardGranted(userId, granted.config.title, amount)
+      .catch(() => undefined);
     gameBus.rewardGranted({
       userId,
       title: granted.config.title,
@@ -206,7 +208,48 @@ export async function processRoundRewards(roundId: string) {
       }
     }
   }
+  const marker = await prisma.roundEvent.findFirst({
+    where: { roundId, type: 'ROUND_REWARDS_PROCESSED' },
+    select: { id: true },
+  });
+  if (!marker) {
+    await prisma.roundEvent.create({
+      data: {
+        roundId,
+        type: 'ROUND_REWARDS_PROCESSED',
+        payload: { processedAt: new Date().toISOString() },
+        actorId: 'SYSTEM',
+      },
+    });
+  }
   return results;
+}
+
+/** 结算成功但奖励后处理失败时补偿；grantReward 按用户、规则和业务日幂等。 */
+export async function retryPendingRoundRewards(
+  now = new Date(),
+  limit = 50,
+): Promise<number> {
+  const rounds = await prisma.round.findMany({
+    where: {
+      phase: 'FINISHED',
+      settledAt: { gte: new Date(now.getTime() - 7 * 24 * 60 * 60_000) },
+      events: { none: { type: 'ROUND_REWARDS_PROCESSED' } },
+    },
+    select: { id: true },
+    orderBy: { settledAt: 'asc' },
+    take: limit,
+  });
+  let processed = 0;
+  for (const round of rounds) {
+    try {
+      await processRoundRewards(round.id);
+      processed += 1;
+    } catch (error) {
+      console.error('[rewards] retry round failed', round.id, error);
+    }
+  }
+  return processed;
 }
 
 function maskNickname(value: string | null): string {

@@ -129,15 +129,17 @@ model VirtualPlayer {
 }
 
 model Device {
-  id          String       @id @default(cuid())
-  userId      String       @unique @map("user_id")
-  deviceId    String       @map("device_id") // 前端指纹 + UUID
-  authVersion Int          @default(1) @map("auth_version")
-  boundAt     DateTime     @default(now()) @map("bound_at")
-  status      DeviceStatus @default(ACTIVE)
-  /** 最近一次玩家自助换绑时间：7 天内限一次，且换绑后 24 小时暂停提现 */
-  lastSelfRebindAt DateTime? @map("last_self_rebind_at")
-  user        User         @relation(fields: [userId], references: [id])
+  id               String       @id @default(cuid())
+  userId           String       @unique @map("user_id")
+  deviceId         String       @map("device_id") // 前端指纹 + UUID
+  authVersion      Int          @default(1) @map("auth_version")
+  boundAt          DateTime     @default(now()) @map("bound_at")
+  status           DeviceStatus @default(ACTIVE)
+  /**
+   * 最近一次玩家自助换绑时间：7 天内限一次，且换绑后 24 小时暂停提现
+   */
+  lastSelfRebindAt DateTime?    @map("last_self_rebind_at")
+  user             User         @relation(fields: [userId], references: [id])
 
   @@index([deviceId])
   @@map("devices")
@@ -306,13 +308,17 @@ model DepositOrder {
   expiredAt       DateTime?            @map("expired_at")
   /// 回调返回的实付金额，与下单金额不符时不自动入账
   paidAmountCents BigInt?              @map("paid_amount_cents")
+  /// 实际写入用户账本的不可变金额；冲正必须按此值撤销
+  creditedAmountCents BigInt?          @map("credited_amount_cents")
   providerPayload Json?                @map("provider_payload") // 最近一次网关下单/回调原文留档
+  providerCheckedAt DateTime?          @map("provider_checked_at")
   user            User                 @relation(fields: [userId], references: [id])
   payeeAccount    DepositPayeeAccount? @relation(fields: [payeeAccountId], references: [id])
 
   @@unique([userId, requestId])
   @@index([status])
   @@index([channel, status])
+  @@index([channel, status, providerCheckedAt])
   @@map("deposit_orders")
 }
 
@@ -429,19 +435,21 @@ enum BotStatus {
 
 // 游戏房：对局在 Mini App 网页房间内进行；chatId/botId 为旧 TG 群绑定遗留字段（已弃用）
 model Room {
-  id             String          @id @default(cuid())
-  gameCode       String          @unique @default("SUPREME_NIUNIU") @map("game_code")
-  chatId         BigInt?         @unique @map("chat_id") // 已弃用：旧 Telegram 群 ID
-  title          String // 由游戏目录决定，不允许作为普通互动群自由改名
-  botId          String?         @map("bot_id") // 已弃用：旧群管理 Bot
-  minPlayers     Int             @default(2) @map("min_players")
-  status         RoomStatus      @default(ACTIVE)
-  inviteLink     String?         @map("invite_link") // 已弃用：旧群邀请链接
-  bot            TelegramBot?    @relation(fields: [botId], references: [id])
-  rounds         Round[]
-  members        RoomMember[]
-  virtualPlayers VirtualPlayer[]
-  createdAt      DateTime        @default(now()) @map("created_at")
+  id                String             @id @default(cuid())
+  gameCode          String             @unique @default("SUPREME_NIUNIU") @map("game_code")
+  chatId            BigInt?            @unique @map("chat_id") // 已弃用：旧 Telegram 群 ID
+  title             String // 由游戏目录决定，不允许作为普通互动群自由改名
+  botId             String?            @map("bot_id") // 已弃用：旧群管理 Bot
+  minPlayers        Int                @default(2) @map("min_players")
+  status            RoomStatus         @default(ACTIVE)
+  inviteLink        String?            @map("invite_link") // 已弃用：旧群邀请链接
+  bot               TelegramBot?       @relation(fields: [botId], references: [id])
+  rounds            Round[]
+  members           RoomMember[]
+  virtualPlayers    VirtualPlayer[]
+  profitPoolBatches ProfitPoolBatch[]
+  profitPoolCutover ProfitPoolCutover?
+  createdAt         DateTime           @default(now()) @map("created_at")
 
   @@map("rooms")
 }
@@ -458,6 +466,7 @@ model RoomMember {
 
   @@unique([roomId, userId])
   @@index([roomId, status])
+  @@index([userId, status, lastSeenAt])
   @@map("room_members")
 }
 
@@ -495,14 +504,15 @@ model Round {
   settledAt           DateTime?  @map("settled_at")
   finishedAt          DateTime?  @map("finished_at")
 
-  room        Room             @relation(fields: [roomId], references: [id])
-  bids        BankerBid[]
-  bets        Bet[]
-  packet      Packet?
-  claims      Claim[]
-  settlements Settlement[]
-  scoreboard  RoundScoreboard?
-  events      RoundEvent[]
+  room           Room                 @relation(fields: [roomId], references: [id])
+  bids           BankerBid[]
+  bets           Bet[]
+  packet         Packet?
+  claims         Claim[]
+  settlements    Settlement[]
+  scoreboard     RoundScoreboard?
+  events         RoundEvent[]
+  profitPoolLock ProfitPoolRoundLock?
 
   @@unique([roomId, seqNo])
   @@index([roomId, phase, seqNo])
@@ -676,7 +686,8 @@ model TngClaimInbox {
 
   packet Packet @relation(fields: [packetId], references: [id])
 
-  @@unique([packetId, tngNameHash, amountCents]) // 幂等：同红包同人同额只留一条
+  // 同名同额可能属于两个不同参与者；采集端重试会保留相同领取时间。
+  @@unique([packetId, tngNameHash, amountCents, claimedAt])
   @@index([status, createdAt])
   @@map("tng_claim_inbox")
 }
@@ -732,16 +743,49 @@ enum SettleOutcome {
 }
 
 model RoundScoreboard {
-  id                 String   @id @default(cuid())
-  roundId            String   @unique @map("round_id")
-  seqNo              Int      @map("seq_no")
-  playerLines        Json     @map("player_lines")
-  bankerSummary      Json     @map("banker_summary") // 含费用/庄盈亏/走势
-  publishedMessageId BigInt?  @map("published_message_id")
-  createdAt          DateTime @default(now()) @map("created_at")
-  round              Round    @relation(fields: [roundId], references: [id])
+  id                      String                    @id @default(cuid())
+  roundId                 String                    @unique @map("round_id")
+  seqNo                   Int                       @map("seq_no")
+  playerLines             Json                      @map("player_lines")
+  bankerSummary           Json                      @map("banker_summary") // 含费用/庄盈亏/走势
+  publishedMessageId      BigInt?                   @map("published_message_id")
+  presentation            Json?
+  presentationRevision    Int                       @default(0) @map("presentation_revision")
+  presentationUpdatedBy   String?                   @map("presentation_updated_by")
+  presentationSyncStatus  ScoreboardSyncStatus      @default(LEGACY) @map("presentation_sync_status")
+  presentationSyncError   String?                   @map("presentation_sync_error")
+  presentationSyncedAt    DateTime?                 @map("presentation_synced_at")
+  publishedChatMessageIds Json                      @default("[]") @map("published_chat_message_ids")
+  createdAt               DateTime                  @default(now()) @map("created_at")
+  updatedAt               DateTime                  @updatedAt @map("updated_at")
+  round                   Round                     @relation(fields: [roundId], references: [id])
+  presentationRevisions   RoundScoreboardRevision[]
 
   @@map("round_scoreboards")
+}
+
+enum ScoreboardSyncStatus {
+  LEGACY
+  PENDING
+  SYNCED
+  FAILED
+  MESSAGE_EXPIRED
+}
+
+model RoundScoreboardRevision {
+  id             String          @id @default(cuid())
+  scoreboardId   String          @map("scoreboard_id")
+  revision       Int
+  presentation   Json
+  renderedChunks Json            @default("[]") @map("rendered_chunks")
+  reason         String
+  adminId        String          @map("admin_id")
+  createdAt      DateTime        @default(now()) @map("created_at")
+  scoreboard     RoundScoreboard @relation(fields: [scoreboardId], references: [id], onDelete: Cascade)
+
+  @@unique([scoreboardId, revision])
+  @@index([adminId, createdAt])
+  @@map("round_scoreboard_revisions")
 }
 
 model BankerStat {
@@ -853,22 +897,22 @@ model RebateSettlement {
 
 /// 代理/股东：绑定一个平台用户账号接收称桶分成
 model Agent {
-  id          String      @id @default(cuid())
-  userId      String      @unique @map("user_id")
-  user        User        @relation(fields: [userId], references: [id])
+  id            String      @id @default(cuid())
+  userId        String      @unique @map("user_id")
+  user          User        @relation(fields: [userId], references: [id])
   /// 后台展示名（如 A代理 / 股东-张三）
-  label       String
+  label         String
   /// 称桶占成点数：实得比例 = sharePoints ÷ 称桶基准(默认130)。65 点 → 50%
-  sharePoints Int         @map("share_points")
-  status      AgentStatus @default(ACTIVE)
+  sharePoints   Int         @map("share_points")
+  status        AgentStatus @default(ACTIVE)
   /// 上级代理（null = 第一层代理，仅后台可建）；下级占成须 ≤ 上级占成 − 最低预留点数
-  parentAgentId String? @map("parent_agent_id")
-  parent        Agent?  @relation("AgentTree", fields: [parentAgentId], references: [id])
-  children      Agent[] @relation("AgentTree")
+  parentAgentId String?     @map("parent_agent_id")
+  parent        Agent?      @relation("AgentTree", fields: [parentAgentId], references: [id])
+  children      Agent[]     @relation("AgentTree")
   /// 建立者：ADMIN（后台）或上级代理的 agentId（前台升级）
-  createdBy     String? @map("created_by")
-  createdAt   DateTime    @default(now()) @map("created_at")
-  updatedAt   DateTime    @updatedAt @map("updated_at")
+  createdBy     String?     @map("created_by")
+  createdAt     DateTime    @default(now()) @map("created_at")
+  updatedAt     DateTime    @updatedAt @map("updated_at")
 
   players AgentPlayer[]
   shares  AgentProfitShare[]
@@ -971,6 +1015,157 @@ model AgentProfitShare {
   @@unique([date, agentId])
   @@index([agentId, date])
   @@map("agent_profit_shares")
+}
+
+/// 新版称桶利润池：以单一房间内的连续局号闭区间为正式结算单位。
+/// 旧 ProfitPoolDaily/AgentProfitShare 仅保留为历史，不再产生新记录。
+model ProfitPoolBatch {
+  id       String @id @default(cuid())
+  poolCode String @unique @map("pool_code")
+
+  roomId              String @map("room_id")
+  room                Room   @relation(fields: [roomId], references: [id])
+  startSeqNo          Int    @map("start_seq_no")
+  endSeqNo            Int    @map("end_seq_no")
+  roundCount          Int    @map("round_count")
+  finishedRoundCount  Int    @map("finished_round_count")
+  cancelledRoundCount Int    @default(0) @map("cancelled_round_count")
+
+  /// 流水沿用游戏有效流水口径：闲家有效注 + 庄家对应对赌流水。
+  turnoverPlayerCents BigInt @default(0) @map("turnover_player_cents")
+  turnoverBankerCents BigInt @default(0) @map("turnover_banker_cents")
+  turnoverCents       BigInt @map("turnover_cents")
+  rakePlayerCents     BigInt @default(0) @map("rake_player_cents")
+  rakeBankerCents     BigInt @default(0) @map("rake_banker_cents")
+  rakeTotalCents      BigInt @map("rake_total_cents")
+
+  /// 支出百分比以万分点存储：100 = 1%，10000 = 100%。
+  expenseBps         Int    @map("expense_bps")
+  expenseCents       BigInt @map("expense_cents")
+  netPoolCents       BigInt @map("net_pool_cents")
+  distributedCents   BigInt @default(0) @map("distributed_cents")
+  residualCents      BigInt @default(0) @map("residual_cents")
+  bucketBaseSnapshot Int    @map("bucket_base_snapshot")
+  calculationHash    String @map("calculation_hash")
+
+  status        ProfitPoolBatchStatus @default(PENDING)
+  generatedBy   String                @map("generated_by")
+  generatedAt   DateTime              @default(now()) @map("generated_at")
+  distributedBy String?               @map("distributed_by")
+  distributedAt DateTime?             @map("distributed_at")
+
+  roundLocks      ProfitPoolRoundLock[]
+  agentSnapshots  ProfitPoolAgentSnapshot[]
+  playerSnapshots ProfitPoolPlayerSnapshot[]
+
+  @@index([roomId, startSeqNo, endSeqNo])
+  @@index([status, generatedAt])
+  @@index([generatedAt])
+  @@map("profit_pool_batches")
+}
+
+enum ProfitPoolBatchStatus {
+  PENDING
+  DISTRIBUTED
+  NO_DISTRIBUTION
+}
+
+/// 每个真实 Round 只能出现一次；该唯一约束是并发生成时的最终防重边界。
+model ProfitPoolRoundLock {
+  id                 String          @id @default(cuid())
+  poolId             String          @map("pool_id")
+  pool               ProfitPoolBatch @relation(fields: [poolId], references: [id], onDelete: Restrict)
+  roundId            String          @unique @map("round_id")
+  round              Round           @relation(fields: [roundId], references: [id], onDelete: Restrict)
+  roomId             String          @map("room_id")
+  seqNo              Int             @map("seq_no")
+  phaseSnapshot      String          @map("phase_snapshot")
+  finishedAtSnapshot DateTime?       @map("finished_at_snapshot")
+  createdAt          DateTime        @default(now()) @map("created_at")
+
+  @@unique([roomId, seqNo])
+  @@index([poolId, seqNo])
+  @@map("profit_pool_round_locks")
+}
+
+/// 生成时的完整代理树与计算结果快照；历史报表禁止回读 live Agent 关系。
+model ProfitPoolAgentSnapshot {
+  id     String          @id @default(cuid())
+  poolId String          @map("pool_id")
+  pool   ProfitPoolBatch @relation(fields: [poolId], references: [id], onDelete: Restrict)
+
+  sourceAgentId       String  @map("source_agent_id")
+  userId              String  @map("user_id")
+  parentSourceAgentId String? @map("parent_source_agent_id")
+  label               String
+  uid                 String
+  nickname            String?
+  avatarUrl           String? @map("avatar_url")
+  level               Int
+  statusSnapshot      String  @map("status_snapshot")
+  sharePointsSnapshot Int     @map("share_points_snapshot")
+  bucketBaseSnapshot  Int     @map("bucket_base_snapshot")
+
+  directAgentCount    Int      @default(0) @map("direct_agent_count")
+  teamAgentCount      Int      @default(0) @map("team_agent_count")
+  directPlayerCount   Int      @default(0) @map("direct_player_count")
+  teamPlayerCount     Int      @default(0) @map("team_player_count")
+  selfTurnoverCents   BigInt   @default(0) @map("self_turnover_cents")
+  teamTurnoverCents   BigInt   @default(0) @map("team_turnover_cents")
+  contributionBp      Int      @default(0) @map("contribution_bp")
+  selfAmountCents     BigInt   @default(0) @map("self_amount_cents")
+  overrideAmountCents BigInt   @default(0) @map("override_amount_cents")
+  amountCents         BigInt   @default(0) @map("amount_cents")
+  breakdown           Json?
+  ledgerRef           String?  @unique @map("ledger_ref")
+  createdAt           DateTime @default(now()) @map("created_at")
+
+  @@unique([poolId, sourceAgentId])
+  @@index([sourceAgentId, poolId])
+  @@index([poolId, parentSourceAgentId])
+  @@map("profit_pool_agent_snapshots")
+}
+
+/// 玩家归属与流水快照，仅用于代理本人历史看板；公司报表不展示玩家。
+model ProfitPoolPlayerSnapshot {
+  id     String          @id @default(cuid())
+  poolId String          @map("pool_id")
+  pool   ProfitPoolBatch @relation(fields: [poolId], references: [id], onDelete: Restrict)
+
+  sourceAgentId String   @map("source_agent_id")
+  userId        String   @map("user_id")
+  uid           String
+  nickname      String?
+  avatarUrl     String?  @map("avatar_url")
+  bindingSource String   @map("binding_source")
+  isAgentSelf   Boolean  @default(false) @map("is_agent_self")
+  turnoverCents BigInt   @default(0) @map("turnover_cents")
+  profitCents   BigInt   @default(0) @map("profit_cents")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  @@unique([poolId, userId])
+  @@index([poolId, sourceAgentId])
+  @@map("profit_pool_player_snapshots")
+}
+
+/// 从旧按日结算切换到按局结算时的安全边界；边界以内的局永不允许进入新池。
+model ProfitPoolCutover {
+  roomId    String   @id @map("room_id")
+  room      Room     @relation(fields: [roomId], references: [id], onDelete: Restrict)
+  maxSeqNo  Int      @default(0) @map("max_seq_no")
+  source    String   @default("LEGACY_DAILY")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@map("profit_pool_cutovers")
+}
+
+/// 业务编号原子序列，key 形如 PROFIT_POOL:20260819。
+model ProfitPoolSequence {
+  key       String   @id
+  value     Int      @default(0)
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("profit_pool_sequences")
 }
 
 model Leaderboard {
@@ -1172,6 +1367,7 @@ model Admin {
   id           String    @id @default(cuid())
   username     String    @unique
   passwordHash String    @map("password_hash")
+  tokenVersion Int       @default(0) @map("token_version")
   role         AdminRole @default(OPERATOR)
   status       String    @default("ACTIVE")
   createdAt    DateTime  @default(now()) @map("created_at")

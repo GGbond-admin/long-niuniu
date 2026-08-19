@@ -23,12 +23,12 @@ pnpm install
 # 2. 数据库
 docker compose up -d
 cd apps/backend
-cp .env.example .env          # 填入 DEFAULT_BOT_TOKEN / MINIAPP_URL
+cp .env.example .env          # 至少填写 SEED_ADMIN_PASSWORD，并配置 Bot / Mini App
 pnpm prisma:push              # 建表
 pnpm prisma:generate
 
 # 3. 启动（三个终端）
-pnpm --filter backend dev     # API :8080（首启自动创建 admin/admin123）
+pnpm --filter backend dev     # API :8080（空库按 .env 的初始管理员密码创建账号）
 pnpm --filter miniapp dev     # Mini App :5173（/api 代理到 8080）
 pnpm --filter admin dev       # 后台 :5174（/api 代理到 8080）
 
@@ -40,13 +40,14 @@ pnpm test                     # 游戏公式引擎 42 个用例
 
 ### 游戏引擎（`apps/backend/src/engine/`，全部通过单元测试）
 
-- 点数：全数字求和取个位，0 → 10 点（牛牛）
-- 牌型：豹子 17x / 满牛 15x / 反顺 14x / 顺子 13x / 对子 12x / 金牛 11x / 普通（点位倍数可配）
+- 点数：全数字求和取个位，个位 0 → 10 点（最大点数）
+- 牌型：豹子 17x / 满牛 15x / 反顺 14x / 顺子 13x / 对子 12x / 金牛 11x / 牛牛 10x / 普通（点位倍数可配）
 - 比牌：等级 → 同级比金额 → 相同平局
 - 自爆：普通牌型 ≤3 点判输；双自爆庄赢；特殊牌型豁免（可配）
-- 动态范围：下注上限=庄钱×0.5%、梭哈上限=庄钱×5%、人数系数分档
+- 动态范围：普通下注上限=庄钱×0.5%、人数系数分档；梭哈最低 RM20，上限为各自余额
+- 玩家上限：普通下注=⌊余额÷最高牌型倍数⌋（完整 RM）；梭哈固定 1:1，可精确到分押上全部余额
 - 指令解析：数字下注 / `sh金额` 梭哈 / `0` 撤回
-- 结算：闲赢庄池上限赔付+免赔、抽水只抽赢方 5%、庄家三费（上庄费 1% / 服务费 38 / 代包费=人数×1.04）
+- 结算：闲赢庄池上限赔付+免赔、梭哈固定 1:1、抽水只抽赢方 5%、庄家三费（上庄费 1% / 服务费 38 / 代包费=人数×1.04）
 - 返水：自身 0.7% + 直属 0.5% + 二级 0.3%（有效下注口径含庄家特殊规则）
 
 ### 后端 API

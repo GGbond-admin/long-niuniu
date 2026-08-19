@@ -6,7 +6,7 @@ const history = vi.hoisted(() =>
     type: 'TEXT',
     content: `message-${index}`,
     from: null,
-    at: new Date(1_700_000_000_000 + index).toISOString(),
+    at: new Date(Date.now() - 150_000 + index * 1_000).toISOString(),
   })),
 );
 

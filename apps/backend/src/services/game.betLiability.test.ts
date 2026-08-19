@@ -184,6 +184,32 @@ describe('下注最大赔付预留', () => {
     });
   });
 
+  it('梭哈按 1:1 预留：余额 RM200 可整额押上并只冻结 RM200', async () => {
+    const result = await placeBet('round-1', 'player-1', 50_000n, true);
+
+    expect(result).toMatchObject({
+      acceptedCents: 20_000n,
+      reservedCents: 20_000n,
+      maxAffordableCents: 20_000n,
+      maxMultiplier: 17,
+      liabilityMultiplier: 1,
+      adjusted: true,
+      adjustedBy: ['LIABILITY_LIMIT'],
+    });
+    expect(memory.wallet).toMatchObject({ availableCents: 0n, freezeBetCents: 20_000n });
+  });
+
+  it('梭哈精确到分：RM123.45 原额接受', async () => {
+    const result = await placeBet('round-1', 'player-1', 12_345n, true);
+
+    expect(result).toMatchObject({
+      acceptedCents: 12_345n,
+      reservedCents: 12_345n,
+      adjusted: false,
+    });
+    expect(memory.wallet).toMatchObject({ availableCents: 7_655n, freezeBetCents: 12_345n });
+  });
+
   it('修改下注按预留差额解冻和补冻', async () => {
     await placeBet('round-1', 'player-1', 5_000n, false); // 接受 11，预留 187
     const reduced = await placeBet('round-1', 'player-1', 500n, false);

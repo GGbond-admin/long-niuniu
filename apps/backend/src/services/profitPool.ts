@@ -11,9 +11,9 @@
  *     差额利润 = Σ 净池 × (直属下级团队流水 ÷ 公司总流水) × ((自身占成 − 下级占成) ÷ 基准)
  *   → 上级给下级设占成时必须至少预留 minReservePoints（默认 5）点差额。
  *
- * 结算流程（两阶段）：
- *   1) 生成报表：后台任务自动（可关）或手动生成前一马来日 → ProfitPoolDaily(PENDING)
- *   2) 确认发放：管理员核对后确认 → 状态 SETTLED，逐笔转账 + Bot 推送
+ * 当前正式结算由 profitPoolRange / profitPoolBatches 按“房间 + 连续局号区间”
+ * 手动预览、生成并发放。下方 ProfitPoolDaily 代码仅用于保留旧日报、迁移待处理
+ * 报表及复用称桶纯函数，不再由后台任务自动生成。
  *
  * 口径说明（与推广返水一致）：
  * - 「流水」= 有效下注（闲家计自身注、庄家计对赌闲注，平局按返水配置剔除，虚拟玩家不计）；
@@ -23,7 +23,12 @@
 import { AccountType, Prisma } from '@prisma/client';
 import { prisma } from '../lib/prisma.js';
 import { serializable } from '../lib/transaction.js';
-import { PLATFORM_CONFIG_SCOPE, getGameConfig, setGameConfig } from './gameConfig.js';
+import {
+  PLATFORM_CONFIG_SCOPE,
+  getGameConfig,
+  getGameConfigInTransaction,
+  setGameConfigInTransaction,
+} from './gameConfig.js';
 import { pushService } from './push.js';
 import { malaysiaDay } from './rebates.js';
 import { transfer } from './wallet.js';
@@ -45,7 +50,7 @@ export const DEFAULT_PROFIT_POOL_CONFIG: ProfitPoolConfig = {
   expenseRatio: 0.025,
   bucketBase: 130,
   minReservePoints: 5,
-  autoSettle: true,
+  autoSettle: false,
   tierPresets: [
     { label: '普通代理', points: 50 },
     { label: '高级代理', points: 60 },
@@ -62,31 +67,91 @@ export async function getProfitPoolConfig(): Promise<ProfitPoolConfig> {
   );
 }
 
+async function lockProfitPoolStructure(tx: Prisma.TransactionClient): Promise<void> {
+  await tx.$queryRaw`SELECT pg_advisory_xact_lock(784526190817::bigint)`;
+}
+
 export async function setProfitPoolConfig(
   patch: Partial<ProfitPoolConfig>,
   updatedBy?: string,
 ): Promise<ProfitPoolConfig> {
-  const current = await getProfitPoolConfig();
-  const next: ProfitPoolConfig = {
-    ...current,
-    ...patch,
-    tierPresets: patch.tierPresets ?? current.tierPresets,
-  };
-  if (!(next.expenseRatio >= 0 && next.expenseRatio <= 1)) {
-    throw new ProfitPoolError('INVALID_EXPENSE_RATIO');
-  }
-  if (!Number.isInteger(next.bucketBase) || next.bucketBase < 1 || next.bucketBase > 10_000) {
-    throw new ProfitPoolError('INVALID_BUCKET_BASE');
-  }
-  if (
-    !Number.isInteger(next.minReservePoints) ||
-    next.minReservePoints < 0 ||
-    next.minReservePoints > next.bucketBase
-  ) {
-    throw new ProfitPoolError('INVALID_MIN_RESERVE');
-  }
-  await setGameConfig(PLATFORM_CONFIG_SCOPE, 'profitPool', next, updatedBy);
-  return next;
+  return serializable(async (tx) => {
+    await lockProfitPoolStructure(tx);
+    const current = await getGameConfigInTransaction(
+      tx,
+      PLATFORM_CONFIG_SCOPE,
+      'profitPool',
+      DEFAULT_PROFIT_POOL_CONFIG,
+    );
+    const next: ProfitPoolConfig = {
+      ...current,
+      ...patch,
+      tierPresets: patch.tierPresets ?? current.tierPresets,
+    };
+    if (!(next.expenseRatio >= 0 && next.expenseRatio <= 1)) {
+      throw new ProfitPoolError('INVALID_EXPENSE_RATIO');
+    }
+    if (!Number.isInteger(next.bucketBase) || next.bucketBase < 1 || next.bucketBase > 10_000) {
+      throw new ProfitPoolError('INVALID_BUCKET_BASE');
+    }
+    if (
+      !Number.isInteger(next.minReservePoints) ||
+      next.minReservePoints < 0 ||
+      next.minReservePoints > next.bucketBase
+    ) {
+      throw new ProfitPoolError('INVALID_MIN_RESERVE');
+    }
+    if (next.tierPresets.some((preset) => preset.points < 0 || preset.points > next.bucketBase)) {
+      throw new ProfitPoolError('INVALID_TIER_PRESET_POINTS', {
+        bucketBase: next.bucketBase,
+      });
+    }
+    if (next.bucketBase !== current.bucketBase) {
+      const incompatibleAgent = await tx.agent.findFirst({
+        where: { sharePoints: { gt: next.bucketBase } },
+        select: { id: true, sharePoints: true },
+      });
+      if (incompatibleAgent) {
+        throw new ProfitPoolError('BUCKET_BASE_BELOW_EXISTING_AGENT_POINTS', {
+          bucketBase: next.bucketBase,
+          agentId: incompatibleAgent.id,
+          sharePoints: incompatibleAgent.sharePoints,
+        });
+      }
+    }
+    if (next.minReservePoints !== current.minReservePoints) {
+      const agentsWithParents = await tx.agent.findMany({
+        where: { parentAgentId: { not: null } },
+        select: {
+          id: true,
+          sharePoints: true,
+          parent: { select: { id: true, sharePoints: true } },
+        },
+      });
+      const incompatibleEdge = agentsWithParents.find(
+        (agent) =>
+          agent.parent
+          && agent.parent.sharePoints - agent.sharePoints < next.minReservePoints,
+      );
+      if (incompatibleEdge?.parent) {
+        throw new ProfitPoolError('MIN_RESERVE_BREAKS_EXISTING_TREE', {
+          minReservePoints: next.minReservePoints,
+          parentAgentId: incompatibleEdge.parent.id,
+          parentSharePoints: incompatibleEdge.parent.sharePoints,
+          childAgentId: incompatibleEdge.id,
+          childSharePoints: incompatibleEdge.sharePoints,
+        });
+      }
+    }
+    await setGameConfigInTransaction(
+      tx,
+      PLATFORM_CONFIG_SCOPE,
+      'profitPool',
+      next,
+      updatedBy,
+    );
+    return next;
+  });
 }
 
 export class ProfitPoolError extends Error {
@@ -181,6 +246,22 @@ export function computeAgentShares(params: {
   agents: AgentShareInput[];
 }): Map<string, AgentShareResult> {
   const { netPoolCents, companyTurnoverCents, bucketBase, agents } = params;
+  if (!Number.isInteger(bucketBase) || bucketBase <= 0) {
+    throw new ProfitPoolError('INVALID_BUCKET_BASE');
+  }
+  const invalidAgent = agents.find(
+    (agent) =>
+      !Number.isInteger(agent.sharePoints)
+      || agent.sharePoints < 0
+      || agent.sharePoints > bucketBase,
+  );
+  if (invalidAgent) {
+    throw new ProfitPoolError('INVALID_SHARE_POINTS', {
+      agentId: invalidAgent.agentId,
+      sharePoints: invalidAgent.sharePoints,
+      bucketBase,
+    });
+  }
   const byId = new Map(agents.map((agent) => [agent.agentId, agent]));
   const children = new Map<string, AgentShareInput[]>();
   for (const agent of agents) {
@@ -608,6 +689,13 @@ export async function confirmProfitPool(date: string, adminId: string) {
   if (!pool) throw new ProfitPoolError('POOL_NOT_GENERATED');
   if (pool.status === 'SETTLED') return null;
   if (pool.status !== 'PENDING') throw new ProfitPoolError('POOL_NOT_CONFIRMABLE');
+  const distributableCents = pool.netPoolCents > 0n ? pool.netPoolCents : 0n;
+  if (pool.distributedCents > distributableCents) {
+    throw new ProfitPoolError('DISTRIBUTION_EXCEEDS_POOL', {
+      distributableCents: String(distributableCents),
+      distributedCents: String(pool.distributedCents),
+    });
+  }
 
   const result = await serializable(async (tx) => {
     const updated = await tx.profitPoolDaily.updateMany({
@@ -638,10 +726,12 @@ export async function confirmProfitPool(date: string, adminId: string) {
       const amount = `${share.amountCents / 100n}.${(share.amountCents % 100n)
         .toString()
         .padStart(2, '0')}`;
-      void pushService.sendCustom(
-        share.agent.userId,
-        `💼 ${date} 称桶分成已发放\n占成 ${share.sharePointsSnapshot}/${share.bucketBaseSnapshot}，分成 RM${amount} 已发放到可用余额。`,
-      );
+      void pushService
+        .sendCustom(
+          share.agent.userId,
+          `💼 ${date} 称桶分成已发放\n占成 ${share.sharePointsSnapshot}/${share.bucketBaseSnapshot}，分成 RM${amount} 已发放到可用余额。`,
+        )
+        .catch(() => undefined);
     }
     return result.pool;
   }
@@ -649,13 +739,35 @@ export async function confirmProfitPool(date: string, adminId: string) {
 }
 
 /** 作废待确认报表（未发生转账，可安全删除后重新生成） */
-export async function discardPendingProfitPool(date: string) {
+export async function discardPendingProfitPool(
+  date: string,
+  actorId = 'SYSTEM',
+  auditIp?: string,
+) {
   const discarded = await serializable(async (tx) => {
     const pool = await tx.profitPoolDaily.findUnique({ where: { date } });
     if (!pool) throw new ProfitPoolError('POOL_NOT_GENERATED');
-    if (pool.status === 'SETTLED') throw new ProfitPoolError('POOL_ALREADY_SETTLED');
+    if (pool.status !== 'PENDING') throw new ProfitPoolError('POOL_NOT_CONFIRMABLE');
+    await tx.$executeRawUnsafe(
+      "SELECT set_config('app.allow_legacy_pending_discard', 'on', true)",
+    );
     await tx.agentProfitShare.deleteMany({ where: { poolId: pool.id } });
-    await tx.profitPoolDaily.delete({ where: { id: pool.id } });
+    const deleted = await tx.profitPoolDaily.deleteMany({
+      where: { id: pool.id, status: 'PENDING' },
+    });
+    if (deleted.count !== 1) throw new ProfitPoolError('POOL_NOT_CONFIRMABLE');
+    await tx.auditLog.create({
+      data: {
+        adminId: actorId,
+        action: 'LEGACY_PROFIT_POOL_DISCARDED_FOR_CUTOVER',
+        target: pool.id,
+        after: {
+          date,
+          netPoolCents: String(pool.netPoolCents),
+        },
+        ip: auditIp,
+      },
+    });
     return pool;
   });
   return discarded;
@@ -753,18 +865,24 @@ export async function createAgent(params: {
   sharePoints: number;
   actorId?: string;
 }) {
-  const config = await getProfitPoolConfig();
-  assertSharePoints(params.sharePoints, config.bucketBase);
-  const user = await prisma.user.findUnique({
-    where: { uid: params.uid },
-    include: { agentBinding: true },
-  });
-  if (!user) throw new ProfitPoolError('USER_NOT_FOUND');
-  if (user.kind === 'VIRTUAL') throw new ProfitPoolError('VIRTUAL_NOT_ALLOWED');
-  const existing = await prisma.agent.findUnique({ where: { userId: user.id } });
-  if (existing) throw new ProfitPoolError('AGENT_ALREADY_EXISTS');
-  if (user.agentBinding) throw new ProfitPoolError('USER_IS_BOUND_PLAYER');
   return serializable(async (tx) => {
+    await lockProfitPoolStructure(tx);
+    const config = await getGameConfigInTransaction(
+      tx,
+      PLATFORM_CONFIG_SCOPE,
+      'profitPool',
+      DEFAULT_PROFIT_POOL_CONFIG,
+    );
+    assertSharePoints(params.sharePoints, config.bucketBase);
+    const user = await tx.user.findUnique({
+      where: { uid: params.uid },
+      include: { agentBinding: true },
+    });
+    if (!user) throw new ProfitPoolError('USER_NOT_FOUND');
+    if (user.kind === 'VIRTUAL') throw new ProfitPoolError('VIRTUAL_NOT_ALLOWED');
+    const existing = await tx.agent.findUnique({ where: { userId: user.id } });
+    if (existing) throw new ProfitPoolError('AGENT_ALREADY_EXISTS');
+    if (user.agentBinding) throw new ProfitPoolError('USER_IS_BOUND_PLAYER');
     const agent = await tx.agent.create({
       data: {
         userId: user.id,
@@ -809,18 +927,25 @@ async function assertPointsInTree(params: {
   parentPoints: number | null;
   agentId?: string;
   config: ProfitPoolConfig;
+  tx?: Prisma.TransactionClient;
 }) {
-  const { points, parentPoints, agentId, config } = params;
+  const { points, parentPoints, agentId, config, tx } = params;
   assertSharePoints(points, config.bucketBase);
   const max =
     parentPoints !== null ? parentPoints - config.minReservePoints : config.bucketBase;
   let min = 0;
   if (agentId) {
-    const topChild = await prisma.agent.findFirst({
-      where: { parentAgentId: agentId },
-      orderBy: { sharePoints: 'desc' },
-      select: { sharePoints: true },
-    });
+    const topChild = tx
+      ? await tx.agent.findFirst({
+          where: { parentAgentId: agentId },
+          orderBy: { sharePoints: 'desc' },
+          select: { sharePoints: true },
+        })
+      : await prisma.agent.findFirst({
+          where: { parentAgentId: agentId },
+          orderBy: { sharePoints: 'desc' },
+          select: { sharePoints: true },
+        });
     if (topChild) min = topChild.sharePoints + config.minReservePoints;
   }
   if (points > max || points < min) {
@@ -838,28 +963,37 @@ export async function updateAgent(params: {
   sharePoints?: number;
   status?: 'ACTIVE' | 'DISABLED';
 }) {
-  const agent = await prisma.agent.findUnique({
-    where: { id: params.agentId },
-    include: { parent: { select: { sharePoints: true } } },
-  });
-  if (!agent) throw new ProfitPoolError('AGENT_NOT_FOUND');
-  if (params.sharePoints !== undefined) {
-    const config = await getProfitPoolConfig();
-    await assertPointsInTree({
-      points: params.sharePoints,
-      parentPoints: agent.parent?.sharePoints ?? null,
-      agentId: agent.id,
-      config,
+  return serializable(async (tx) => {
+    await lockProfitPoolStructure(tx);
+    const agent = await tx.agent.findUnique({
+      where: { id: params.agentId },
+      include: { parent: { select: { sharePoints: true } } },
     });
-  }
-  return prisma.agent.update({
-    where: { id: params.agentId },
-    data: {
-      label: params.label?.trim() || undefined,
-      sharePoints: params.sharePoints,
-      status: params.status,
-    },
-    include: AGENT_INCLUDE,
+    if (!agent) throw new ProfitPoolError('AGENT_NOT_FOUND');
+    if (params.sharePoints !== undefined) {
+      const config = await getGameConfigInTransaction(
+        tx,
+        PLATFORM_CONFIG_SCOPE,
+        'profitPool',
+        DEFAULT_PROFIT_POOL_CONFIG,
+      );
+      await assertPointsInTree({
+        points: params.sharePoints,
+        parentPoints: agent.parent?.sharePoints ?? null,
+        agentId: agent.id,
+        config,
+        tx,
+      });
+    }
+    return tx.agent.update({
+      where: { id: params.agentId },
+      data: {
+        label: params.label?.trim() || undefined,
+        sharePoints: params.sharePoints,
+        status: params.status,
+      },
+      include: AGENT_INCLUDE,
+    });
   });
 }
 
@@ -928,15 +1062,22 @@ export async function promoteAgentPlayer(params: {
   label?: string;
   actorId?: string;
 }) {
-  const config = await getProfitPoolConfig();
-  const parent = await prisma.agent.findUnique({ where: { id: params.parentAgentId } });
-  if (!parent || parent.status !== 'ACTIVE') throw new ProfitPoolError('AGENT_NOT_FOUND');
-  await assertPointsInTree({
-    points: params.sharePoints,
-    parentPoints: parent.sharePoints,
-    config,
-  });
   return serializable(async (tx) => {
+    await lockProfitPoolStructure(tx);
+    const config = await getGameConfigInTransaction(
+      tx,
+      PLATFORM_CONFIG_SCOPE,
+      'profitPool',
+      DEFAULT_PROFIT_POOL_CONFIG,
+    );
+    const parent = await tx.agent.findUnique({ where: { id: params.parentAgentId } });
+    if (!parent || parent.status !== 'ACTIVE') throw new ProfitPoolError('AGENT_NOT_FOUND');
+    await assertPointsInTree({
+      points: params.sharePoints,
+      parentPoints: parent.sharePoints,
+      config,
+      tx,
+    });
     const binding = await tx.agentPlayer.findUnique({
       where: { userId: params.playerUserId },
       include: { user: { select: { uid: true, nickname: true, kind: true } } },
@@ -972,25 +1113,34 @@ export async function updateSubagentPoints(params: {
   subagentId: string;
   sharePoints: number;
 }) {
-  const config = await getProfitPoolConfig();
-  const [parent, child] = await Promise.all([
-    prisma.agent.findUnique({ where: { id: params.parentAgentId } }),
-    prisma.agent.findUnique({ where: { id: params.subagentId } }),
-  ]);
-  if (!parent || parent.status !== 'ACTIVE') throw new ProfitPoolError('AGENT_NOT_FOUND');
-  if (!child || child.parentAgentId !== params.parentAgentId) {
-    throw new ProfitPoolError('SUBAGENT_NOT_FOUND');
-  }
-  await assertPointsInTree({
-    points: params.sharePoints,
-    parentPoints: parent.sharePoints,
-    agentId: child.id,
-    config,
-  });
-  return prisma.agent.update({
-    where: { id: child.id },
-    data: { sharePoints: params.sharePoints },
-    include: { user: { select: { uid: true, nickname: true } } },
+  return serializable(async (tx) => {
+    await lockProfitPoolStructure(tx);
+    const config = await getGameConfigInTransaction(
+      tx,
+      PLATFORM_CONFIG_SCOPE,
+      'profitPool',
+      DEFAULT_PROFIT_POOL_CONFIG,
+    );
+    const [parent, child] = await Promise.all([
+      tx.agent.findUnique({ where: { id: params.parentAgentId } }),
+      tx.agent.findUnique({ where: { id: params.subagentId } }),
+    ]);
+    if (!parent || parent.status !== 'ACTIVE') throw new ProfitPoolError('AGENT_NOT_FOUND');
+    if (!child || child.parentAgentId !== params.parentAgentId) {
+      throw new ProfitPoolError('SUBAGENT_NOT_FOUND');
+    }
+    await assertPointsInTree({
+      points: params.sharePoints,
+      parentPoints: parent.sharePoints,
+      agentId: child.id,
+      config,
+      tx,
+    });
+    return tx.agent.update({
+      where: { id: child.id },
+      data: { sharePoints: params.sharePoints },
+      include: { user: { select: { uid: true, nickname: true } } },
+    });
   });
 }
 

@@ -184,6 +184,7 @@ export function isVpayReady(config: VpayConfig): boolean {
     config.baseUrl.startsWith('http') &&
     config.traderId.length > 0 &&
     config.apiToken.length > 0 &&
+    config.notifyIps.length > 0 &&
     enabledTradeCodes(config).length > 0
   );
 }

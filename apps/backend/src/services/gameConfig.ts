@@ -1,3 +1,4 @@
+import type { Prisma } from '@prisma/client';
 import { prisma } from '../lib/prisma.js';
 
 const cache = new Map<string, { value: unknown; expiresAt: number }>();
@@ -50,6 +51,34 @@ export async function setGameConfig(
   updatedBy?: string,
 ): Promise<void> {
   await prisma.gameConfig.upsert({
+    where: { gameCode_key: { gameCode, key } },
+    create: { gameCode, key, value: value as object, updatedBy },
+    update: { value: value as object, updatedBy },
+  });
+  cache.delete(scopedCacheKey(gameCode, key));
+}
+
+/** 结构性配置变更在同一数据库事务内读取，绕过进程缓存以参与串行化校验。 */
+export async function getGameConfigInTransaction<T>(
+  tx: Prisma.TransactionClient,
+  gameCode: string,
+  key: string,
+  defaultValue: T,
+): Promise<T> {
+  const row = await tx.gameConfig.findUnique({
+    where: { gameCode_key: { gameCode, key } },
+  });
+  return row ? deepMerge(defaultValue, row.value) : defaultValue;
+}
+
+export async function setGameConfigInTransaction(
+  tx: Prisma.TransactionClient,
+  gameCode: string,
+  key: string,
+  value: unknown,
+  updatedBy?: string,
+): Promise<void> {
+  await tx.gameConfig.upsert({
     where: { gameCode_key: { gameCode, key } },
     create: { gameCode, key, value: value as object, updatedBy },
     update: { value: value as object, updatedBy },

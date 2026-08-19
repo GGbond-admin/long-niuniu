@@ -140,16 +140,20 @@ export async function listPendingJobs(params: {
   return jobs;
 }
 
-async function assignCorrelation(packetId: string): Promise<string> {
+export async function assignCorrelation(packetId: string): Promise<string> {
   for (let attempt = 0; attempt < 8; attempt += 1) {
     const correlation = randomCorrelation();
     try {
-      const updated = await prisma.packet.update({
-        where: { id: packetId },
+      const updated = await prisma.packet.updateMany({
+        where: { id: packetId, correlation: null },
         data: { correlation },
+      });
+      if (updated.count === 1) return correlation;
+      const existing = await prisma.packet.findUnique({
+        where: { id: packetId },
         select: { correlation: true },
       });
-      return updated.correlation!;
+      if (existing?.correlation) return existing.correlation;
     } catch {
       // 短码撞车：重新摇一个。已被其它请求赋值时直接读回。
       const existing = await prisma.packet.findUnique({
@@ -185,6 +189,17 @@ export interface IngestPacketLinkResult {
   duplicate: boolean;
 }
 
+export function assertIngestLeaseOwner(
+  assignedDeviceId: string | null,
+  submittingDeviceId: string,
+): void {
+  if (assignedDeviceId !== submittingDeviceId) {
+    throw new TngIngestError('INGEST_LEASE_LOST', 409, {
+      assignedDeviceId,
+    });
+  }
+}
+
 /** 回传建包链接：校验金额一致后复用 publishPacket，并推房间卡片、进入抢包阶段。 */
 export async function ingestPacketLink(params: {
   deviceId: string;
@@ -212,6 +227,9 @@ export async function ingestPacketLink(params: {
     }
     throw new TngIngestError('PACKET_ALREADY_PUBLISHED', 409);
   }
+
+  // 租约过期但尚未重派时仍允许原设备收尾；一旦已重派，旧设备不得覆盖新设备的发包结果。
+  assertIngestLeaseOwner(packet.ingestDeviceId, params.deviceId);
 
   if (packet.totalCents !== params.totalCents || packet.participantCount !== params.packetCount) {
     throw new TngIngestError('PACKET_AMOUNT_MISMATCH', 400, {
@@ -299,10 +317,11 @@ async function parkForReview(input: {
   const nameHash = blindIndex(input.row.tngName);
   await prisma.tngClaimInbox.upsert({
     where: {
-      packetId_tngNameHash_amountCents: {
+      packetId_tngNameHash_amountCents_claimedAt: {
         packetId: input.packetId,
         tngNameHash: nameHash,
         amountCents: input.row.amountCents,
+        claimedAt: input.row.claimedAt,
       },
     },
     create: {

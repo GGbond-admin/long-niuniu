@@ -45,6 +45,8 @@ const fixture = vi.hoisted(() => {
     claimStart: 'claim-start {{claimSeconds}}',
     claimWarning: 'claim-warning {{claimSeconds}}',
     claimCountdown: 'claim-countdown {{remaining}}',
+    settlingWait: 'settling-wait',
+    continuationPrompt: 'continue {{banker}} {{window}} {{pot}}',
   };
   return { round, settings, templates };
 });
@@ -117,5 +119,51 @@ describe('阶段机器人播报顺序', () => {
       'sealed-summary',
       'dice-prompt',
     ]);
+  });
+
+  it('完成播报为成绩单分段提供稳定语义键', async () => {
+    (fixture.round as any).scoreboard = {
+      seqNo: 8,
+      presentation: {},
+      playerLines: [
+        {
+          userId: 'player-1',
+          uid: 'player-1',
+          nickname: '闲家一',
+          claimCents: '111',
+          betCents: '800',
+          outcome: 'PLAYER_WIN',
+          netCents: '13192',
+          shortfallCents: '0',
+          balanceBeforeCents: '500111',
+          balanceAfterCents: '513303',
+        },
+      ],
+      bankerSummary: {
+        userId: 'banker-1',
+        uid: 'banker',
+        nickname: '庄家',
+        claimCents: '70',
+        netCents: '-5000',
+        balanceBeforeCents: '100000',
+        balanceAfterCents: '95000',
+      },
+    };
+
+    const messages = await buildRoundAnnounceMessages({
+      roundId: 'round-1',
+      to: RoundPhase.FINISHED,
+    });
+
+    expect(messages.map((message) => message.messageKey)).toEqual([
+      'finished:settling',
+      'scoreboard:0',
+      'continuation',
+    ]);
+    expect(messages[1]).toMatchObject({
+      kind: 'text',
+      scoreboardChunkIndex: 0,
+    });
+    (fixture.round as any).scoreboard = null;
   });
 });

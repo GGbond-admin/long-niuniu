@@ -1,5 +1,4 @@
 import { AccountType, ClaimSource, MessageType, Prisma, RewardTab } from '@prisma/client';
-import { randomUUID } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import {
@@ -38,6 +37,11 @@ import {
 } from '../services/gameCatalog.js';
 
 const cuid = z.string().cuid();
+const compatibleId = z
+  .string()
+  .min(1)
+  .max(100)
+  .regex(/^[A-Za-z0-9_-]+$/);
 const date = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
 const positiveCents = z.string().regex(/^[1-9]\d*$/);
 const gameCode = z.string().refine(isSupportedGameCode, {
@@ -124,6 +128,15 @@ const withdrawAccountUpdateSchema = z
     }
   });
 
+function revealOrderSnapshot(value: unknown): unknown {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+  const snapshot = { ...(value as Record<string, unknown>) };
+  for (const field of ['accountNo', 'accountName', 'duitnowId', 'name', 'bankAccount', 'holder']) {
+    if (typeof snapshot[field] === 'string') snapshot[field] = safeDecryptSecret(snapshot[field]);
+  }
+  return snapshot;
+}
+
 export async function operationsRoutes(app: FastifyInstance) {
   app.get('/api/rewards', { preHandler: [app.authUser] }, async (req) => {
     const userId = (req.user as { sub: string }).sub;
@@ -185,16 +198,29 @@ export async function operationsRoutes(app: FastifyInstance) {
     if (!cursor) await ensureSupportWelcome(userId);
     const rows = await prisma.chatMessage.findMany({
       where: { userId },
-      orderBy: { createdAt: 'desc' },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       take: limit + 1,
       ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
     });
     const items = rows.slice(0, limit).reverse();
-    await prisma.chatMessage.updateMany({
-      where: { userId, senderType: { in: ['SUPPORT', 'SYSTEM'] }, readAt: null },
-      data: { readAt: new Date() },
-    });
-    return { items, nextCursor: rows.length > limit ? rows[limit].id : null };
+    const visibleUnreadIds = items
+      .filter(
+        (message) =>
+          (message.senderType === 'SUPPORT' || message.senderType === 'SYSTEM')
+          && message.readAt === null,
+      )
+      .map((message) => message.id);
+    if (visibleUnreadIds.length) {
+      await prisma.chatMessage.updateMany({
+        where: { id: { in: visibleUnreadIds }, userId, readAt: null },
+        data: { readAt: new Date() },
+      });
+    }
+    return {
+      items,
+      // 下一页从本页最后一条之后开始；不能指向首条未返回记录再 skip，否则每页漏一条。
+      nextCursor: rows.length > limit ? rows[limit - 1]!.id : null,
+    };
   });
 
   app.post('/api/chat/messages', { preHandler: [app.authUser] }, async (req) => {
@@ -251,7 +277,15 @@ export async function adminOperationsRoutes(app: FastifyInstance) {
     app.requireAdminRoles('SUPER', 'OPERATOR', 'REVIEWER', 'FINANCE'),
   ];
   const finance = [app.authAdmin, app.requireAdminRoles('SUPER', 'FINANCE')];
+  const rewardReaders = [
+    app.authAdmin,
+    app.requireAdminRoles('SUPER', 'OPERATOR', 'REVIEWER', 'FINANCE'),
+  ];
   const tngManagers = [
+    app.authAdmin,
+    app.requireAdminRoles('SUPER', 'OPERATOR', 'FINANCE'),
+  ];
+  const leaderboardManagers = [
     app.authAdmin,
     app.requireAdminRoles('SUPER', 'OPERATOR', 'FINANCE'),
   ];
@@ -550,7 +584,7 @@ export async function adminOperationsRoutes(app: FastifyInstance) {
     });
     return {
       items: rows.slice(0, query.limit),
-      nextCursor: rows.length > query.limit ? rows[query.limit]!.id : null,
+      nextCursor: rows.length > query.limit ? rows[query.limit - 1]!.id : null,
     };
   });
 
@@ -578,9 +612,11 @@ export async function adminOperationsRoutes(app: FastifyInstance) {
         id: true,
       },
     });
-    const escape = (value: string) => {
-      if (/[",\n\r]/.test(value)) return `"${value.replace(/"/g, '""')}"`;
-      return value;
+    const escape = (value: string, formulaSafe = false) => {
+      const safeValue =
+        formulaSafe && /^\s*[=+\-@]/.test(value) ? `'${value}` : value;
+      if (/[",\n\r]/.test(safeValue)) return `"${safeValue.replace(/"/g, '""')}"`;
+      return safeValue;
     };
     const cents = (value: bigint | null) => {
       if (value === null) return '';
@@ -617,7 +653,8 @@ export async function adminOperationsRoutes(app: FastifyInstance) {
         row.memo ?? '',
         row.id,
       ]
-        .map((cell) => escape(String(cell)))
+        // 昵称和备注可由用户输入；前置单引号阻止 Excel/Sheets 将其作为公式执行。
+        .map((cell, index) => escape(String(cell), index === 2 || index === 10))
         .join(','),
     );
     const csv = `\uFEFF${header}\n${lines.join('\n')}\n`;
@@ -719,7 +756,7 @@ export async function adminOperationsRoutes(app: FastifyInstance) {
           settlements: undefined,
         };
       }),
-      nextCursor: rows.length > query.limit ? rows[query.limit]!.id : null,
+      nextCursor: rows.length > query.limit ? rows[query.limit - 1]!.id : null,
     };
   });
 
@@ -763,7 +800,7 @@ export async function adminOperationsRoutes(app: FastifyInstance) {
         availableCents: item.wallet?.availableCents ?? 0n,
         invitees: item._count.invitees,
       })),
-      nextCursor: rows.length > query.limit ? rows[query.limit]!.id : null,
+      nextCursor: rows.length > query.limit ? rows[query.limit - 1]!.id : null,
     };
   });
 
@@ -812,8 +849,16 @@ export async function adminOperationsRoutes(app: FastifyInstance) {
           }),
     ]);
     const items = [
-      ...deposits.map((item) => ({ kind: 'deposit' as const, ...item })),
-      ...withdrawals.map((item) => ({ kind: 'withdraw' as const, ...item })),
+      ...deposits.map((item) => ({
+        kind: 'deposit' as const,
+        ...item,
+        payeeSnapshot: revealOrderSnapshot(item.payeeSnapshot),
+      })),
+      ...withdrawals.map((item) => ({
+        kind: 'withdraw' as const,
+        ...item,
+        targetSnapshot: revealOrderSnapshot(item.targetSnapshot),
+      })),
     ]
       .sort((a, b) => +new Date(b.createdAt) - +new Date(a.createdAt))
       .slice(0, query.limit);
@@ -1269,6 +1314,12 @@ export async function adminOperationsRoutes(app: FastifyInstance) {
 
   app.get('/api/admin/support/:userId/messages', { preHandler: support }, async (req) => {
     const { userId } = req.params as { userId: string };
+    const { cursor, limit } = z
+      .object({
+        cursor: cuid.optional(),
+        limit: z.coerce.number().int().min(1).max(500).default(500),
+      })
+      .parse(req.query);
     const user = await prisma.user.findUnique({
       where: { id: userId },
       select: {
@@ -1278,17 +1329,25 @@ export async function adminOperationsRoutes(app: FastifyInstance) {
       },
     });
     if (!user) throw new Error('USER_NOT_FOUND');
-    const items = await prisma.chatMessage.findMany({
+    const rows = await prisma.chatMessage.findMany({
       where: { userId },
-      orderBy: { createdAt: 'asc' },
-      take: 500,
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      take: limit + 1,
+      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
     });
-    await prisma.chatMessage.updateMany({
-      where: { userId, senderType: 'USER', readAt: null },
-      data: { readAt: new Date() },
-    });
+    const items = rows.slice(0, limit).reverse();
+    const visibleUnreadIds = items
+      .filter((message) => message.senderType === 'USER' && message.readAt === null)
+      .map((message) => message.id);
+    if (visibleUnreadIds.length) {
+      await prisma.chatMessage.updateMany({
+        where: { id: { in: visibleUnreadIds }, userId, readAt: null },
+        data: { readAt: new Date() },
+      });
+    }
     return {
       items,
+      nextCursor: rows.length > limit ? rows[limit - 1]!.id : null,
       user: {
         uid: user.uid,
         nickname: user.nickname,
@@ -1428,6 +1487,7 @@ export async function adminOperationsRoutes(app: FastifyInstance) {
   }));
 
   app.post('/api/admin/push/templates', { preHandler: operators }, async (req) => {
+    const adminId = (req.user as { sub: string }).sub;
     const body = z
       .object({
         code: z.string().regex(/^[a-z0-9_]{2,64}$/),
@@ -1435,14 +1495,28 @@ export async function adminOperationsRoutes(app: FastifyInstance) {
         body: z.string().min(1).max(4_000),
       })
       .parse(req.body);
-    return {
-      ok: true,
-      item: await prisma.pushTemplate.upsert({
+    const item = await prisma.$transaction(async (tx) => {
+      const before = await tx.pushTemplate.findUnique({ where: { code: body.code } });
+      const updated = await tx.pushTemplate.upsert({
         where: { code: body.code },
         create: body,
         update: { title: body.title, body: body.body },
-      }),
-    };
+      });
+      await tx.auditLog.create({
+        data: {
+          adminId,
+          action: before ? 'push_template_update' : 'push_template_create',
+          target: updated.id,
+          before: before
+            ? { code: before.code, title: before.title, body: before.body }
+            : undefined,
+          after: { code: updated.code, title: updated.title, body: updated.body },
+          ip: req.ip,
+        },
+      });
+      return updated;
+    });
+    return { ok: true, item };
   });
 
   app.get('/api/admin/push/jobs', { preHandler: operators }, async () => ({
@@ -1453,7 +1527,7 @@ export async function adminOperationsRoutes(app: FastifyInstance) {
     }),
   }));
 
-  app.post('/api/admin/push/jobs', { preHandler: operators }, async (req) => {
+  app.post('/api/admin/push/jobs', { preHandler: operators }, async (req, reply) => {
     const adminId = (req.user as { sub: string }).sub;
     const body = z
       .object({
@@ -1463,7 +1537,7 @@ export async function adminOperationsRoutes(app: FastifyInstance) {
           .object({
             type: z.enum(['all', 'kyc_approved', 'uids', 'room']),
             uids: z.array(z.string()).max(1_000).optional(),
-            roomId: cuid.optional(),
+            roomId: compatibleId.optional(),
           })
           .refine((value) => value.type !== 'room' || !!value.roomId, {
             message: '指定房间推送必须选择房间',
@@ -1476,24 +1550,74 @@ export async function adminOperationsRoutes(app: FastifyInstance) {
     if (!body.templateId && typeof body.payload.body !== 'string') {
       throw new Error('PUSH_BODY_REQUIRED');
     }
-    const job = await prisma.pushJob.create({
-      data: {
-        ...body,
-        audience: body.audience,
-        payload: body.payload as Prisma.InputJsonValue,
-        createdBy: adminId,
-      },
+    const template = body.templateId
+      ? await prisma.pushTemplate.findUnique({
+          where: { id: body.templateId },
+          select: { body: true },
+        })
+      : null;
+    if (body.templateId && !template) {
+      return reply.code(404).send({ error: 'PUSH_TEMPLATE_NOT_FOUND' });
+    }
+    const jobPayload = {
+      ...body.payload,
+      ...(template ? { __templateBody: template.body } : {}),
+    };
+    const job = await prisma.$transaction(async (tx) => {
+      const created = await tx.pushJob.create({
+        data: {
+          ...body,
+          audience: body.audience,
+          payload: jobPayload as Prisma.InputJsonValue,
+          createdBy: adminId,
+        },
+      });
+      await tx.auditLog.create({
+        data: {
+          adminId,
+          action: 'push_job_create',
+          target: created.id,
+          after: {
+            templateId: body.templateId ?? null,
+            botId: body.botId ?? null,
+            audience: body.audience,
+            scheduledAt: body.scheduledAt?.toISOString() ?? null,
+            payload: jobPayload,
+          } as Prisma.InputJsonValue,
+          ip: req.ip,
+        },
+      });
+      return created;
     });
     if (!body.scheduledAt || body.scheduledAt <= new Date()) {
-      setImmediate(() => void pushService.executeJob(job.id));
+      setImmediate(() => {
+        void pushService.executeJob(job.id).catch((error) => {
+          req.log.error({ err: error, jobId: job.id }, 'push job execution failed');
+        });
+      });
     }
     return { ok: true, job };
   });
 
   app.post('/api/admin/push/jobs/:id/retry', { preHandler: operators }, async (req) => {
     const { id } = req.params as { id: string };
-    await prisma.pushJob.update({ where: { id }, data: { status: 'PENDING' } });
-    setImmediate(() => void pushService.executeJob(id));
+    const adminId = (req.user as { sub: string }).sub;
+    await prisma.$transaction([
+      prisma.pushJob.update({ where: { id }, data: { status: 'PENDING' } }),
+      prisma.auditLog.create({
+        data: {
+          adminId,
+          action: 'push_job_retry',
+          target: id,
+          ip: req.ip,
+        },
+      }),
+    ]);
+    setImmediate(() => {
+      void pushService.executeJob(id).catch((error) => {
+        req.log.error({ err: error, jobId: id }, 'push job retry failed');
+      });
+    });
     return { ok: true };
   });
 
@@ -1510,6 +1634,7 @@ export async function adminOperationsRoutes(app: FastifyInstance) {
 
   // ── 每日奖励 / 排行榜 / 返水 ──
   const rewardConfigInput = z.object({
+    id: cuid.optional(),
     tab: z.nativeEnum(RewardTab),
     code: z.string().regex(/^[a-z0-9_]{2,64}$/),
     title: z.string().min(1).max(200),
@@ -1534,36 +1659,46 @@ export async function adminOperationsRoutes(app: FastifyInstance) {
     adminId: string,
     ip: string,
   ) {
-    const before = await prisma.rewardConfig.findUnique({
-      where: {
-        gameCode_code: {
-          gameCode: scopedGameCode,
-          code: body.code,
-        },
-      },
-    });
-    const item = await prisma.rewardConfig.upsert({
-      where: {
-        gameCode_code: {
-          gameCode: scopedGameCode,
-          code: body.code,
-        },
-      },
-      create: {
-        ...body,
-        gameCode: scopedGameCode,
-        conditions: body.conditions as Prisma.InputJsonValue,
-        amountCents: BigInt(body.amountCents),
-      },
-      update: {
-        tab: body.tab,
-        title: body.title,
-        conditions: body.conditions as Prisma.InputJsonValue,
-        amountCents: BigInt(body.amountCents),
-        dailyQuota: body.dailyQuota,
-        status: body.status,
-      },
-    });
+    const before = body.id
+      ? await prisma.rewardConfig.findFirst({
+          where: { id: body.id, gameCode: scopedGameCode },
+        })
+      : await prisma.rewardConfig.findUnique({
+          where: {
+            gameCode_code: {
+              gameCode: scopedGameCode,
+              code: body.code,
+            },
+          },
+        });
+    if (body.id && !before) throw new Error('REWARD_NOT_FOUND');
+    const data = {
+      tab: body.tab,
+      code: body.code,
+      title: body.title,
+      conditions: body.conditions as Prisma.InputJsonValue,
+      amountCents: BigInt(body.amountCents),
+      dailyQuota: body.dailyQuota,
+      status: body.status,
+    };
+    const item = body.id
+      ? await prisma.rewardConfig.update({
+          where: { id: body.id },
+          data,
+        })
+      : await prisma.rewardConfig.upsert({
+          where: {
+            gameCode_code: {
+              gameCode: scopedGameCode,
+              code: body.code,
+            },
+          },
+          create: {
+            ...data,
+            gameCode: scopedGameCode,
+          },
+          update: data,
+        });
     await prisma.auditLog.create({
       data: {
         adminId,
@@ -1633,7 +1768,7 @@ export async function adminOperationsRoutes(app: FastifyInstance) {
     });
   }
 
-  app.get('/api/admin/games/:gameCode/rewards', { preHandler: operators }, async (req) => {
+  app.get('/api/admin/games/:gameCode/rewards', { preHandler: rewardReaders }, async (req) => {
     const params = z.object({ gameCode }).parse(req.params);
     return {
       gameCode: params.gameCode,
@@ -1644,7 +1779,7 @@ export async function adminOperationsRoutes(app: FastifyInstance) {
     };
   });
 
-  app.post('/api/admin/games/:gameCode/rewards', { preHandler: operators }, async (req) => {
+  app.post('/api/admin/games/:gameCode/rewards', { preHandler: finance }, async (req) => {
     const { gameCode: scopedGameCode } = z.object({ gameCode }).parse(req.params);
     const adminId = (req.user as { sub: string }).sub;
     const item = await upsertRewardConfig(
@@ -1656,7 +1791,7 @@ export async function adminOperationsRoutes(app: FastifyInstance) {
     return { ok: true, item };
   });
 
-  app.get('/api/admin/games/:gameCode/rewards/grants', { preHandler: operators }, async (req) => {
+  app.get('/api/admin/games/:gameCode/rewards/grants', { preHandler: rewardReaders }, async (req) => {
     const { gameCode: scopedGameCode } = z.object({ gameCode }).parse(req.params);
     const query = z.object({ date: date.optional() }).parse(req.query);
     return {
@@ -1665,7 +1800,7 @@ export async function adminOperationsRoutes(app: FastifyInstance) {
     };
   });
 
-  app.post('/api/admin/games/:gameCode/rewards/:id/grant', { preHandler: operators }, async (req, reply) => {
+  app.post('/api/admin/games/:gameCode/rewards/:id/grant', { preHandler: finance }, async (req, reply) => {
     const { gameCode: scopedGameCode, id } = z
       .object({ gameCode, id: cuid })
       .parse(req.params);
@@ -1683,14 +1818,14 @@ export async function adminOperationsRoutes(app: FastifyInstance) {
   });
 
   /** @deprecated 无游戏上下文的管理端接口固定映射至尊牛牛。 */
-  app.get('/api/admin/rewards', { preHandler: operators }, async () => ({
+  app.get('/api/admin/rewards', { preHandler: rewardReaders }, async () => ({
     items: await prisma.rewardConfig.findMany({
       where: { gameCode: SUPREME_NIUNIU_GAME_CODE },
       orderBy: { createdAt: 'asc' },
     }),
   }));
 
-  app.post('/api/admin/rewards', { preHandler: operators }, async (req) => {
+  app.post('/api/admin/rewards', { preHandler: finance }, async (req) => {
     const adminId = (req.user as { sub: string }).sub;
     const item = await upsertRewardConfig(
       SUPREME_NIUNIU_GAME_CODE,
@@ -1701,14 +1836,14 @@ export async function adminOperationsRoutes(app: FastifyInstance) {
     return { ok: true, item };
   });
 
-  app.get('/api/admin/rewards/grants', { preHandler: operators }, async (req) => {
+  app.get('/api/admin/rewards/grants', { preHandler: rewardReaders }, async (req) => {
     const query = z.object({ date: date.optional() }).parse(req.query);
     return {
       items: await listRewardGrants(SUPREME_NIUNIU_GAME_CODE, query.date),
     };
   });
 
-  app.post('/api/admin/rewards/:id/grant', { preHandler: operators }, async (req, reply) => {
+  app.post('/api/admin/rewards/:id/grant', { preHandler: finance }, async (req, reply) => {
     const { id } = z.object({ id: cuid }).parse(req.params);
     const adminId = (req.user as { sub: string }).sub;
     const granted = await grantScopedReward(
@@ -1726,6 +1861,8 @@ export async function adminOperationsRoutes(app: FastifyInstance) {
   const leaderboardRewardInput = z.object({
     type: z.enum(['points', 'hands', 'banker']),
     period: z.enum(['daily', 'weekly', 'monthly']),
+    periodKey: z.string().trim().min(7).max(10),
+    expectedSnapshotHash: z.string().regex(/^[a-f0-9]{64}$/),
     prizes: z
       .array(
         z.object({
@@ -1747,6 +1884,8 @@ export async function adminOperationsRoutes(app: FastifyInstance) {
       gameCode: scopedGameCode,
       type: body.type,
       period: body.period,
+      periodKey: body.periodKey,
+      expectedSnapshotHash: body.expectedSnapshotHash,
       prizes: body.prizes.map((prize) => ({
         rank: prize.rank,
         amountCents: BigInt(prize.amountCents),
@@ -1765,66 +1904,102 @@ export async function adminOperationsRoutes(app: FastifyInstance) {
     for (const result of outcome.results) {
       if (!result.granted) continue;
       const amount = `${BigInt(result.amountCents) / 100n}.${(BigInt(result.amountCents) % 100n).toString().padStart(2, '0')}`;
-      void pushService.notifyRewardGranted(result.userId, '排行榜奖励', amount);
+      void pushService
+        .notifyRewardGranted(result.userId, '排行榜奖励', amount)
+        .catch(() => undefined);
     }
     return outcome;
   }
 
-  app.post('/api/admin/games/:gameCode/leaderboards/generate', { preHandler: operators }, async (req) => {
+  app.post('/api/admin/games/:gameCode/leaderboards/generate', { preHandler: leaderboardManagers }, async (req) => {
     const { gameCode: scopedGameCode } = z.object({ gameCode }).parse(req.params);
+    const body = z
+      .object({
+        period: z.enum(['daily', 'weekly', 'monthly']).default('daily'),
+        periodKey: z.string().trim().min(7).max(10).optional(),
+      })
+      .parse(req.body ?? {});
     return {
       ok: true,
       gameCode: scopedGameCode,
-      items: await generateAllLeaderboards(scopedGameCode),
+      dashboard: await leaderboardDashboard(
+        scopedGameCode,
+        body.period,
+        true,
+        body.periodKey,
+        true,
+      ),
     };
   });
 
-  app.get('/api/admin/games/:gameCode/leaderboards', { preHandler: operators }, async (req) => {
+  app.get('/api/admin/games/:gameCode/leaderboards', { preHandler: leaderboardManagers }, async (req) => {
     const { gameCode: scopedGameCode } = z.object({ gameCode }).parse(req.params);
-    const { period } = z
-      .object({ period: z.enum(['daily', 'weekly', 'monthly']).default('daily') })
+    const { period, periodKey } = z
+      .object({
+        period: z.enum(['daily', 'weekly', 'monthly']).default('daily'),
+        periodKey: z.string().trim().min(7).max(10).optional(),
+      })
       .parse(req.query);
-    return leaderboardDashboard(scopedGameCode, period, true);
+    return leaderboardDashboard(scopedGameCode, period, true, periodKey);
   });
 
-  app.post('/api/admin/games/:gameCode/leaderboards/reward', { preHandler: operators }, async (req) => {
+  app.post('/api/admin/games/:gameCode/leaderboards/reward', { preHandler: finance }, async (req, reply) => {
     const { gameCode: scopedGameCode } = z.object({ gameCode }).parse(req.params);
     const adminId = (req.user as { sub: string }).sub;
-    const outcome = await distributeScopedLeaderboardRewards(
-      scopedGameCode,
-      leaderboardRewardInput.parse(req.body),
-      adminId,
-      req.ip,
-    );
-    return { ok: true, ...outcome };
+    try {
+      const outcome = await distributeScopedLeaderboardRewards(
+        scopedGameCode,
+        leaderboardRewardInput.parse(req.body),
+        adminId,
+        req.ip,
+      );
+      return { ok: true, ...outcome };
+    } catch (error) {
+      const code = (error as Error).message;
+      if (code === 'LEADERBOARD_PERIOD_NOT_CLOSED' || code === 'LEADERBOARD_SNAPSHOT_CHANGED') {
+        return reply.code(409).send({ error: code });
+      }
+      throw error;
+    }
   });
 
   /** @deprecated 无游戏上下文的管理端接口固定映射至尊牛牛。 */
-  app.post('/api/admin/leaderboards/generate', { preHandler: operators }, async () => ({
+  app.post('/api/admin/leaderboards/generate', { preHandler: leaderboardManagers }, async () => ({
     ok: true,
     items: await generateAllLeaderboards(SUPREME_NIUNIU_GAME_CODE),
   }));
 
-  app.get('/api/admin/leaderboards', { preHandler: operators }, async (req) => {
+  app.get('/api/admin/leaderboards', { preHandler: leaderboardManagers }, async (req) => {
     const { period } = z
       .object({ period: z.enum(['daily', 'weekly', 'monthly']).default('daily') })
       .parse(req.query);
     return leaderboardDashboard(SUPREME_NIUNIU_GAME_CODE, period, true);
   });
 
-  app.post('/api/admin/leaderboards/reward', { preHandler: operators }, async (req) => {
+  app.post('/api/admin/leaderboards/reward', { preHandler: finance }, async (req, reply) => {
     const adminId = (req.user as { sub: string }).sub;
-    const outcome = await distributeScopedLeaderboardRewards(
-      SUPREME_NIUNIU_GAME_CODE,
-      leaderboardRewardInput.parse(req.body),
-      adminId,
-      req.ip,
-    );
-    return { ok: true, ...outcome };
+    try {
+      const outcome = await distributeScopedLeaderboardRewards(
+        SUPREME_NIUNIU_GAME_CODE,
+        leaderboardRewardInput.parse(req.body),
+        adminId,
+        req.ip,
+      );
+      return { ok: true, ...outcome };
+    } catch (error) {
+      const code = (error as Error).message;
+      if (code === 'LEADERBOARD_PERIOD_NOT_CLOSED' || code === 'LEADERBOARD_SNAPSHOT_CHANGED') {
+        return reply.code(409).send({ error: code });
+      }
+      throw error;
+    }
   });
 
-  app.post('/api/admin/rebates/settle', { preHandler: finance }, async (req) => {
+  app.post('/api/admin/rebates/settle', { preHandler: finance }, async (req, reply) => {
     const { settlementDate } = z.object({ settlementDate: date }).parse(req.body);
+    if (settlementDate >= malaysiaDay()) {
+      return reply.code(409).send({ error: 'REBATE_PERIOD_NOT_CLOSED' });
+    }
     return { ok: true, items: await settleRebates(settlementDate) };
   });
 
@@ -1872,13 +2047,13 @@ export async function adminOperationsRoutes(app: FastifyInstance) {
           message: 'AMOUNT_TOO_LARGE',
         }),
         reason: z.string().trim().min(4).max(500),
-        requestId: z.string().uuid().optional(),
+        requestId: z.string().uuid(),
       })
       .parse(req.body);
     const user = await prisma.user.findUnique({ where: { uid: body.uid } });
     if (!user) return reply.code(404).send({ error: 'USER_NOT_FOUND' });
     const amount = BigInt(body.amountCents);
-    const adjustmentId = body.requestId ?? randomUUID();
+    const adjustmentId = body.requestId;
     const idempotencyKey = `adjust:${adjustmentId}`;
     const result = await serializable(async (tx) => {
       const duplicate = await tx.ledgerEntry.findUnique({

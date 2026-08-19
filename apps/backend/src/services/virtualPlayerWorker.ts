@@ -6,6 +6,7 @@ import { RoundPhase } from '@prisma/client';
 import { continuationDeadline } from '../engine/bankerContinuation.js';
 import { bettingRange, fromCents } from '../engine/betting.js';
 import { prisma } from '../lib/prisma.js';
+import { withRedisLock } from '../lib/redis.js';
 import { announceBidPlaced } from './bidAuction.js';
 import { runBankerDiceCeremony } from './chatCommands.js';
 import {
@@ -67,12 +68,25 @@ function schedule(
   key: string,
   ms: number,
   task: () => Promise<void>,
+  lockAttempt = 0,
 ) {
   const existing = pending.get(key);
   if (existing) clearTimeout(existing);
   const timer = setTimeout(() => {
     pending.delete(key);
-    void task().catch((error) => {
+    void withRedisLock(
+      `niuniu:virtual-player:${key}`,
+      30_000,
+      async () => {
+        await task();
+        return true;
+      },
+    ).then((ran) => {
+      // 多实例同刻触发时，落后者稍后重查数据库状态；最多重试三次。
+      if (ran === null && lockAttempt < 3) {
+        schedule(key, 250 + Math.floor(Math.random() * 250), task, lockAttempt + 1);
+      }
+    }).catch((error) => {
       if (error instanceof GameError) {
         console.warn('[virtual-player]', key, error.code, error.details ?? '');
         return;
@@ -209,6 +223,11 @@ async function actOnBidPhase(roomId: string, roundId: string) {
     schedule(delayKey(roundId, profile.userId, 'bid'), delayMs, async () => {
       const current = await prisma.round.findUnique({ where: { id: roundId } });
       if (!current || current.phase !== RoundPhase.BANKER_BID) return;
+      const ownBid = await prisma.bankerBid.findUnique({
+        where: { roundId_userId: { roundId, userId: profile.userId } },
+        select: { id: true },
+      });
+      if (ownBid) return;
       await topUpVirtualIfNeeded(profile.userId);
       const high = await prisma.bankerBid.findFirst({
         where: { roundId },
@@ -283,6 +302,11 @@ async function actOnBetPhase(roomId: string, roundId: string) {
       if (!current || current.phase !== RoundPhase.BETTING) return;
       if (current.bankerId === profile.userId) return;
       if (!current.betEndsAt || current.betEndsAt <= new Date()) return;
+      const ownBet = await prisma.bet.findUnique({
+        where: { roundId_userId: { roundId, userId: profile.userId } },
+        select: { id: true },
+      });
+      if (ownBet) return;
       await topUpVirtualIfNeeded(profile.userId);
 
       const liveRange = bettingRange(
@@ -291,19 +315,21 @@ async function actOnBetPhase(roomId: string, roundId: string) {
         snap.betting,
       );
 
+      const availableCents = profile.user.wallet?.availableCents ?? 0n;
       const useAllIn =
         profile.canAllIn
-        && liveRange.shMaxCents >= liveRange.shMinCents
+        && availableCents >= BigInt(liveRange.shMinCents)
         && Math.random() < 0.08;
 
       let amountCents: bigint;
       let isAllIn = false;
       if (useAllIn) {
         isAllIn = true;
-        const span = Math.max(0, liveRange.shMaxCents - liveRange.shMinCents);
-        amountCents = BigInt(
-          liveRange.shMinCents + Math.floor(Math.random() * (span + 1)),
-        );
+        const minCents = BigInt(liveRange.shMinCents);
+        const span = availableCents - minCents;
+        amountCents =
+          minCents +
+          BigInt(Math.floor(Math.random() * (Number(span > 1_000_000n ? 1_000_000n : span) + 1)));
       } else {
         amountCents = pickBetAmountCents(liveRange);
       }

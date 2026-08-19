@@ -15,7 +15,8 @@ const memory = vi.hoisted(() => {
     status: 'SENT',
     expiresAt: new Date('2026-08-07T07:00:01.000Z'),
   };
-  return { packet, round };
+  const events: string[] = [];
+  return { packet, round, events };
 });
 
 const tx = vi.hoisted(() => ({
@@ -27,7 +28,14 @@ const tx = vi.hoisted(() => ({
     }),
   },
   roundEvent: {
-    findFirst: vi.fn(async () => null),
+    findFirst: vi.fn(
+      async ({ where }: { where: { type: string } }) =>
+        memory.events.includes(where.type) ? { id: where.type } : null,
+    ),
+    create: vi.fn(async ({ data }: { data: { type: string } }) => {
+      memory.events.push(data.type);
+      return { id: data.type };
+    }),
   },
   packet: {
     findUnique: vi.fn(async () => ({ ...memory.packet, round: memory.round })),
@@ -74,6 +82,7 @@ describe('开抢播报恢复后的领取期限', () => {
     memory.round.claimEndsAt = new Date('2026-08-07T07:00:01.000Z');
     memory.packet.status = 'SENT';
     memory.packet.expiresAt = new Date('2026-08-07T07:00:01.000Z');
+    memory.events.length = 0;
   });
 
   it('原子刷新 Round 与 Packet，刷新后可领取且不会被旧定时任务过期', async () => {
@@ -87,5 +96,17 @@ describe('开抢播报恢复后的领取期限', () => {
     await expirePacket(memory.round.id);
     expect(memory.round.phase).toBe('CLAIMING');
     expect(memory.packet.status).toBe('SENT');
+  });
+
+  it('同一领取窗口只刷新一次，播报持续失败也不会无限续期', async () => {
+    const first = await refreshUnannouncedClaimDeadline(memory.round.id);
+    vi.setSystemTime(new Date('2026-08-07T07:00:41.000Z'));
+
+    const second = await refreshUnannouncedClaimDeadline(memory.round.id);
+    expect(second).toEqual(first);
+
+    await expirePacket(memory.round.id);
+    expect(memory.round.phase).toBe('CLAIM_EXPIRED');
+    expect(memory.packet.status).toBe('EXPIRED');
   });
 });

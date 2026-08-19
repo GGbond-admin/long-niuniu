@@ -23,6 +23,22 @@ export interface ContinuationDestinationRound {
   phase: RoundPhase;
 }
 
+/**
+ * 续庄选择优先于自动开局；选择窗口超时或续庄资格已经用尽时，
+ * 必须转入公开竞标，避免「自动开局」关闭时把进行中的牌局链卡在等待页。
+ */
+export function shouldStartWaitingRound(params: {
+  autoStart: boolean;
+  continuationError: BankerContinuationErrorCode | null | undefined;
+}): boolean {
+  if (params.continuationError === null) return false;
+  return (
+    params.autoStart
+    || params.continuationError === 'CONTINUATION_WINDOW_EXPIRED'
+    || params.continuationError === 'CONTINUATION_ALREADY_USED'
+  );
+}
+
 export function continuationDeadline(
   finishedAt: Date | null,
   windowSeconds: number,

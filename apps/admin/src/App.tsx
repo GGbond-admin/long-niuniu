@@ -28,7 +28,7 @@ const pageTitles: Record<Page, [string, string]> = {
   rounds: ['对局控制台', '竞标、下注、发包、认额与结算'],
   tng: ['TNG 红包台账', '发包账号、在途金额与认额差异'],
   finance: ['钱包财务', '平台科目、全量流水与人工调账'],
-  profitPool: ['代理与利润池', '两步结算：生成报表 → 确认发放；代理树与占成差额分成'],
+  profitPool: ['代理与利润池', '按局数结算、永久锁局、代理利润大屏与专属看板'],
   rewards: ['每日奖励', '棋牌、庄家与特别奖励配置'],
   rebates: ['推广返水', '三级有效流水与日结佣金'],
   leaderboards: ['排行榜', '积分、棋牌、打桩三榜快照'],
@@ -42,8 +42,8 @@ const pageTitles: Record<Page, [string, string]> = {
 
 const roleMenus: Record<Admin['role'], Page[]> = {
   SUPER: ['dashboard', 'users', 'kyc', 'deposits', 'withdrawals', 'payments', 'gameOps', 'tng', 'finance', 'profitPool', 'rebates', 'messaging', 'support', 'bots', 'admins', 'audit'],
-  OPERATOR: ['dashboard', 'users', 'kyc', 'deposits', 'withdrawals', 'gameOps', 'tng', 'messaging', 'support'],
-  REVIEWER: ['dashboard', 'users', 'kyc', 'withdrawals', 'support'],
+  OPERATOR: ['dashboard', 'users', 'kyc', 'withdrawals', 'gameOps', 'tng', 'messaging', 'support'],
+  REVIEWER: ['dashboard', 'users', 'kyc', 'withdrawals', 'gameOps', 'support'],
   FINANCE: ['dashboard', 'users', 'deposits', 'withdrawals', 'payments', 'gameOps', 'tng', 'finance', 'profitPool', 'rebates'],
 };
 
@@ -277,7 +277,12 @@ function Shell({ admin }: { admin: Admin }) {
         <div className="content">
           {current === 'dashboard' && <Dashboard allowed={allowed} onNavigate={go} />}
           {current === 'gameOps' && <GameOperationsCenter admin={admin} />}
-          {current === 'virtualPlayers' && <VirtualPlayers />}
+          {current === 'virtualPlayers' && (
+            <VirtualPlayers
+              canManageFunds={admin.role === 'SUPER' || admin.role === 'FINANCE'}
+              canOperate={admin.role === 'SUPER' || admin.role === 'OPERATOR'}
+            />
+          )}
           {current === 'users' && <Users role={admin.role} />}
           {current === 'kyc' && <KycReview />}
           {current === 'deposits' && <DepositsHub role={admin.role} />}
@@ -288,9 +293,13 @@ function Shell({ admin }: { admin: Admin }) {
           {current === 'tng' && <Tng canReconcile={admin.role === 'SUPER' || admin.role === 'FINANCE'} />}
           {current === 'finance' && <Finance />}
           {current === 'profitPool' && <ProfitPoolCenter />}
-          {current === 'rewards' && <RewardsAdmin />}
+          {current === 'rewards' && (
+            <RewardsAdmin canManageMoney={admin.role === 'SUPER' || admin.role === 'FINANCE'} />
+          )}
           {current === 'rebates' && <Rebates />}
-          {current === 'leaderboards' && <LeaderboardsAdmin />}
+          {current === 'leaderboards' && (
+            <LeaderboardsAdmin canManageMoney={admin.role === 'SUPER' || admin.role === 'FINANCE'} />
+          )}
           {current === 'messaging' && <MessagingHub />}
           {current === 'support' && (
             <Support
@@ -375,7 +384,7 @@ function HubTabs({
 
 function DepositsHub({ role }: { role: Admin['role'] }) {
   const canOrders = role === 'SUPER' || role === 'FINANCE';
-  const canPayees = role === 'SUPER' || role === 'OPERATOR' || role === 'FINANCE';
+  const canPayees = role === 'SUPER' || role === 'FINANCE';
   // 支付通道设置只在左侧菜单的「支付通道」页维护，充值管理不再重复入口
   const tabs = [
     ...(canOrders ? [{ id: 'orders', label: '充值工单' }] : []),
@@ -2647,7 +2656,13 @@ function Rounds({ canReconcile }: { canReconcile: boolean }) {
   async function action(name: string, extra: Row = {}) {
     if (!detail) return;
     await run(async () => {
-      await post(`/api/admin/rounds/${detail.id}/action`, { action: name, ...extra });
+      const response = await post<{ warnings?: string[] }>(
+        `/api/admin/rounds/${detail.id}/action`,
+        { action: name, ...extra },
+      );
+      if (response.warnings?.length) {
+        setError(`主操作已完成，但后续任务异常：${response.warnings.join('、')}。请复核后续状态。`);
+      }
     });
   }
 
@@ -3105,14 +3120,24 @@ function Finance() {
   const today=new Date().toLocaleDateString('sv-SE',{timeZone:'Asia/Kuala_Lumpur'});
   const [accounts,setAccounts]=useState<Row[]>([]);const [ledger,setLedger]=useState<Row[]>([]);const [uid,setUid]=useState('');const [amount,setAmount]=useState('');const [direction,setDirection]=useState('credit');const [reason,setReason]=useState('');
   const [reportDate,setReportDate]=useState(today);const [report,setReport]=useState<Row|null>(null);
+  const [adjustBusy,setAdjustBusy]=useState(false);
+  const adjustRequest=useRef<{key:string;id:string}|null>(null);
   const load=()=>Promise.all([request<Row>('/api/admin/finance/accounts'),request<{items:Row[]}>('/api/admin/finance/ledger?limit=200')]).then(([a,l])=>{setAccounts(a.accounts);setLedger(l.items);});
   useEffect(()=>{void load();},[]);
   useEffect(()=>{request<Row>(`/api/admin/finance/daily-report?date=${reportDate}`).then(setReport).catch(()=>setReport(null));},[reportDate]);
   async function adjust(){
+    if(adjustBusy)return;
+    setAdjustBusy(true);
     try {
-      await post('/api/admin/finance/adjust',{uid,direction,amountCents:toCents(amount),reason});
+      const amountCents=toCents(amount);
+      const key=JSON.stringify({uid,direction,amountCents,reason:reason.trim()});
+      const requestId=adjustRequest.current?.key===key?adjustRequest.current.id:crypto.randomUUID();
+      adjustRequest.current={key,id:requestId};
+      await post('/api/admin/finance/adjust',{uid,direction,amountCents,reason:reason.trim(),requestId});
+      adjustRequest.current=null;
       setAmount('');setReason('');await load();
     } catch(e){ alert(`调账失败：${(e as Error).message}`); }
+    finally{setAdjustBusy(false);}
   }
   const accountGroups: Array<{title:string; hint:string; types:string[]; tone:(v:bigint)=>string}> = [
     { title: '收入科目', hint: '平台赚到的钱，只进不出', types: ['PLATFORM_RAKE','PLATFORM_FEES'], tone: v => v < 0n ? 'red' : 'jade' },
@@ -3171,10 +3196,10 @@ function Finance() {
         </Fragment>)}
       </tbody></table></div>:<Empty text="该业务日暂无数据"/>}
     </section>
-    <section className="panel"><div className="panel-title"><div><small>人工调账</small><h2>余额调整</h2></div><span>调账会写入审计日志</span></div><div className="inline-form"><input placeholder="用户 UID" value={uid} onChange={e=>setUid(e.target.value)}/><select value={direction} onChange={e=>setDirection(e.target.value)}><option value="credit">增加余额</option><option value="debit">扣减余额</option></select><input placeholder="金额 RM" value={amount} onChange={e=>setAmount(e.target.value)}/><input placeholder="调账原因（必填）" value={reason} onChange={e=>setReason(e.target.value)}/><button className="primary small" disabled={!uid||!amount||reason.length<4} onClick={()=>void adjust()}>执行调账</button></div></section><section className="panel"><div className="panel-title"><div><small>全量流水</small><h2>钱包台账</h2></div><span>最近 200 条</span></div><div className="table-wrap"><table><thead><tr><th>时间</th><th>科目</th><th>方向</th><th>金额</th><th>业务</th><th>关联局</th><th>备注</th></tr></thead><tbody>{ledger.map(l=><tr key={l.id}><td>{new Date(l.createdAt).toLocaleString('zh-MY')}</td><td>{ACCOUNT_INFO[l.accountType]?.[0] ?? l.accountType}</td><td className={l.direction==='CREDIT'?'positive':'negative'}>{l.direction==='CREDIT'?'收入':'支出'}</td><td>RM {rm(l.amountCents)}</td><td>{refLabel(l.refType)}</td><td>{l.roundId?.slice(-8)??'—'}</td><td>{l.memo??'—'}</td></tr>)}</tbody></table></div></section></>;
+    <section className="panel"><div className="panel-title"><div><small>人工调账</small><h2>余额调整</h2></div><span>调账会写入审计日志</span></div><div className="inline-form"><input placeholder="用户 UID" value={uid} onChange={e=>setUid(e.target.value)}/><select value={direction} onChange={e=>setDirection(e.target.value)}><option value="credit">增加余额</option><option value="debit">扣减余额</option></select><input placeholder="金额 RM" value={amount} onChange={e=>setAmount(e.target.value)}/><input placeholder="调账原因（必填）" value={reason} onChange={e=>setReason(e.target.value)}/><button className="primary small" disabled={adjustBusy||!uid||!amount||reason.length<4} onClick={()=>void adjust()}>{adjustBusy?'处理中…':'执行调账'}</button></div></section><section className="panel"><div className="panel-title"><div><small>全量流水</small><h2>钱包台账</h2></div><span>最近 200 条</span></div><div className="table-wrap"><table><thead><tr><th>时间</th><th>科目</th><th>方向</th><th>金额</th><th>业务</th><th>关联局</th><th>备注</th></tr></thead><tbody>{ledger.map(l=><tr key={l.id}><td>{new Date(l.createdAt).toLocaleString('zh-MY')}</td><td>{ACCOUNT_INFO[l.accountType]?.[0] ?? l.accountType}</td><td className={l.direction==='CREDIT'?'positive':'negative'}>{l.direction==='CREDIT'?'收入':'支出'}</td><td>RM {rm(l.amountCents)}</td><td>{refLabel(l.refType)}</td><td>{l.roundId?.slice(-8)??'—'}</td><td>{l.memo??'—'}</td></tr>)}</tbody></table></div></section></>;
 }
 
-function RewardsAdmin() {
+function RewardsAdmin({ canManageMoney }: { canManageMoney: boolean }) {
   return (
     <div className="legacy-game-scope">
       <div className="toolbar standalone">
@@ -3183,7 +3208,7 @@ function RewardsAdmin() {
           <span>已改为表单填写；建议在「游戏运营中心 → 每日奖励」管理</span>
         </div>
       </div>
-      <GameRewardsAdmin gameCode={DEFAULT_GAME_CODE} />
+      <GameRewardsAdmin gameCode={DEFAULT_GAME_CODE} canManageMoney={canManageMoney} />
     </div>
   );
 }
@@ -3210,7 +3235,7 @@ function Rebates() {
     <section className="panel"><div className="panel-title"><div><small>{date} 结算明细</small><h2>返水佣金名单</h2></div><span>佣金从「推广返水支出户」发放到玩家可用余额</span></div><div className="table-wrap"><table><thead><tr><th>玩家</th><th>自身流水</th><th>直属流水</th><th>二级流水</th><th>佣金</th><th>状态</th></tr></thead><tbody>{items.map(i=><tr key={i.id}><td>{i.user.nickname}<small>UID {i.user.uid}</small></td><td>RM {rm(i.selfCents)}</td><td>RM {rm(i.l1Cents)}</td><td>RM {rm(i.l2Cents)}</td><td className="money">RM {rm(i.commissionCents)}</td><td><Badge value={i.status}/></td></tr>)}</tbody></table>{items.length===0&&<Empty text="该业务日尚无返水结算" />}</div></section></>;
 }
 
-function LeaderboardsAdmin() {
+function LeaderboardsAdmin({ canManageMoney }: { canManageMoney: boolean }) {
   return (
     <div className="legacy-game-scope">
       <div className="toolbar standalone">
@@ -3219,7 +3244,10 @@ function LeaderboardsAdmin() {
           <span>已改为表单发放；建议在「游戏运营中心 → 排行榜」管理</span>
         </div>
       </div>
-      <GameLeaderboardsAdmin gameCode={DEFAULT_GAME_CODE} />
+      <GameLeaderboardsAdmin
+        gameCode={DEFAULT_GAME_CODE}
+        canManageMoney={canManageMoney}
+      />
     </div>
   );
 }
@@ -3402,6 +3430,8 @@ function Support({
   const [profile, setProfile] = useState<Row | null>(null);
   const [text, setText] = useState('');
   const [busy, setBusy] = useState(false);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [loadingOlder, setLoadingOlder] = useState(false);
   const streamRef = useRef<HTMLElement>(null);
 
   const load = () =>
@@ -3415,16 +3445,46 @@ function Support({
 
   async function open(thread: Row) {
     setSelected(thread);
-    const result = await request<{ items: Row[]; user: Row }>(
+    const result = await request<{ items: Row[]; user: Row; nextCursor: string | null }>(
       `/api/admin/support/${thread.userId}/messages`,
     );
     setMessages(result.items);
     setProfile(result.user);
+    setNextCursor(result.nextCursor);
     void load();
     requestAnimationFrame(() => {
       const el = streamRef.current;
       if (el) el.scrollTop = el.scrollHeight;
     });
+  }
+
+  async function loadOlder() {
+    if (!selected || !nextCursor || loadingOlder) return;
+    const el = streamRef.current;
+    const previousHeight = el?.scrollHeight ?? 0;
+    setLoadingOlder(true);
+    try {
+      const result = await request<{
+        items: Row[];
+        user: Row;
+        nextCursor: string | null;
+      }>(
+        `/api/admin/support/${selected.userId}/messages?cursor=${encodeURIComponent(nextCursor)}`,
+      );
+      setMessages((current) => {
+        const byId = new Map([...result.items, ...current].map((message) => [message.id, message]));
+        return [...byId.values()].sort((left, right) => {
+          const time = new Date(left.createdAt).getTime() - new Date(right.createdAt).getTime();
+          return time || String(left.id).localeCompare(String(right.id));
+        });
+      });
+      setNextCursor(result.nextCursor);
+      requestAnimationFrame(() => {
+        if (el) el.scrollTop += el.scrollHeight - previousHeight;
+      });
+    } finally {
+      setLoadingOlder(false);
+    }
   }
 
   useEffect(() => {
@@ -3448,12 +3508,17 @@ function Support({
     if (!selected || !text.trim()) return;
     setBusy(true);
     try {
-      await post(`/api/admin/support/${selected.userId}/messages`, {
+      const result = await post<{ message: Row }>(`/api/admin/support/${selected.userId}/messages`, {
         type: 'TEXT',
         content: text.trim(),
       });
       setText('');
-      await open(selected);
+      setMessages((current) => [...current, result.message]);
+      await load();
+      requestAnimationFrame(() => {
+        const el = streamRef.current;
+        if (el) el.scrollTop = el.scrollHeight;
+      });
     } finally {
       setBusy(false);
     }
@@ -3519,6 +3584,16 @@ function Support({
               </div>
             </header>
             <main ref={streamRef}>
+              {nextCursor && (
+                <button
+                  type="button"
+                  className="small support-load-older"
+                  disabled={loadingOlder}
+                  onClick={() => void loadOlder()}
+                >
+                  {loadingOlder ? '加载中…' : '加载更早消息'}
+                </button>
+              )}
               {messages.map((m) => (
                 <div
                   className={`support-message ${String(m.senderType).toLowerCase()}`}

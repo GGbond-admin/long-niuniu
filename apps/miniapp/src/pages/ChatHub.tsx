@@ -18,6 +18,7 @@ function formatClock(value?: string) {
   if (!value) return '';
   try {
     return new Date(value).toLocaleTimeString('zh-MY', {
+      hour12: false,
       hour: '2-digit',
       minute: '2-digit',
     });

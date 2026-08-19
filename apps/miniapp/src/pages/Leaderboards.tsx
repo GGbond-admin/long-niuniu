@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { api, rm } from '../api';
 import { goBack } from '../lib/nav';
+import { useIsolatedPageScroll } from '../lib/useIsolatedPageScroll';
 import BrandLogo from '../components/BrandLogo';
 
 type Period = 'daily' | 'weekly' | 'monthly';
@@ -62,6 +63,7 @@ export default function Leaderboards() {
   const [error, setError] = useState('');
   const [retryKey, setRetryKey] = useState(0);
   const [gameTitle, setGameTitle] = useState('当前游戏');
+  const pageScrollRef = useIsolatedPageScroll<HTMLDivElement>();
 
   useEffect(() => {
     let alive = true;
@@ -116,7 +118,7 @@ export default function Leaderboards() {
     board === 'points' ? `RM ${rm(value)}` : `${value}${board === 'banker' ? ' 局' : ' 次'}`;
 
   return (
-    <div className="page subpage lb-page">
+    <div className="page subpage feature-scroll-page lb-page" ref={pageScrollRef}>
       <header className="subpage-header">
         <button type="button" onClick={() => goBack(navigate, location, roomId ? `/game/${roomId}` : '/')} aria-label="返回">
           ‹

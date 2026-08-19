@@ -15,10 +15,13 @@ export interface TgWebApp {
   requestFullscreen?(): void;
   exitFullscreen?(): void;
   isFullscreen?: boolean;
+  /** 当前可见高度（键盘弹出时通常会变矮） */
+  viewportHeight?: number;
+  viewportStableHeight?: number;
   safeAreaInset?: { top: number; bottom: number; left: number; right: number };
   contentSafeAreaInset?: { top: number; bottom: number; left: number; right: number };
-  onEvent?(event: string, handler: () => void): void;
-  offEvent?(event: string, handler: () => void): void;
+  onEvent?(event: string, handler: ((payload?: { isStateStable?: boolean }) => void) | (() => void)): void;
+  offEvent?(event: string, handler: ((payload?: { isStateStable?: boolean }) => void) | (() => void)): void;
 }
 
 declare global {
@@ -54,11 +57,142 @@ function syncTelegramSafeArea(app: TgWebApp) {
 }
 
 let disposeTelegramLayout: (() => void) | null = null;
+let viewportFrame = 0;
+let composerFocused = false;
+let exitedFullscreenForKeyboard = false;
+let restoreFullscreenTimer = 0;
+
+function clearFullscreenRestoreTimer() {
+  if (!restoreFullscreenTimer) return;
+  window.clearTimeout(restoreFullscreenTimer);
+  restoreFullscreenTimer = 0;
+}
+
+function isMobileTelegram(app: TgWebApp) {
+  return app.platform === 'android' || app.platform === 'android_x' || app.platform === 'ios';
+}
+
+function canRequestFullscreen(app: TgWebApp) {
+  try {
+    return app.isVersionAtLeast?.('8.0') === true && typeof app.requestFullscreen === 'function';
+  } catch {
+    return false;
+  }
+}
+
+function readVisibleViewport() {
+  const app = tg();
+  const vv = window.visualViewport;
+  const inner = window.innerHeight;
+  const telegramHeight =
+    typeof app?.viewportHeight === 'number' && app.viewportHeight > 0 ? app.viewportHeight : null;
+  const visualHeight = vv && vv.height > 0 ? vv.height : null;
+  const offsetTop = vv ? Math.max(0, vv.offsetTop) : 0;
+
+  let height = visualHeight ?? telegramHeight ?? inner;
+  // Telegram 安卓键盘经常不改 visualViewport，只改 WebApp.viewportHeight
+  if (telegramHeight && height - telegramHeight > 40) {
+    height = telegramHeight;
+  }
+  if (offsetTop + height > inner + 1) {
+    height = Math.max(240, inner - offsetTop);
+  }
+
+  return {
+    height: Math.max(240, Math.round(height)),
+    offsetTop: Math.round(offsetTop),
+  };
+}
+
+function syncViewport() {
+  viewportFrame = 0;
+  const { height, offsetTop } = readVisibleViewport();
+  writeCssVar('--app-viewport-height', height);
+  writeCssVar('--app-viewport-offset-top', offsetTop);
+
+  const activeElement = document.activeElement;
+  const editableFocused =
+    activeElement instanceof HTMLInputElement ||
+    activeElement instanceof HTMLTextAreaElement ||
+    activeElement?.getAttribute('contenteditable') === 'true';
+  const viewportSuggestsKeyboard =
+    offsetTop > 24 ||
+    window.innerHeight - height > 80 ||
+    (typeof tg()?.viewportStableHeight === 'number' &&
+      typeof tg()?.viewportHeight === 'number' &&
+      tg()!.viewportStableHeight! - tg()!.viewportHeight! > 80);
+  const keyboardLikelyOpen =
+    composerFocused || (editableFocused && viewportSuggestsKeyboard);
+  document.body.classList.toggle('kb-open', keyboardLikelyOpen);
+}
+
+function scheduleViewportSync() {
+  if (viewportFrame) window.cancelAnimationFrame(viewportFrame);
+  viewportFrame = window.requestAnimationFrame(syncViewport);
+}
+
+function requestMobileFullscreen(app: TgWebApp) {
+  if (!isMobileTelegram(app) || !canRequestFullscreen(app) || app.isFullscreen || composerFocused) {
+    return;
+  }
+  try {
+    app.requestFullscreen?.();
+  } catch {
+    // 老客户端/不支持的环境：保持 expand() 的效果即可
+  }
+}
+
+/**
+ * 输入框聚焦时退出真全屏并锁到可视区域。
+ * Telegram 全屏 + 软键盘叠在一起时，安卓/iOS WebView 经常整页黑屏，输入栏和发送键被挡住。
+ */
+export function setChatInputFocus(focused: boolean) {
+  composerFocused = focused;
+  const app = tg();
+  if (focused) {
+    clearFullscreenRestoreTimer();
+    if (app?.isFullscreen) {
+      exitedFullscreenForKeyboard = true;
+      try {
+        app.exitFullscreen?.();
+      } catch {
+        // ignore
+      }
+    }
+    document.body.classList.add('kb-open');
+    scheduleViewportSync();
+    return;
+  }
+
+  document.body.classList.remove('kb-open');
+  scheduleViewportSync();
+  if (!exitedFullscreenForKeyboard || !app) return;
+  clearFullscreenRestoreTimer();
+  restoreFullscreenTimer = window.setTimeout(() => {
+    restoreFullscreenTimer = 0;
+    if (composerFocused) return;
+    exitedFullscreenForKeyboard = false;
+    requestMobileFullscreen(app);
+    scheduleViewportSync();
+  }, 280);
+}
+
+/**
+ * 聊天组件因路由切换被卸载时只清理键盘状态，不再请求恢复全屏。
+ * 否则全屏切换会在榜单/奖励页期间改写可视高度，返回房间后底部被整体顶起。
+ */
+export function disposeChatInputFocus() {
+  composerFocused = false;
+  clearFullscreenRestoreTimer();
+  exitedFullscreenForKeyboard = false;
+  document.body.classList.remove('kb-open');
+  scheduleViewportSync();
+}
 
 /**
  * 手机端进入即请求真全屏（Bot API 8.0+，Telegram 客户端 ≥ 11.0）。
  * 桌面端保持普通展开：桌面 requestFullscreen 会弹成独立全屏窗口，体验反而差。
- * 同时同步 visualViewport 高度，软键盘出现时聊天输入栏始终留在可视区内。
+ * 同时同步 visualViewport / Telegram viewport，软键盘出现时聊天输入栏始终留在可视区内。
  */
 export function initTelegramFullscreen() {
   // React StrictMode / Fast Refresh 会重复初始化；先移除旧监听，避免一次事件触发多次布局写入。
@@ -66,18 +200,10 @@ export function initTelegramFullscreen() {
   disposeTelegramLayout = null;
 
   const viewport = window.visualViewport;
-  let viewportFrame = 0;
-  const syncViewport = () => {
-    viewportFrame = 0;
-    writeCssVar('--app-viewport-height', viewport?.height ?? window.innerHeight);
-  };
-  const scheduleViewportSync = () => {
-    if (viewportFrame) window.cancelAnimationFrame(viewportFrame);
-    viewportFrame = window.requestAnimationFrame(syncViewport);
-  };
   viewport?.addEventListener('resize', scheduleViewportSync);
   viewport?.addEventListener('scroll', scheduleViewportSync);
   window.addEventListener('resize', scheduleViewportSync);
+  window.addEventListener('orientationchange', scheduleViewportSync);
   syncViewport();
 
   const app = tg();
@@ -86,6 +212,7 @@ export function initTelegramFullscreen() {
       viewport?.removeEventListener('resize', scheduleViewportSync);
       viewport?.removeEventListener('scroll', scheduleViewportSync);
       window.removeEventListener('resize', scheduleViewportSync);
+      window.removeEventListener('orientationchange', scheduleViewportSync);
       if (viewportFrame) window.cancelAnimationFrame(viewportFrame);
     };
     return;
@@ -101,6 +228,7 @@ export function initTelegramFullscreen() {
     'fullscreenFailed',
     'safeAreaChanged',
     'contentSafeAreaChanged',
+    'viewportChanged',
   ];
   for (const event of telegramEvents) app.onEvent?.(event, syncLayout);
   disposeTelegramLayout = () => {
@@ -108,23 +236,11 @@ export function initTelegramFullscreen() {
     viewport?.removeEventListener('resize', scheduleViewportSync);
     viewport?.removeEventListener('scroll', scheduleViewportSync);
     window.removeEventListener('resize', scheduleViewportSync);
+    window.removeEventListener('orientationchange', scheduleViewportSync);
     if (viewportFrame) window.cancelAnimationFrame(viewportFrame);
   };
   syncLayout();
-
-  const isMobile = app.platform === 'android' || app.platform === 'android_x' || app.platform === 'ios';
-  let supported = false;
-  try {
-    supported = app.isVersionAtLeast?.('8.0') === true && typeof app.requestFullscreen === 'function';
-  } catch {
-    supported = false;
-  }
-  if (!isMobile || !supported || app.isFullscreen) return;
-  try {
-    app.requestFullscreen?.();
-  } catch {
-    // 老客户端/不支持的环境：保持 expand() 的效果即可
-  }
+  requestMobileFullscreen(app);
 }
 
 export function getInitData(): string {
@@ -166,17 +282,24 @@ function createDeviceUuid(): string {
 }
 
 /** 设备指纹：localStorage UUID（服务端配合会话绑定校验） */
+let volatileDeviceId: string | null = null;
+
 export function getDeviceId(): string {
   const KEY = 'nn_device_id';
   try {
     const existing = localStorage.getItem(KEY);
-    if (existing && existing.length >= 8) return existing;
-    const id = createDeviceUuid();
+    if (existing && existing.length >= 8) {
+      volatileDeviceId = existing;
+      return existing;
+    }
+    const id = volatileDeviceId ?? createDeviceUuid();
     localStorage.setItem(KEY, id);
+    volatileDeviceId = id;
     return id;
   } catch {
-    // 无痕/禁用存储时仍保证登录可用（重启后会变，需重新绑设备）
-    return createDeviceUuid();
+    // 存储不可用时至少保证当前 WebView 生命周期内设备 ID 稳定。
+    volatileDeviceId ??= createDeviceUuid();
+    return volatileDeviceId;
   }
 }
 

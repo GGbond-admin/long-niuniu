@@ -278,7 +278,13 @@ const emptyReward: RewardDraft = {
   conditions: emptyConditionDraft('manual'),
 };
 
-export function GameRewardsAdmin({ gameCode }: { gameCode: string }) {
+export function GameRewardsAdmin({
+  gameCode,
+  canManageMoney = false,
+}: {
+  gameCode: string;
+  canManageMoney?: boolean;
+}) {
   const [items, setItems] = useState<Row[]>([]);
   const [grants, setGrants] = useState<Row[]>([]);
   const [editingId, setEditingId] = useState('');
@@ -326,6 +332,7 @@ export function GameRewardsAdmin({ gameCode }: { gameCode: string }) {
     setMessage('');
     try {
       await post(base, {
+        id: editingId || undefined,
         tab: draft.tab,
         code: draft.code.trim(),
         title: draft.title.trim(),
@@ -367,7 +374,7 @@ export function GameRewardsAdmin({ gameCode }: { gameCode: string }) {
 
   return (
     <div className="game-rewards-page">
-      <section className="panel reward-editor-panel">
+      {canManageMoney && <section className="panel reward-editor-panel">
         <div className="panel-title">
           <div>
             <small>每日奖励 · {gameCode}</small>
@@ -436,7 +443,7 @@ export function GameRewardsAdmin({ gameCode }: { gameCode: string }) {
           {busy ? '保存中…' : '保存奖励规则'}
         </button>
         <Notice message={message} />
-      </section>
+      </section>}
 
       <div className="reward-config-grid">
         {items.map((item) => (
@@ -450,8 +457,12 @@ export function GameRewardsAdmin({ gameCode }: { gameCode: string }) {
             <p className="reward-condition-summary">{summarizeConditions(item.conditions)}</p>
             <footer>
               <span>每日 {item.dailyQuota === 0 ? '不限量' : `${item.dailyQuota} 份`}</span>
-              <button type="button" onClick={() => void manualGrant(item)}>补发</button>
-              <button type="button" onClick={() => edit(item)}>编辑</button>
+              {canManageMoney && (
+                <>
+                  <button type="button" onClick={() => void manualGrant(item)}>补发</button>
+                  <button type="button" onClick={() => edit(item)}>编辑</button>
+                </>
+              )}
             </footer>
           </article>
         ))}
@@ -492,8 +503,15 @@ const defaultPrizes: PrizeRow[] = [
   { rank: '3', amountRm: '18.88' },
 ];
 
-export function GameLeaderboardsAdmin({ gameCode }: { gameCode: string }) {
+export function GameLeaderboardsAdmin({
+  gameCode,
+  canManageMoney = false,
+}: {
+  gameCode: string;
+  canManageMoney?: boolean;
+}) {
   const [period, setPeriod] = useState<'daily' | 'weekly' | 'monthly'>('daily');
+  const [periodKey, setPeriodKey] = useState('');
   const [data, setData] = useState<Row | null>(null);
   const [message, setMessage] = useState('');
   const [rewardType, setRewardType] = useState('');
@@ -501,12 +519,17 @@ export function GameLeaderboardsAdmin({ gameCode }: { gameCode: string }) {
   const [busy, setBusy] = useState(false);
   const base = `/api/admin/games/${encodeURIComponent(gameCode)}/leaderboards`;
 
-  async function load() {
-    setData(await request<Row>(`${base}?period=${period}`));
+  async function load(selectedPeriodKey = periodKey) {
+    const query = new URLSearchParams({ period });
+    if (selectedPeriodKey) query.set('periodKey', selectedPeriodKey);
+    const next = await request<Row>(`${base}?${query.toString()}`);
+    setData(next);
+    setPeriodKey(String(next.periodKey ?? selectedPeriodKey));
   }
 
   useEffect(() => {
-    void load().catch((error) => setMessage((error as Error).message));
+    setPeriodKey('');
+    void load('').catch((error) => setMessage((error as Error).message));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [gameCode, period]);
 
@@ -541,9 +564,16 @@ export function GameLeaderboardsAdmin({ gameCode }: { gameCode: string }) {
         setMessage('请至少填写一个有效名次与奖金。');
         return;
       }
+      const expectedSnapshotHash = String(
+        data?.boards?.[rewardType]?.snapshotHash ?? '',
+      );
+      if (!/^[a-f0-9]{64}$/.test(expectedSnapshotHash)) {
+        setMessage('当前榜单缺少可核验快照，请先点击“立即生成快照”。');
+        return;
+      }
       if (
         !window.confirm(
-          `确认按当前 ${period}「${rewardLabel}」快照发放 ${parsed.length} 个名次？`,
+          `确认按已封闭周期 ${periodKey} 的「${rewardLabel}」最终快照发放 ${parsed.length} 个名次？`,
         )
       ) {
         return;
@@ -551,6 +581,8 @@ export function GameLeaderboardsAdmin({ gameCode }: { gameCode: string }) {
       const result = await post<{ results: Row[] }>(`${base}/reward`, {
         type: rewardType,
         period,
+        periodKey,
+        expectedSnapshotHash,
         prizes: parsed,
       });
       const granted = result.results.filter((row) => row.granted).length;
@@ -575,13 +607,22 @@ export function GameLeaderboardsAdmin({ gameCode }: { gameCode: string }) {
           <option value="weekly">周榜</option>
           <option value="monthly">月榜</option>
         </select>
+        <input
+          aria-label="排行榜周期"
+          value={periodKey}
+          placeholder={period === 'daily' ? 'YYYY-MM-DD' : period === 'weekly' ? 'YYYY-Www' : 'YYYY-MM'}
+          onChange={(event) => setPeriodKey(event.target.value)}
+        />
+        <button type="button" className="small" onClick={() => void load(periodKey)}>
+          读取周期
+        </button>
         <button
           type="button"
           className="primary small"
           onClick={async () => {
-            await post(`${base}/generate`, {});
-            await load();
-            setMessage('当前游戏榜单快照已重新生成。');
+            await post(`${base}/generate`, { period, periodKey });
+            await load(periodKey);
+            setMessage(`${periodKey} 榜单快照已重新生成。`);
           }}
         >
           立即生成快照
@@ -589,7 +630,7 @@ export function GameLeaderboardsAdmin({ gameCode }: { gameCode: string }) {
       </div>
       <Notice message={message} />
 
-      {rewardType && (
+      {canManageMoney && rewardType && (
         <section className="panel leaderboard-prize-panel">
           <div className="panel-title">
             <div>
@@ -659,7 +700,7 @@ export function GameLeaderboardsAdmin({ gameCode }: { gameCode: string }) {
             <button
               type="button"
               className="primary small"
-              disabled={busy}
+              disabled={busy || !periodKey}
               onClick={() => void submitPrizes()}
             >
               {busy ? '发放中…' : '确认发放'}
@@ -680,16 +721,18 @@ export function GameLeaderboardsAdmin({ gameCode }: { gameCode: string }) {
             <section className="panel" key={type}>
               <div className="panel-title">
                 <div><small>{period}</small><h2>{label}</h2></div>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setRewardType(type);
-                    setPrizes(defaultPrizes);
-                    setMessage('');
-                  }}
-                >
-                  发放奖励
-                </button>
+                {canManageMoney && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setRewardType(type);
+                      setPrizes(defaultPrizes);
+                      setMessage('');
+                    }}
+                  >
+                    发放奖励
+                  </button>
+                )}
               </div>
               {ranks.slice(0, 20).map((rank: Row) => (
                 <div className="mini-rank" key={rank.rank}>

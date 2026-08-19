@@ -24,7 +24,15 @@ const roomIdSchema = z
   .min(1)
   .max(100)
   .regex(/^[A-Za-z0-9_-]+$/);
-const centsSchema = z.union([z.string(), z.number()]).transform((value) => BigInt(value));
+const centsSchema = z
+  .union([z.string(), z.number()])
+  .transform((value) => BigInt(value))
+  .refine((value) => value >= 0n && value <= 100_000_000_000n, {
+    message: 'INVALID_AMOUNT',
+  });
+const positiveCentsSchema = centsSchema.refine((value) => value > 0n, {
+  message: 'INVALID_AMOUNT',
+});
 const avatarSchema = z
   .string()
   .trim()
@@ -55,8 +63,13 @@ const capabilitySchema = z.object({
 
 export async function adminVirtualPlayerRoutes(app: FastifyInstance) {
   const operators = [app.authAdmin, app.requireAdminRoles('SUPER', 'OPERATOR')];
+  const readers = [
+    app.authAdmin,
+    app.requireAdminRoles('SUPER', 'OPERATOR', 'FINANCE'),
+  ];
+  const fundManagers = [app.authAdmin, app.requireAdminRoles('SUPER', 'FINANCE')];
 
-  app.get('/api/admin/virtual-players', { preHandler: operators }, async (req) => {
+  app.get('/api/admin/virtual-players', { preHandler: readers }, async (req) => {
     const { roomId } = z
       .object({ roomId: roomIdSchema.optional() })
       .parse(req.query ?? {});
@@ -75,6 +88,13 @@ export async function adminVirtualPlayerRoutes(app: FastifyInstance) {
         joinRoom: z.boolean().optional(),
       })
       .parse(req.body);
+    const role = (req.user as { role?: string }).role;
+    if (
+      role === 'OPERATOR'
+      && ((body.initialFundCents ?? 0n) > 0n || (body.targetBalanceCents ?? 0n) > 0n)
+    ) {
+      return reply.code(403).send({ error: 'FINANCE_ROLE_REQUIRED' });
+    }
 
     try {
       const item = await createVirtualPlayer({
@@ -202,6 +222,12 @@ export async function adminVirtualPlayerRoutes(app: FastifyInstance) {
         roomId: roomIdSchema.optional(),
       })
       .parse(req.body ?? {});
+    if (
+      body.targetBalanceCents !== undefined
+      && (req.user as { role?: string }).role === 'OPERATOR'
+    ) {
+      return reply.code(403).send({ error: 'FINANCE_ROLE_REQUIRED' });
+    }
     try {
       const item = await updateVirtualPlayer(id, body);
       await prisma.auditLog.create({
@@ -229,12 +255,44 @@ export async function adminVirtualPlayerRoutes(app: FastifyInstance) {
     }
   });
 
-  app.post('/api/admin/virtual-players/:id/fund', { preHandler: operators }, async (req, reply) => {
+  app.patch(
+    '/api/admin/virtual-players/:id/target-balance',
+    { preHandler: fundManagers },
+    async (req, reply) => {
+      const adminId = (req.user as { sub: string }).sub;
+      const { id } = z.object({ id: idSchema }).parse(req.params);
+      const { targetBalanceCents } = z
+        .object({ targetBalanceCents: centsSchema })
+        .strict()
+        .parse(req.body ?? {});
+      try {
+        const item = await updateVirtualPlayer(id, { targetBalanceCents });
+        await prisma.auditLog.create({
+          data: {
+            adminId,
+            action: 'virtual_player_target_balance_update',
+            target: id,
+            after: { targetBalanceCents: String(targetBalanceCents) },
+            ip: req.ip,
+          },
+        });
+        return { item };
+      } catch (error) {
+        if (error instanceof GameError) {
+          const status = error.code === 'VIRTUAL_NOT_FOUND' ? 404 : 400;
+          return reply.code(status).send({ error: error.code, details: error.details });
+        }
+        throw error;
+      }
+    },
+  );
+
+  app.post('/api/admin/virtual-players/:id/fund', { preHandler: fundManagers }, async (req, reply) => {
     const adminId = (req.user as { sub: string }).sub;
     const { id } = z.object({ id: idSchema }).parse(req.params);
     const body = z
       .object({
-        amountCents: centsSchema,
+        amountCents: positiveCentsSchema,
         reason: z.string().trim().min(2).max(200).default('虚拟玩家补款'),
       })
       .parse(req.body ?? {});

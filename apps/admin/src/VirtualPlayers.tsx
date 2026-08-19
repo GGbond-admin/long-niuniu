@@ -208,9 +208,13 @@ function RoomSelect({
 export default function VirtualPlayers({
   roomId: scopedRoomId = '',
   embedded = false,
+  canManageFunds = false,
+  canOperate = true,
 }: {
   roomId?: string;
   embedded?: boolean;
+  canManageFunds?: boolean;
+  canOperate?: boolean;
 }) {
   const [rooms, setRooms] = useState<Row[]>([]);
   const [items, setItems] = useState<Row[]>([]);
@@ -335,7 +339,7 @@ export default function VirtualPlayers({
       return;
     }
     void run('create', async () => {
-      const fundCents = toCents(fundRm);
+      const fundCents = canManageFunds ? toCents(fundRm) : '0';
       const trimmed = nickname.trim();
       const created = await post<{ item: Row }>('/api/admin/virtual-players', {
         ...(trimmed ? { nickname: trimmed, autoNickname: false } : { autoNickname: true }),
@@ -408,9 +412,21 @@ export default function VirtualPlayers({
         bidWeight: Number(draft.bidWeight),
         betRatioMin: Number(draft.betRatioMin),
         betRatioMax: Number(draft.betRatioMax),
-        targetBalanceCents: toCents(draft.targetBalanceRm),
+        ...(canManageFunds
+          ? { targetBalanceCents: toCents(draft.targetBalanceRm) }
+          : {}),
       });
       return { id: selected.id, roomId: draft.roomId };
+    });
+  }
+
+  function saveTargetBalance() {
+    if (!selected || !draft || !canManageFunds) return;
+    void run('save-target', async () => {
+      await patch(`/api/admin/virtual-players/${selected.id}/target-balance`, {
+        targetBalanceCents: toCents(draft.targetBalanceRm),
+      });
+      return { id: selected.id, roomId: selected.roomId };
     });
   }
 
@@ -423,7 +439,7 @@ export default function VirtualPlayers({
     <div className={`vp-page${embedded ? ' embedded' : ''}`}>
       {error && <div className="error-box">{error}</div>}
 
-      <section className="panel vp-create">
+      {canOperate && <section className="panel vp-create">
         <div className="panel-title">
           <div>
             <small>新建虚拟玩家</small>
@@ -463,7 +479,12 @@ export default function VirtualPlayers({
             </label>
             <label>
               初始 / 目标资金（RM）
-              <input value={fundRm} onChange={(event) => setFundRm(event.target.value)} placeholder="5000" />
+              <input
+                value={canManageFunds ? fundRm : '0'}
+                disabled={!canManageFunds}
+                onChange={(event) => setFundRm(event.target.value)}
+                placeholder="5000"
+              />
             </label>
             <label>
               竞标参与概率（0–1）
@@ -499,7 +520,7 @@ export default function VirtualPlayers({
             </button>
           </div>
         </div>
-      </section>
+      </section>}
 
       <div className="vp-layout">
         <section className="panel">
@@ -521,21 +542,25 @@ export default function VirtualPlayers({
                   />
                 </label>
               )}
-              <button
-                type="button"
-                className="primary small"
-                disabled={!!busy || !items.length}
-                onClick={() => bulkToggle(true)}
-              >
-                {busy === 'bulk-on' ? '启用中…' : '一键启用'}
-              </button>
-              <button
-                type="button"
-                disabled={!!busy || !items.length}
-                onClick={() => bulkToggle(false)}
-              >
-                {busy === 'bulk-off' ? '停用中…' : '一键停用'}
-              </button>
+              {canOperate && (
+                <>
+                  <button
+                    type="button"
+                    className="primary small"
+                    disabled={!!busy || !items.length}
+                    onClick={() => bulkToggle(true)}
+                  >
+                    {busy === 'bulk-on' ? '启用中…' : '一键启用'}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!!busy || !items.length}
+                    onClick={() => bulkToggle(false)}
+                  >
+                    {busy === 'bulk-off' ? '停用中…' : '一键停用'}
+                  </button>
+                </>
+              )}
               <button type="button" disabled={!!busy} onClick={() => void load()}>刷新</button>
             </div>
           </div>
@@ -619,7 +644,7 @@ export default function VirtualPlayers({
                 </span>
               </div>
 
-              <div className="vp-form-grid compact">
+              {canOperate && <div className="vp-form-grid compact">
                 {scopedRoomId ? (
                   <div className="vp-fixed-room">
                     <span>所属互动群</span>
@@ -642,8 +667,8 @@ export default function VirtualPlayers({
                     onChange={(event) => setDraft({ ...draft, nickname: event.target.value })}
                   />
                 </label>
-              </div>
-              <div className="vp-actions wrap">
+              </div>}
+              {canOperate && <div className="vp-actions wrap">
                 <button
                   type="button"
                   disabled={!!busy}
@@ -670,8 +695,8 @@ export default function VirtualPlayers({
                 >
                   只换头像
                 </button>
-              </div>
-              {draft.roomId !== selected.roomId && (
+              </div>}
+              {canOperate && draft.roomId !== selected.roomId && (
                 <p className="vp-tip">
                   保存后将改绑到「{roomLabel(roomMap.get(draft.roomId))}」；若原在群，会自动离旧群并入新群。
                 </p>
@@ -680,85 +705,110 @@ export default function VirtualPlayers({
                 <p className="vp-tip">当前绑定：{roomLabel(selectedRoom)}</p>
               )}
 
-              <div className="vp-section-label">能力开关</div>
-              <CapGrid
-                value={draft}
-                onChange={(key, checked) => setDraft({ ...draft, [key]: checked })}
-              />
+              {canOperate && (
+                <>
+                  <div className="vp-section-label">能力开关</div>
+                  <CapGrid
+                    value={draft}
+                    onChange={(key, checked) => setDraft({ ...draft, [key]: checked })}
+                  />
+                </>
+              )}
 
               <div className="vp-section-label">行为参数</div>
               <div className="vp-form-grid compact">
-                <label>
+                {canOperate && <label>
                   竞标参与概率
                   <input
                     value={draft.bidWeight}
                     onChange={(event) => setDraft({ ...draft, bidWeight: event.target.value })}
                   />
-                </label>
-                <label>
+                </label>}
+                {canOperate && <label>
                   下注比例下限
                   <input
                     value={draft.betRatioMin}
                     onChange={(event) => setDraft({ ...draft, betRatioMin: event.target.value })}
                   />
-                </label>
-                <label>
+                </label>}
+                {canOperate && <label>
                   下注比例上限
                   <input
                     value={draft.betRatioMax}
                     onChange={(event) => setDraft({ ...draft, betRatioMax: event.target.value })}
                   />
-                </label>
+                </label>}
                 <label>
                   目标余额（RM）
                   <input
                     value={draft.targetBalanceRm}
+                    disabled={!canManageFunds}
                     onChange={(event) => setDraft({ ...draft, targetBalanceRm: event.target.value })}
                   />
                 </label>
               </div>
 
               <div className="vp-actions wrap">
-                <button type="button" className="primary small" disabled={!!busy} onClick={saveSelected}>
-                  {busy === 'save' ? '保存中…' : '保存配置'}
-                </button>
-                <button
-                  type="button"
-                  disabled={!!busy}
-                  onClick={() => void run('join', async () => {
-                    await post(`/api/admin/virtual-players/${selected.id}/join`, {});
-                  })}
-                >
-                  入群
-                </button>
-                <button
-                  type="button"
-                  disabled={!!busy}
-                  onClick={() => void run('leave', async () => {
-                    await post(`/api/admin/virtual-players/${selected.id}/leave`, {});
-                  })}
-                >
-                  离群
-                </button>
-                <button
-                  type="button"
-                  disabled={!!busy}
-                  onClick={() => void run('fund', async () => {
-                    const amount = window.prompt('补款金额 RM', draft.targetBalanceRm || '1000');
-                    if (!amount) return;
-                    await post(`/api/admin/virtual-players/${selected.id}/fund`, {
-                      amountCents: toCents(amount),
-                      reason: '后台手动补款',
-                    });
-                  })}
-                >
-                  补款
-                </button>
+                {canOperate && (
+                  <>
+                    <button type="button" className="primary small" disabled={!!busy} onClick={saveSelected}>
+                      {busy === 'save' ? '保存中…' : '保存配置'}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={!!busy}
+                      onClick={() => void run('join', async () => {
+                        await post(`/api/admin/virtual-players/${selected.id}/join`, {});
+                      })}
+                    >
+                      入群
+                    </button>
+                    <button
+                      type="button"
+                      disabled={!!busy}
+                      onClick={() => void run('leave', async () => {
+                        await post(`/api/admin/virtual-players/${selected.id}/leave`, {});
+                      })}
+                    >
+                      离群
+                    </button>
+                  </>
+                )}
+                {canManageFunds && (
+                  <>
+                    {!canOperate && (
+                      <button
+                        type="button"
+                        className="primary small"
+                        disabled={!!busy}
+                        onClick={saveTargetBalance}
+                      >
+                        {busy === 'save-target' ? '保存中…' : '保存目标余额'}
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      disabled={!!busy}
+                      onClick={() => void run('fund', async () => {
+                        const amount = window.prompt('补款金额 RM', draft.targetBalanceRm || '1000');
+                        if (!amount) return;
+                        await post(`/api/admin/virtual-players/${selected.id}/fund`, {
+                          amountCents: toCents(amount),
+                          reason: '后台手动补款',
+                        });
+                      })}
+                    >
+                      补款
+                    </button>
+                  </>
+                )}
               </div>
 
-              <div className="vp-divider" />
+              {canOperate && (
+                <>
+                  <div className="vp-divider" />
 
-              <div className="panel-title">
+                  <div className="panel-title">
                 <div>
                   <small>代操作</small>
                   <h2>手动参与当前局</h2>
@@ -837,8 +887,10 @@ export default function VirtualPlayers({
                   代发言
                 </button>
               </div>
-              {!chatText.trim() && draft.canChat && (
-                <p className="vp-tip">代发言需先填写聊天内容</p>
+                  {!chatText.trim() && draft.canChat && (
+                    <p className="vp-tip">代发言需先填写聊天内容</p>
+                  )}
+                </>
               )}
             </div>
           )}

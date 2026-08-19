@@ -1,4 +1,12 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import {
+  startTransition,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { createPortal } from 'react-dom';
 import { useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import {
@@ -12,7 +20,7 @@ import {
 import ChatComposer from '../components/ChatComposer';
 import { RedPacketIcon, TransferIcon, TransferSwapIcon } from '../components/MoneyIcons';
 import type { Session } from '../sessionStore';
-import { openExternalLink } from '../telegram';
+import { disposeChatInputFocus, openExternalLink } from '../telegram';
 
 type ChatMsg = {
   id: string;
@@ -40,6 +48,8 @@ type BetAcceptanceNotice = {
   roomMaxCents: string;
   maxAcceptedCents: string;
   maxMultiplier: number;
+  /** 本笔预留倍数：普通下注=本局最高牌型倍数，梭哈=1 */
+  liabilityMultiplier: number;
   reservedCents: string;
   adjusted: boolean;
   adjustedBy: string[];
@@ -88,8 +98,9 @@ type FeedItem =
   | {
       kind: 'countdown';
       id: string;
-      /** lock：大号数字；其余：与顶栏同步的实时文案 */
-      lockEmoji?: string;
+      /** lock：普通 3/2/1 文字；其余：与顶栏同步的实时文案 */
+      lockText?: string;
+      mode?: 'bid' | 'bet';
       endsAt?: string | null;
       template?: string;
       time?: string;
@@ -102,6 +113,8 @@ type FeedItem =
       avatar?: string | null;
       text: string;
       emoji?: boolean;
+      /** 纯数字/梭哈指令：自己的下注或竞庄，用蓝色高亮 */
+      amount?: boolean;
       time?: string;
     }
   | { kind: 'banner'; id: string; image: string; alt: string }
@@ -154,6 +167,8 @@ type FeedItem =
       endsAt?: string | null;
       staticSeconds?: number | null;
       claimable?: boolean;
+      /** 本人已领取：仍可查看详情，但封面应立即显示为已打开的暗色状态 */
+      opened?: boolean;
       /** 红包已结束/过期：点击查看抢包名单而非领取 */
       view?: boolean;
       demo?: boolean;
@@ -191,8 +206,9 @@ const PACKET_ERROR_TEXT: Record<string, string> = {
 };
 
 function packetErrorText(e: unknown): string {
-  const raw = (e as Error).message || '';
-  return PACKET_ERROR_TEXT[raw] ?? raw ?? '操作失败';
+  const code = (e as { code?: string } | null)?.code;
+  const raw = (e as Error | null)?.message || '';
+  return ((code ? PACKET_ERROR_TEXT[code] : undefined) ?? raw) || '操作失败';
 }
 
 function parseBetAcceptanceNotice(value: unknown): BetAcceptanceNotice | undefined {
@@ -222,9 +238,114 @@ function parseBetAcceptanceNotice(value: unknown): BetAcceptanceNotice | undefin
     maxAcceptedCents: row.maxAcceptedCents as string,
     reservedCents: row.reservedCents as string,
     maxMultiplier: row.maxMultiplier,
+    liabilityMultiplier:
+      typeof row.liabilityMultiplier === 'number' ? row.liabilityMultiplier : row.maxMultiplier,
     adjusted: row.adjusted,
     adjustedBy: row.adjustedBy.map(String),
   };
+}
+
+function isAmountCommand(value: string) {
+  return /^(0|sh\s*\d+(?:\.\d{1,2})?|\d+(?:\.\d{1,2})?)$/i.test(value.trim());
+}
+
+const FEED_NEAR_BOTTOM_PX = 4;
+
+function isFeedNearBottom(el: HTMLElement) {
+  return el.scrollHeight - el.scrollTop - el.clientHeight <= FEED_NEAR_BOTTOM_PX;
+}
+
+type FeedViewportAnchor = Array<{ id: string; offset: number }>;
+
+function captureFeedViewport(
+  el: HTMLElement,
+  feedIds: string[],
+): FeedViewportAnchor | null {
+  const rows = Array.from(el.children) as HTMLElement[];
+  if (!feedIds.length || rows.length !== feedIds.length) return null;
+  const viewportTop = el.scrollTop;
+  const firstVisible = rows.findIndex(
+    (row) => row.offsetTop + row.offsetHeight > viewportTop,
+  );
+  if (firstVisible < 0) return null;
+  return rows.slice(firstVisible, firstVisible + 4).map((row, relativeIndex) => ({
+    id: feedIds[firstVisible + relativeIndex]!,
+    offset: row.offsetTop - viewportTop,
+  }));
+}
+
+function restoreFeedViewport(
+  el: HTMLElement,
+  feedIds: string[],
+  anchor: FeedViewportAnchor,
+  beforeScroll?: () => void,
+) {
+  const rows = Array.from(el.children) as HTMLElement[];
+  if (rows.length !== feedIds.length) return false;
+  for (const candidate of anchor) {
+    const index = feedIds.indexOf(candidate.id);
+    const row = index >= 0 ? rows[index] : undefined;
+    if (!row) continue;
+    const nextScrollTop = Math.min(
+      Math.max(0, row.offsetTop - candidate.offset),
+      Math.max(0, el.scrollHeight - el.clientHeight),
+    );
+    if (Math.abs(el.scrollTop - nextScrollTop) > 0.5) beforeScroll?.();
+    el.scrollTop = nextScrollTop;
+    return true;
+  }
+  return false;
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function collectOwnMentionTokens(params: {
+  uid?: string;
+  nickname?: string | null;
+}) {
+  const tokens = new Set<string>();
+  const nickname = params.nickname?.trim();
+  if (nickname) tokens.add(`@${nickname}`);
+  if (params.uid) {
+    tokens.add(`@UID${params.uid}`);
+    tokens.add(`@${params.uid}`);
+  }
+  return [...tokens].sort((a, b) => b.length - a.length);
+}
+
+function AssistantCopy({
+  text,
+  ownTokens,
+}: {
+  text: string;
+  ownTokens: string[];
+}) {
+  if (ownTokens.length === 0) return <p>{text}</p>;
+  const pattern = new RegExp(`(${ownTokens.map(escapeRegExp).join('|')})`, 'g');
+  return (
+    <p>
+      {text.split('\n').map((line, index, lines) => {
+        const ownLine = ownTokens.some((token) => line.includes(token));
+        const parts = line.split(pattern);
+        return (
+          <span key={`${index}-${line.slice(0, 12)}`} className={ownLine ? 'feed-own-line' : undefined}>
+            {parts.map((part, partIndex) =>
+              ownTokens.includes(part) ? (
+                <mark key={`${index}-${partIndex}`} className="feed-own-mention">
+                  {part}
+                </mark>
+              ) : (
+                <span key={`${index}-${partIndex}`}>{part}</span>
+              ),
+            )}
+            {index < lines.length - 1 ? '\n' : null}
+          </span>
+        );
+      })}
+    </p>
+  );
 }
 
 function parsePendingBetCommand(value: string): {
@@ -341,37 +462,51 @@ function parseGamePacketContent(raw: string): {
   return { id: raw, greeting: '恭喜发财，大吉大利' };
 }
 
-/** 简洁白骰：转动时不亮点数，落地再揭晓 */
+const DICE_ROLL_ASSETS = [
+  '/dice/roll-a.png',
+  '/dice/roll-b.png',
+  '/dice/roll-c.png',
+] as const;
+const DICE_RESULT_ASSETS = [
+  '/dice/result-1.png',
+  '/dice/result-2.png',
+  '/dice/result-3.png',
+  '/dice/result-4.png',
+  '/dice/result-5.png',
+  '/dice/result-6.png',
+] as const;
+
+/** 使用与结果图同源的逐帧素材，避免旋转中的骰面在停止瞬间变形。 */
 function Die({
   value,
   size = 'md',
   spinning = false,
+  rollVariant = 0,
 }: {
   value: number;
   size?: 'md' | 'lg';
   spinning?: boolean;
+  rollVariant?: number;
 }) {
   const v = Math.min(6, Math.max(1, Math.trunc(value || 1)));
-  const showDots = !spinning;
+  const rollAsset = DICE_ROLL_ASSETS[
+    Math.abs(Math.trunc(rollVariant)) % DICE_ROLL_ASSETS.length
+  ];
+  const src = spinning ? rollAsset : DICE_RESULT_ASSETS[v - 1];
   return (
     <span
-      className={`die die-${showDots ? v : 'blank'} die-${size}${spinning ? ' is-spinning' : ''}`}
+      className={`die3 die3-${size}${spinning ? ' is-spinning' : ''}`}
       aria-label={spinning ? '骰子转动中' : `骰子 ${v} 点`}
     >
-      {showDots &&
-        Array.from({ length: v }).map((_, i) => (
-          <i key={i} />
-        ))}
+      <img className="die3-art" src={src} alt="" aria-hidden="true" draggable={false} />
     </span>
   );
 }
 
 /** 与后端 BANKER_DICE_BETWEEN_MS(1400) 对齐 */
-const DIE_SPIN_MS = 920;
-const DIE_LAND_MS = 360;
-const DIE_GAP_MS = 120;
+const DIE_SPIN_MS = 840;
 
-/** 一颗一颗依次掷出：轻晃减速 → 定点 → 下一颗 */
+/** 三颗同时在原位旋转，随后在同一帧停下并显示各自结果。 */
 function SequentialDice({
   values,
   size = 'md',
@@ -388,69 +523,45 @@ function SequentialDice({
   const finals = values
     .map((v) => Math.min(6, Math.max(1, Math.trunc(v))))
     .filter((v) => v >= 1);
-  const [active, setActive] = useState(animate ? 0 : finals.length);
-  const [spinning, setSpinning] = useState(animate && finals.length > 0);
-  const [landed, setLanded] = useState<number[]>(() =>
-    animate ? [] : finals.slice(),
-  );
+  const reduceMotion = typeof window !== 'undefined'
+    && typeof window.matchMedia === 'function'
+    && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const [spinning, setSpinning] = useState(animate && finals.length > 0 && !reduceMotion);
   const doneRef = useRef(false);
   const onDoneRef = useRef(onDone);
   onDoneRef.current = onDone;
 
   useEffect(() => {
     doneRef.current = false;
-    if (!animate || finals.length === 0) {
-      setActive(finals.length);
+    if (!animate || finals.length === 0 || reduceMotion) {
       setSpinning(false);
-      setLanded(finals.slice());
       return;
     }
-    setActive(0);
     setSpinning(true);
-    setLanded([]);
-  }, [animate, finals.join(',')]);
-
-  useEffect(() => {
-    if (!animate || !spinning || active >= finals.length) return;
     const stop = window.setTimeout(() => {
       setSpinning(false);
-      setLanded((prev) => {
-        const next = prev.slice();
-        next[active] = finals[active];
-        return next;
-      });
-      window.setTimeout(() => {
-        const nextIndex = active + 1;
-        if (nextIndex >= finals.length) {
-          setActive(finals.length);
-          if (!doneRef.current) {
-            doneRef.current = true;
-            onDoneRef.current?.();
-          }
-          return;
-        }
-        setActive(nextIndex);
-        setSpinning(true);
-      }, DIE_LAND_MS + DIE_GAP_MS);
+      if (!doneRef.current) {
+        doneRef.current = true;
+        onDoneRef.current?.();
+      }
     }, DIE_SPIN_MS);
     return () => window.clearTimeout(stop);
-  }, [animate, spinning, active, finals.join(',')]);
+  }, [animate, finals.join(','), reduceMotion]);
 
   return (
     <div className={`seq-dice ${className}`.trim()} aria-label={`骰子 ${finals.join('·')}`}>
       {finals.map((final, idx) => {
-        const isDone = idx < active || (idx === active && !spinning && landed[idx] != null);
-        const isSpin = idx === active && spinning;
-        const show = idx < active || idx === active || !animate;
-        if (!show && animate) {
-          return <span className={`seq-dice-slot pending die-${size}`} key={idx} aria-hidden />;
-        }
         return (
           <span
-            className={`seq-dice-slot${isSpin ? ' spinning' : ''}${isDone && idx === active && !spinning ? ' landing' : ''}${isDone && idx < active ? ' settled' : ''}`}
+            className={`seq-dice-slot die-slot-${size}${spinning ? ' spinning' : ' settled'}`}
             key={idx}
           >
-            <Die value={final} size={size} spinning={isSpin} />
+            <Die
+              value={final}
+              size={size}
+              spinning={spinning}
+              rollVariant={idx}
+            />
           </span>
         );
       })}
@@ -499,7 +610,7 @@ const DEMO_FEED: FeedItem[] = [
   {
     kind: 'banner',
     id: 'demo-banner-bet-start',
-    image: '/banners/banner-bet-start.jpg',
+    image: '/banners/banner-bet-start.png',
     alt: '开始下注',
   },
   {
@@ -511,7 +622,7 @@ const DEMO_FEED: FeedItem[] = [
   {
     kind: 'system',
     id: 'demo-banker',
-    text: '🐂 第 1 局开注\n本局庄家：@小美\n庄钱：RM 8800.00\n下注时长：50 秒\n下注范围：RM 2.00 ~ 44.00\n梭哈范围：RM 20.00 ~ 440.00\n\n下注请发送金额；梭哈发送 sh金额；发送 0 撤回。',
+    text: '🐂 第 1 局开注\n本局庄家：@小美\n庄钱：RM 8800.00\n下注时长：50 秒\n下注范围：RM 2.00 ~ 44.00\n梭哈：最低 RM 20.00，上限为当前余额\n\n下注请发送金额；梭哈发送 sh金额；发送 0 撤回。',
     time: '21:41',
   },
   {
@@ -556,7 +667,7 @@ const DEMO_FEED: FeedItem[] = [
   {
     kind: 'banner',
     id: 'demo-banner-bet-stop',
-    image: '/banners/banner-bet-stop.jpg',
+    image: '/banners/banner-bet-stop.png',
     alt: '停止下注',
   },
   {
@@ -625,7 +736,7 @@ const DEMO_FEED: FeedItem[] = [
   {
     kind: 'banner',
     id: 'demo-banner-claim-start',
-    image: '/banners/banner-claim-start.jpg',
+    image: '/banners/banner-claim-start.png',
     alt: '开始抢包',
   },
   {
@@ -637,7 +748,7 @@ const DEMO_FEED: FeedItem[] = [
   {
     kind: 'banner',
     id: 'demo-banner-claim-stop',
-    image: '/banners/banner-claim-stop.jpg',
+    image: '/banners/banner-claim-stop.png',
     alt: '停止抢包',
   },
   {
@@ -668,14 +779,45 @@ function useRemainingSeconds(target: string | null | undefined): number | null {
     const tick = () => setNow(Date.now());
     tick();
     if (!Number.isFinite(targetMs) || targetMs <= Date.now()) return;
-    const timer = window.setInterval(() => {
+    const interval = window.setInterval(() => {
       const current = Date.now();
       setNow(current);
-      if (current >= targetMs) window.clearInterval(timer);
+      if (current >= targetMs) window.clearInterval(interval);
     }, 1_000);
-    return () => window.clearInterval(timer);
+    const expiryTimer = window.setTimeout(() => {
+      setNow(Date.now());
+      window.clearInterval(interval);
+    }, Math.max(0, targetMs - Date.now()) + 20);
+    return () => {
+      window.clearInterval(interval);
+      window.clearTimeout(expiryTimer);
+    };
   }, [target]);
   return remainingSeconds(target, now);
+}
+
+/** 只在截止点触发一次整页更新；平时每秒倒计时仍由小组件独立刷新。 */
+function useDeadlineReached(target: string | null | undefined): boolean {
+  const [reachedTarget, setReachedTarget] = useState<string | null>(null);
+  useEffect(() => {
+    const targetMs = target ? new Date(target).getTime() : Number.NaN;
+    if (!target || !Number.isFinite(targetMs)) {
+      setReachedTarget(null);
+      return;
+    }
+    const delay = targetMs - Date.now();
+    if (delay <= 0) {
+      setReachedTarget(target);
+      return;
+    }
+    setReachedTarget(null);
+    const timer = window.setTimeout(() => setReachedTarget(target), delay + 20);
+    return () => window.clearTimeout(timer);
+  }, [target]);
+
+  if (!target) return false;
+  const targetMs = new Date(target).getTime();
+  return Number.isFinite(targetMs) && (reachedTarget === target || targetMs <= Date.now());
 }
 
 function remainingSeconds(target: string | null | undefined, now: number): number | null {
@@ -703,12 +845,20 @@ function RemainingValue({ endsAt }: { endsAt: string }) {
 
 function RemainingCopy({
   endsAt,
+  mode,
   template,
 }: {
   endsAt?: string | null;
+  mode?: 'bid' | 'bet';
   template: string;
 }) {
   const remaining = useRemainingSeconds(endsAt) ?? 0;
+  if (remaining <= 0 && mode === 'bid') {
+    return <>竞标时间已到{'\n'}正在进行 3、2、1 最终确认…</>;
+  }
+  if (remaining <= 0 && mode === 'bet') {
+    return <>下注时间已到{'\n'}正在封盘…</>;
+  }
   return <>{fillRemaining(template, remaining)}</>;
 }
 
@@ -746,62 +896,102 @@ function ContinuationConfirm({
   );
 }
 
-const SCORE_HAND_TEXT: Record<string, string> = {
-  BAOZI: '豹子',
-  MANNIU: '满牛',
-  FANSHUN: '反顺',
-  SHUNZI: '顺子',
-  DUIZI: '对子',
-  JINNIU: '金牛',
-  NIUNIU: '牛牛',
-  MIANSI: '免死',
-  NORMAL: '普通',
-};
-
 function scoreRm(cents: unknown): string {
   const n = Number(cents ?? 0);
   return Number.isFinite(n) ? (n / 100).toFixed(2) : '0.00';
 }
 
-function scoreSignedRm(cents: unknown): string {
+function scoreAbsoluteAmount(cents: unknown): string {
   const n = Number(cents ?? 0);
-  return `${n >= 0 ? '+' : '-'}RM ${(Math.abs(n) / 100).toFixed(2)}`;
+  return (Math.abs(n) / 100).toFixed(2);
 }
 
-function scoreHandText(type: unknown, points: unknown): string {
-  if (type === 'NORMAL') return `${points}点`;
-  return SCORE_HAND_TEXT[String(type)] ?? String(type ?? '');
+function scoreOutcome(outcome: unknown): {
+  symbol: '🟢' | '🔴' | '⚪';
+  label: '赢' | '输' | '平';
+} {
+  if (outcome === 'PLAYER_WIN') return { symbol: '🟢', label: '赢' };
+  if (outcome === 'BANKER_WIN') return { symbol: '🔴', label: '输' };
+  return { symbol: '⚪', label: '平' };
+}
+
+function scoreNetOutcome(netCents: unknown): {
+  symbol: '🟢' | '🔴' | '⚪';
+  label: '赢' | '输' | '平';
+} {
+  const net = Number(netCents ?? 0);
+  if (net > 0) return { symbol: '🟢', label: '赢' };
+  if (net < 0) return { symbol: '🔴', label: '输' };
+  return { symbol: '⚪', label: '平' };
+}
+
+function scoreCumulativeLine(params: {
+  beforeCents: unknown;
+  afterCents: unknown;
+}): string {
+  return `上局 ${scoreRm(params.beforeCents)} · 本局 ${scoreRm(params.afterCents)}`;
+}
+
+const SCORE_HAND_MULTIPLIER: Record<string, number> = {
+  BAOZI: 17,
+  MANNIU: 15,
+  FANSHUN: 14,
+  SHUNZI: 13,
+  DUIZI: 12,
+  JINNIU: 11,
+  NIUNIU: 10,
+  MIANSI: 1,
+};
+
+function scoreHandMultiplier(type: unknown, points: unknown): number {
+  if (type === 'NORMAL') {
+    const n = Number(points ?? 0);
+    if (n === 10) return 4;
+    if (n === 9) return 3;
+    if (n === 8) return 2;
+    return 1;
+  }
+  return SCORE_HAND_MULTIPLIER[String(type)] ?? 0;
 }
 
 function scoreLines(board: RoomState['lastScoreboard']): string[] {
   if (!board) return [];
   if (typeof board.playerLines === 'string') return board.playerLines.split('\n');
   if (!Array.isArray(board.playerLines)) return [];
-  return board.playerLines.map((raw) => {
+  return [...board.playerLines]
+    .sort((left, right) => {
+      const a = (left ?? {}) as Record<string, unknown>;
+      const b = (right ?? {}) as Record<string, unknown>;
+      const am = scoreHandMultiplier(a.handType, a.points);
+      const bm = scoreHandMultiplier(b.handType, b.points);
+      if (am !== bm) return bm - am;
+      const ap = Number(a.points ?? 0);
+      const bp = Number(b.points ?? 0);
+      if (ap !== bp) return bp - ap;
+      return Number(b.claimCents ?? 0) - Number(a.claimCents ?? 0);
+    })
+    .map((raw) => {
     if (typeof raw === 'string') return raw;
     const line = (raw ?? {}) as Record<string, unknown>;
     const name = String(line.nickname || (line.uid ? `UID ${line.uid}` : '玩家'));
-    const multiplier = Number(line.multiplier ?? 0);
-    const outcome =
-      line.outcome === 'PLAYER_WIN'
-        ? `赢 ${scoreSignedRm(line.netCents)}`
-        : line.outcome === 'BANKER_WIN'
-          ? `输 ${scoreSignedRm(line.netCents)}${multiplier > 1 ? `（庄家牌型 ×${multiplier}）` : ''}`
-          : '平';
+    const result = scoreOutcome(line.outcome);
     const shortfall = Number(line.shortfallCents ?? 0);
     // 庄钱赔完后排在后面的赢家一分未得，按规则叫「喝水」
     const drank = line.outcome === 'PLAYER_WIN' && shortfall > 0 && Number(line.netCents ?? 0) === 0;
     const shortfallText = drank
       ? '（喝水 · 庄钱已赔完）'
       : shortfall > 0
-        ? `（免赔 RM ${scoreRm(shortfall)}）`
+        ? `（免赔 ${scoreRm(shortfall)}）`
         : '';
     return (
-      `${line.isBust ? '💥 ' : ''}${name} · 抢 RM ${scoreRm(line.claimCents)} · ` +
-      `${line.isAllIn ? '梭哈' : '下注'} RM ${scoreRm(line.betCents)} · ` +
-      `${scoreHandText(line.handType, line.points)} → ${outcome}` +
-      `${shortfallText} · ` +
-      `积分 RM ${scoreRm(line.balanceBeforeCents)} → RM ${scoreRm(line.balanceAfterCents)}`
+      `${result.symbol} @${name} ·\n` +
+      `抢 ${scoreRm(line.claimCents)} · ${line.isAllIn ? '梭哈' : '下'} ${scoreRm(line.betCents)} · ` +
+      `${result.label}→${scoreAbsoluteAmount(line.netCents)}` +
+      `${shortfallText}\n` +
+      scoreCumulativeLine({
+        beforeCents: line.balanceBeforeCents,
+        afterCents: line.balanceAfterCents,
+      })
     );
   });
 }
@@ -811,30 +1001,39 @@ function scoreFooter(board: RoomState['lastScoreboard']): string {
   if (typeof board.bankerSummary === 'string') return board.bankerSummary;
   const banker = board.bankerSummary as Record<string, unknown> | null;
   if (!banker || typeof banker !== 'object') return '';
-  const fees = (banker.fees ?? {}) as Record<string, unknown>;
   const name = String(banker.nickname || (banker.uid ? `UID ${banker.uid}` : '庄家'));
+  const result = scoreNetOutcome(banker.netCents);
   return [
-    `${banker.isBust ? '💥 ' : ''}庄家 ${name} · 抢 RM ${scoreRm(banker.claimCents)} · ${scoreHandText(banker.handType, banker.points)}`,
-    `庄家盈利 ${scoreSignedRm(banker.grossCents ?? banker.netCents)}（已扣抽水）`,
-    `上庄费 -RM ${scoreRm(fees.seatFeeCents)} · 服务费 -RM ${scoreRm(fees.serviceFeeCents)} · 代包费 -RM ${scoreRm(fees.packetFeeCents)}`,
-    `庄家实际盈利 ${scoreSignedRm(banker.netCents)}`,
-    `上庄积分 RM ${scoreRm(banker.balanceBeforeCents)} · 盈利 ${scoreSignedRm(banker.netCents)} · 庄总积分 RM ${scoreRm(banker.balanceAfterCents)}`,
+    `${result.symbol} 庄家 @${name} ·`,
+    `抢 ${scoreRm(banker.claimCents)} · ${result.label}→${scoreAbsoluteAmount(banker.netCents)}`,
+    scoreCumulativeLine({
+      beforeCents: banker.balanceBeforeCents,
+      afterCents: banker.balanceAfterCents,
+    }),
   ].join('\n');
 }
 
+type TipDanmakuPayload = {
+  nickname: string;
+  amountCents: string;
+  message?: string;
+  avatarUrl?: string | null;
+};
+
 type PlayLocationState = {
   sentPacket?: { packetId: string; greeting: string };
-  tipNotice?: {
-    nickname: string;
-    amountCents: string;
-    message?: string;
-    avatarUrl?: string | null;
-  };
+  tipNotice?: TipDanmakuPayload;
 };
 
 type GroupPacketDetail = Awaited<ReturnType<typeof api.groupPacket>>;
 
-export default function GameRoom({ session }: { session: Session }) {
+export default function GameRoom({
+  session,
+  freezeFeed = false,
+}: {
+  session: Session;
+  freezeFeed?: boolean;
+}) {
   const { roomId = '' } = useParams();
   const navigate = useNavigate();
   const location = useLocation();
@@ -851,6 +1050,8 @@ export default function GameRoom({ session }: { session: Session }) {
     avatarUrl?: string | null;
   } | null>(null);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const refreshingRef = useRef(false);
   const [entryRetryKey, setEntryRetryKey] = useState(0);
   /** 实时连接状态：断线后自动重连，并在顶栏明确提示；kicked = 被移出房间等终态，不再重连 */
   const [connState, setConnState] = useState<
@@ -867,8 +1068,10 @@ export default function GameRoom({ session }: { session: Session }) {
   /** 新到达的骰子消息在聊天里播放转动 */
   const [animatedDiceIds, setAnimatedDiceIds] = useState<Record<string, boolean>>({});
   /** packetId -> 已领金额（分）；'GONE' 表示已抢光/过期 */
-  const [packetClaims, setPacketClaims] = useState<Record<string, string>>({});
-  const packetClaimsRef = useRef<Record<string, string>>({});
+  const [packetClaims, setPacketClaims] = useState<Record<string, string>>(() =>
+    roomId ? readStoredPacketClaims(roomId) : {},
+  );
+  const packetClaimsRef = useRef<Record<string, string>>(packetClaims);
   const packetDetailCacheRef = useRef<Record<string, GroupPacketDetail>>({});
 
   function updatePacketClaims(
@@ -903,24 +1106,6 @@ export default function GameRoom({ session }: { session: Session }) {
       return changed ? next : prev;
     });
   }
-  /** 微信风格拆红包结果弹窗 */
-  const [rpModal, setRpModal] = useState<null | {
-    packetId: string;
-    greeting: string;
-    sender: { name: string; avatar?: string | null };
-    amountCents?: string;
-    gone?: boolean;
-    claims: Array<{
-      uid: string;
-      nickname: string | null;
-      avatarUrl: string | null;
-      amountCents: string;
-      at: string;
-    }>;
-    total: string;
-    count: number;
-    remaining: number;
-  }>(null);
   const [rpOpening, setRpOpening] = useState<null | {
     packetId: string;
     greeting: string;
@@ -930,22 +1115,36 @@ export default function GameRoom({ session }: { session: Session }) {
   const streamRef = useRef<HTMLDivElement>(null);
   const socketRef = useRef<WebSocket | null>(null);
   const didReceiveHistoryRef = useRef(false);
+  const chatDeleteTombstonesRef = useRef(new Set<string>());
   const betPendingRef = useRef(false);
   const betPendingTimerRef = useRef<number | null>(null);
   const betPendingRequestIdRef = useRef<string | null>(null);
   const pendingChatAckRef = useRef<PendingChatAck | null>(null);
   const betNoticeTimerRef = useRef<number | null>(null);
   const privateBetNoticeIdRef = useRef(0);
-  const [tipNotice, setTipNotice] = useState<{
+  const tipDanmakuIdRef = useRef(0);
+  const [tipDanmakuQueue, setTipDanmakuQueue] = useState<Array<TipDanmakuPayload & {
     id: number;
-    nickname: string;
-    amountCents: string;
-    message?: string;
-    avatarUrl?: string | null;
-  } | null>(null);
+  }>>([]);
+  const tipNotice = tipDanmakuQueue[0] ?? null;
+  const enqueueTipDanmaku = useCallback((notice: TipDanmakuPayload) => {
+    tipDanmakuIdRef.current += 1;
+    const next = { ...notice, id: tipDanmakuIdRef.current };
+    setTipDanmakuQueue((current) => {
+      if (current.length < 5) return [...current, next];
+      // 保留正在播放的首条，拥挤时只淘汰最早等待的弹幕。
+      return [current[0]!, ...current.slice(-3), next];
+    });
+  }, []);
   /** 靠近底部时跟随新消息；进房强制贴底一次 */
   const stickToBottomRef = useRef(true);
   const didInitialScrollRef = useRef(false);
+  const lastScrollTopRef = useRef(0);
+  const lastScrollHeightRef = useRef(0);
+  const feedIdsRef = useRef<string[]>([]);
+  const feedViewportAnchorRef = useRef<FeedViewportAnchor | null>(null);
+  const programmaticFeedScrollRef = useRef(false);
+  const roomFeatureScrollTopRef = useRef<number | null>(null);
   const [channelOpen, setChannelOpen] = useState(false);
   /** 上翻看历史期间有新消息：不强拉回底部，浮出「有新消息」按钮 */
   const [newBelow, setNewBelow] = useState(false);
@@ -1015,33 +1214,40 @@ export default function GameRoom({ session }: { session: Session }) {
     if (round.phase === 'CLAIMING') return round.claimEndsAt ?? null;
     return null;
   })();
+  const deadlineReached = useDeadlineReached(deadline);
+  const bidWindowClosed = phase === 'BANKER_BID' && deadlineReached;
   const continuation = state?.continuation;
   const packetDiceDone =
     phase === 'SENDING_PACKET' && (!!state?.round?.diceThrown || diceSent);
   const phaseLabel =
-    phase === 'SENDING_PACKET'
-      ? packetDiceDone
-        ? '等待小助手发包'
-        : state?.me.isBanker
-          ? '请完成庄家投骰'
-          : '等待庄家投骰'
-      : phases[phase ?? 'WAITING'] ?? '等待开局';
-  const phaseAside =
-    deadline
-      ? { value: <RemainingValue endsAt={deadline} />, label: '秒' }
+    bidWindowClosed
+      ? '竞标最终确认'
       : phase === 'SENDING_PACKET'
         ? packetDiceDone
-          ? { value: '准备', label: '发包' }
-          : { value: '待投', label: '骰子' }
-        : { value: '—', label: '倒计时' };
+          ? '等待小助手发包'
+          : state?.me.isBanker
+            ? '请完成庄家投骰'
+            : '等待庄家投骰'
+        : phases[phase ?? 'WAITING'] ?? '等待开局';
+  const phaseAside =
+    bidWindowClosed
+      ? { value: '确认', label: '锁庄' }
+      : deadline
+        ? { value: <RemainingValue endsAt={deadline} />, label: '秒' }
+        : phase === 'SENDING_PACKET'
+          ? packetDiceDone
+            ? { value: '准备', label: '发包' }
+            : { value: '待投', label: '骰子' }
+          : { value: '—', label: '倒计时' };
 
   const phaseHint = useMemo(() => {
     if (phase === 'BANKER_BID') {
+      if (bidWindowClosed) return '出价已截止，正在进行 3、2、1 最终确认';
       return `竞标 RM ${rm(state?.config.bankerBidMinCents ?? 0)} ~ ${rm(state?.config.bankerBidMaxCents ?? 0)}`;
     }
     if (phase === 'BETTING' && state?.round?.betRange) {
       const r = state.round.betRange;
-      return `下注 ${rm(r.betMinCents)}~${rm(r.betMaxCents)} · 梭哈 ${rm(r.shMinCents)}~${rm(r.shMaxCents)}`;
+      return `下注 ${rm(r.betMinCents)}~${rm(r.betMaxCents)} · 梭哈 ≥${rm(r.shMinCents)}（上限为余额）`;
     }
     if (phase === 'SENDING_PACKET') {
       if (packetDiceDone) return '庄家投骰已完成，正在等待小助手发包';
@@ -1060,7 +1266,7 @@ export default function GameRoom({ session }: { session: Session }) {
     if (phase === 'SETTLING') return '核对完成，正在计算本局成绩 · 可正常发言';
     if (phase === 'WAITING' || !phase) return '凑齐人数后自动开局';
     return '系统自动结算';
-  }, [phase, state, packetDiceDone]);
+  }, [phase, state, packetDiceDone, bidWindowClosed]);
 
   const liveBusy =
     !!state?.round &&
@@ -1134,7 +1340,7 @@ export default function GameRoom({ session }: { session: Session }) {
           items.push({
             kind: 'countdown',
             id: msg.id,
-            lockEmoji: payload.emoji || '3',
+            lockText: payload.emoji || '3',
             time: formatTime(msg.at),
           });
         } else {
@@ -1147,6 +1353,10 @@ export default function GameRoom({ session }: { session: Session }) {
           items.push({
             kind: 'countdown',
             id: msg.id,
+            mode:
+              payload?.mode === 'bid' || payload?.mode === 'bet'
+                ? payload.mode
+                : undefined,
             endsAt,
             template: stripAssistHtml(template),
             time: formatTime(msg.at),
@@ -1156,7 +1366,7 @@ export default function GameRoom({ session }: { session: Session }) {
         items.push({
           kind: 'banner',
           id: msg.id,
-          image: `/banners/banner-${msg.content}.jpg`,
+          image: `/banners/banner-${msg.content}.png`,
           alt: BANNER_ALT[msg.content] ?? msg.content,
         });
       } else if (msg.type === 'DICE') {
@@ -1224,6 +1434,7 @@ export default function GameRoom({ session }: { session: Session }) {
                     : '红包已结束，点击查看',
           endsAt: canOpen ? deadline : null,
           claimable: canOpen || canView,
+          opened: canView || viewEnded,
           view: viewEnded,
           waiting: isPublishingCurrentRound,
           demo: false,
@@ -1265,6 +1476,7 @@ export default function GameRoom({ session }: { session: Session }) {
           avatar: msg.from?.avatarUrl,
           text: msg.content,
           emoji: msg.type === 'EMOJI',
+          amount: msg.type !== 'EMOJI' && isAmountCommand(msg.content),
           time: formatTime(msg.at),
         });
       }
@@ -1295,6 +1507,7 @@ export default function GameRoom({ session }: { session: Session }) {
               : '未参与本局，无法领取',
         endsAt: canOpen ? deadline : null,
         claimable: canOpen || canView,
+        opened: canView || viewEnded,
         view: viewEnded,
         demo: false,
         asChat: true,
@@ -1323,13 +1536,14 @@ export default function GameRoom({ session }: { session: Session }) {
   // 消息窗口满 100 条后每来一条就挤掉最旧一条，feed.length 恒定；
   // 贴底必须以「末条身份」为触发条件，否则新消息会停在输入栏下方看不见。
   const feedTailId = feed.length > 0 ? feed[feed.length - 1]!.id : '';
+  const feedHeadId = feed.length > 0 ? feed[0]!.id : '';
 
   async function refresh() {
     if (!roomId) return;
     // 被动刷新只读状态即可；join（带成员写入）只在进房与断线重连时做，
     // 否则每次广播都触发全员 join 会把后端打满，导致整个互动群响应变卡。
     const next = await api.roomState(roomId);
-    setState(next);
+    startTransition(() => setState(next));
     setError('');
   }
 
@@ -1337,8 +1551,31 @@ export default function GameRoom({ session }: { session: Session }) {
     if (!roomId) return;
     // 重新 join，恢复可能被标记为 LEFT 的成员身份，避免竞标/下注被拒
     const next = await api.joinRoom(roomId);
-    setState(next);
+    startTransition(() => setState(next));
     setError('');
+  }
+
+  async function refreshRoomManually() {
+    if (refreshingRef.current) return;
+    if (!state || loading || connState === 'kicked') {
+      retryEntry();
+      return;
+    }
+    refreshingRef.current = true;
+    setRefreshing(true);
+    try {
+      // 在线时只读刷新即可；断线恢复时才重新 join，避免正常刷新重复走进房流程。
+      if (connState === 'online') await refresh();
+      else {
+        await rejoin();
+        reconnectNowRef.current();
+      }
+    } catch {
+      setError('刷新失败，请检查网络后重试');
+    } finally {
+      refreshingRef.current = false;
+      setRefreshing(false);
+    }
   }
 
   function retryEntry() {
@@ -1358,6 +1595,7 @@ export default function GameRoom({ session }: { session: Session }) {
     let reconnectAttempts = 0;
     let hasOpenedSocket = false;
     let suppressHeartbeatRefreshUntil = 0;
+    let ticketRequestInFlight = false;
     setLoading(true);
     setState(null);
     setError('');
@@ -1368,6 +1606,7 @@ export default function GameRoom({ session }: { session: Session }) {
     setChat([]);
     markNewBelow(false);
     didReceiveHistoryRef.current = false;
+    chatDeleteTombstonesRef.current.clear();
     clearPendingBet();
     dismissPrivateBetNotice();
     const storedClaims = readStoredPacketClaims(roomId);
@@ -1435,11 +1674,15 @@ export default function GameRoom({ session }: { session: Session }) {
               avatarUrl?: string | null;
               user?: { uid: string; nickname: string; avatarUrl?: string | null };
               requestId?: string;
+              messageId?: string;
             };
             if (payload.type === 'pong') {
               acknowledgePong();
             } else if (payload.type === 'chat_history' && payload.messages) {
-              const recentMessages = payload.messages.slice(-CLIENT_CHAT_LIMIT);
+              const tombstones = chatDeleteTombstonesRef.current;
+              const recentMessages = payload.messages
+                .filter((message) => !tombstones.has(message.id))
+                .slice(-CLIENT_CHAT_LIMIT);
               const isInitialHistory = !didReceiveHistoryRef.current;
               didReceiveHistoryRef.current = true;
               if (isInitialHistory) {
@@ -1488,6 +1731,7 @@ export default function GameRoom({ session }: { session: Session }) {
               typeof payload.message === 'object'
             ) {
               const incoming = payload.message;
+              chatDeleteTombstonesRef.current.delete(incoming.id);
               const pendingAck = pendingChatAckRef.current;
               const legacyPendingAmount = pendingAck
                 ? canonicalNumericCommand(pendingAck.content)
@@ -1513,10 +1757,6 @@ export default function GameRoom({ session }: { session: Session }) {
               }
               if (incoming.type === 'DICE') {
                 setAnimatedDiceIds((prev) => ({ ...prev, [incoming.id]: true }));
-                requestAnimationFrame(() => {
-                  const el = streamRef.current;
-                  if (el) el.scrollTop = el.scrollHeight;
-                });
               }
               setChat((prev) => {
                 if (incoming.type === 'USER_PACKET') {
@@ -1554,6 +1794,7 @@ export default function GameRoom({ session }: { session: Session }) {
               typeof payload.message === 'object'
             ) {
               const updated = payload.message;
+              if (chatDeleteTombstonesRef.current.has(updated.id)) return;
               setChat((prev) => {
                 const exists = prev.some((item) => item.id === updated.id);
                 if (!exists) {
@@ -1561,6 +1802,12 @@ export default function GameRoom({ session }: { session: Session }) {
                 }
                 return prev.map((item) => (item.id === updated.id ? { ...item, ...updated } : item));
               });
+            } else if (
+              payload.type === 'chat_delete'
+              && typeof payload.messageId === 'string'
+            ) {
+              chatDeleteTombstonesRef.current.add(payload.messageId);
+              setChat((prev) => prev.filter((message) => message.id !== payload.messageId));
             } else if (
               payload.type === 'bet_confirmation' &&
               (payload.status === 'success' || payload.status === 'failed') &&
@@ -1635,8 +1882,7 @@ export default function GameRoom({ session }: { session: Session }) {
                 message?: string;
                 avatarUrl?: string | null;
               };
-              setTipNotice({
-                id: Date.now(),
+              enqueueTipDanmaku({
                 nickname: tipPayload.nickname,
                 amountCents: tipPayload.amountCents,
                 message:
@@ -1670,17 +1916,53 @@ export default function GameRoom({ session }: { session: Session }) {
             // ignore
           }
         };
-        const connectSocket = () => {
-          if (cancelled) return;
+        const connectSocket = async () => {
+          if (cancelled || ticketRequestInFlight) return;
           disposeActiveSocketTimers();
           if (reconnectTimer) {
             window.clearTimeout(reconnectTimer);
             reconnectTimer = null;
           }
-          const auth = getToken();
-          if (!auth) return;
           setConnState(hasOpenedSocket ? 'reconnecting' : 'connecting');
-          const ws = new WebSocket(roomWsUrl(roomId, auth));
+          ticketRequestInFlight = true;
+          let ticket: string;
+          try {
+            ticket = (await api.roomWsTicket(roomId)).ticket;
+          } catch (error) {
+            if (cancelled) return;
+            const code = (error as Error & { code?: string }).code;
+            if (
+              code === 'DEVICE_SESSION_EXPIRED'
+              || code === 'DEVICE_MISMATCH'
+              || code === 'UNAUTHORIZED'
+            ) {
+              invalidateDeviceSession(
+                code === 'UNAUTHORIZED' ? 'DEVICE_SESSION_EXPIRED' : code,
+              );
+              return;
+            }
+            if (code === 'NOT_IN_ROOM' || code === 'USER_BANNED') {
+              setConnState('kicked');
+              setError(
+                code === 'USER_BANNED'
+                  ? '账号已停用，请联系客服'
+                  : '您已不在互动群内，请返回后重新进入房间',
+              );
+              return;
+            }
+            setConnState('reconnecting');
+            reconnectAttempts += 1;
+            const delay = Math.min(
+              15_000,
+              1_000 * 2 ** Math.min(reconnectAttempts - 1, 4),
+            );
+            reconnectTimer = window.setTimeout(() => void connectSocket(), delay);
+            return;
+          } finally {
+            ticketRequestInFlight = false;
+          }
+          if (cancelled) return;
+          const ws = new WebSocket(roomWsUrl(roomId, ticket));
           socket = ws;
           socketRef.current = ws;
           let wsConnectTimeout: number | null = null;
@@ -1755,12 +2037,19 @@ export default function GameRoom({ session }: { session: Session }) {
             }
             // 被移出房间 / 房间不可用属于终态：重连只会被立刻再次关闭，
             // 停止重试并明确提示，避免顶栏永远「重连中…」
-            if (event.reason === 'NOT_IN_ROOM' || event.reason === 'GAME_NOT_SUPPORTED') {
+            if (
+              event.reason === 'NOT_IN_ROOM'
+              || event.reason === 'GAME_NOT_SUPPORTED'
+              || event.reason === 'USER_NOT_ACTIVE'
+              || event.reason === 'USER_BANNED'
+            ) {
               setConnState('kicked');
               setError(
                 event.reason === 'NOT_IN_ROOM'
                   ? '您已不在互动群内，请返回后重新进入房间'
-                  : '该房间已不可用，请返回大厅',
+                  : event.reason === 'GAME_NOT_SUPPORTED'
+                    ? '该房间已不可用，请返回大厅'
+                    : '账号已停用，请联系客服',
               );
               return;
             }
@@ -1771,7 +2060,7 @@ export default function GameRoom({ session }: { session: Session }) {
               15_000,
               1_000 * 2 ** Math.min(reconnectAttempts - 1, 4),
             );
-            reconnectTimer = window.setTimeout(connectSocket, delay);
+            reconnectTimer = window.setTimeout(() => void connectSocket(), delay);
           };
         };
         reconnectNowRef.current = () => {
@@ -1783,9 +2072,9 @@ export default function GameRoom({ session }: { session: Session }) {
             return;
           }
           reconnectAttempts = 0;
-          connectSocket();
+          void connectSocket();
         };
-        connectSocket();
+        void connectSocket();
       } catch (e) {
         const code = (e as Error & { code?: string }).code;
         if (code === 'KYC_REQUIRED') {
@@ -1834,44 +2123,195 @@ export default function GameRoom({ session }: { session: Session }) {
     const el = streamRef.current;
     if (!el) return;
     const onScroll = () => {
-      const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
-      stickToBottomRef.current = distance < 140;
-      if (stickToBottomRef.current) markNewBelow(false);
+      const nextScrollTop = el.scrollTop;
+      const roomFeatureScrollTop = roomFeatureScrollTopRef.current;
+      if (roomFeatureScrollTop !== null) {
+        const lockedScrollTop = Math.min(
+          roomFeatureScrollTop,
+          Math.max(0, el.scrollHeight - el.clientHeight),
+        );
+        if (Math.abs(nextScrollTop - lockedScrollTop) > 0.5) {
+          el.scrollTop = lockedScrollTop;
+        }
+        programmaticFeedScrollRef.current = false;
+        stickToBottomRef.current = false;
+        lastScrollTopRef.current = lockedScrollTop;
+        lastScrollHeightRef.current = el.scrollHeight;
+        return;
+      }
+      if (programmaticFeedScrollRef.current) {
+        programmaticFeedScrollRef.current = false;
+        lastScrollTopRef.current = nextScrollTop;
+        lastScrollHeightRef.current = el.scrollHeight;
+        if (!stickToBottomRef.current) {
+          feedViewportAnchorRef.current = captureFeedViewport(el, feedIdsRef.current);
+        }
+        return;
+      }
+      const movedUp = nextScrollTop < lastScrollTopRef.current - 1;
+      if (movedUp || !isFeedNearBottom(el)) {
+        stickToBottomRef.current = false;
+        feedViewportAnchorRef.current = captureFeedViewport(el, feedIdsRef.current);
+      } else {
+        stickToBottomRef.current = true;
+        feedViewportAnchorRef.current = null;
+        markNewBelow(false);
+      }
+      lastScrollTopRef.current = nextScrollTop;
+      lastScrollHeightRef.current = el.scrollHeight;
     };
     el.addEventListener('scroll', onScroll, { passive: true });
-    return () => el.removeEventListener('scroll', onScroll);
+    const keepPinned = () => {
+      const roomFeatureScrollTop = roomFeatureScrollTopRef.current;
+      if (roomFeatureScrollTop !== null) {
+        const lockedScrollTop = Math.min(
+          roomFeatureScrollTop,
+          Math.max(0, el.scrollHeight - el.clientHeight),
+        );
+        if (Math.abs(el.scrollTop - lockedScrollTop) > 0.5) {
+          programmaticFeedScrollRef.current = true;
+          el.scrollTop = lockedScrollTop;
+        }
+        stickToBottomRef.current = false;
+        lastScrollTopRef.current = lockedScrollTop;
+        lastScrollHeightRef.current = el.scrollHeight;
+        return;
+      }
+      if (stickToBottomRef.current) {
+        const bottomScrollTop = Math.max(0, el.scrollHeight - el.clientHeight);
+        if (Math.abs(el.scrollTop - bottomScrollTop) > 0.5) {
+          programmaticFeedScrollRef.current = true;
+        }
+        el.scrollTop = bottomScrollTop;
+        feedViewportAnchorRef.current = null;
+      } else {
+        const anchor = feedViewportAnchorRef.current;
+        if (anchor) {
+          restoreFeedViewport(
+            el,
+            feedIdsRef.current,
+            anchor,
+            () => { programmaticFeedScrollRef.current = true; },
+          );
+        }
+        feedViewportAnchorRef.current = captureFeedViewport(el, feedIdsRef.current);
+      }
+      lastScrollTopRef.current = el.scrollTop;
+      lastScrollHeightRef.current = el.scrollHeight;
+    };
+    const observer = new ResizeObserver(keepPinned);
+    observer.observe(el);
+    return () => {
+      el.removeEventListener('scroll', onScroll);
+      observer.disconnect();
+    };
   }, [loading]);
 
-  useEffect(() => {
-    if (loading) return;
+  useLayoutEffect(() => {
+    const el = streamRef.current;
+    const roomFeatureScrollTop = roomFeatureScrollTopRef.current;
+    if (!freezeFeed) {
+      if (!el || roomFeatureScrollTop === null) return;
+      stickToBottomRef.current = false;
+      const restoredScrollTop = Math.min(
+        roomFeatureScrollTop,
+        Math.max(0, el.scrollHeight - el.clientHeight),
+      );
+      if (Math.abs(el.scrollTop - restoredScrollTop) > 0.5) {
+        programmaticFeedScrollRef.current = true;
+      }
+      el.scrollTop = restoredScrollTop;
+      lastScrollTopRef.current = restoredScrollTop;
+      lastScrollHeightRef.current = el.scrollHeight;
+      feedViewportAnchorRef.current = captureFeedViewport(el, feedIdsRef.current);
+      let settleFrame = 0;
+      const restoreFrame = window.requestAnimationFrame(() => {
+        settleFrame = window.requestAnimationFrame(() => {
+          if (roomFeatureScrollTopRef.current !== roomFeatureScrollTop) return;
+          const settledScrollTop = Math.min(
+            roomFeatureScrollTop,
+            Math.max(0, el.scrollHeight - el.clientHeight),
+          );
+          stickToBottomRef.current = false;
+          if (Math.abs(el.scrollTop - settledScrollTop) > 0.5) {
+            programmaticFeedScrollRef.current = true;
+          }
+          el.scrollTop = settledScrollTop;
+          lastScrollTopRef.current = settledScrollTop;
+          lastScrollHeightRef.current = el.scrollHeight;
+          feedViewportAnchorRef.current = captureFeedViewport(el, feedIdsRef.current);
+          roomFeatureScrollTopRef.current = null;
+        });
+      });
+      return () => {
+        window.cancelAnimationFrame(restoreFrame);
+        if (settleFrame) window.cancelAnimationFrame(settleFrame);
+      };
+    }
+
+    stickToBottomRef.current = false;
+    if (!el) return;
+    if (roomFeatureScrollTop !== null) {
+      const lockedScrollTop = Math.min(
+        roomFeatureScrollTop,
+        Math.max(0, el.scrollHeight - el.clientHeight),
+      );
+      if (Math.abs(el.scrollTop - lockedScrollTop) > 0.5) {
+        programmaticFeedScrollRef.current = true;
+      }
+      el.scrollTop = lockedScrollTop;
+    }
+    feedViewportAnchorRef.current = captureFeedViewport(el, feedIdsRef.current);
+    lastScrollTopRef.current = el.scrollTop;
+    lastScrollHeightRef.current = el.scrollHeight;
+  }, [freezeFeed]);
+
+  useLayoutEffect(() => {
+    if (loading || freezeFeed) return;
     const el = streamRef.current;
     if (!el) return;
-    const force = !didInitialScrollRef.current || stickToBottomRef.current;
-    if (!force) {
-      markNewBelow(true);
-      return;
-    }
-    markNewBelow(false);
-    const jump = () => {
-      // 几百人同时刷屏时平滑滚动会被连续打断、停在半路导致「脱底」，
-      // 落后超过一屏的一小段就直接瞬时跳到底，只有小距离才用平滑。
-      const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
-      const behavior: ScrollBehavior =
-        !didInitialScrollRef.current || distance > 240 ? 'auto' : 'smooth';
-      el.scrollTo({ top: el.scrollHeight, behavior });
+    const nextFeedIds = feed.map((item) => item.id);
+
+    // 贴底时同步改 scrollTop，避免新消息先入画再 smooth 上滑，把正在看的内容顶走。
+    if (!didInitialScrollRef.current || stickToBottomRef.current) {
+      feedIdsRef.current = nextFeedIds;
+      el.scrollTop = el.scrollHeight;
+      lastScrollTopRef.current = el.scrollTop;
+      lastScrollHeightRef.current = el.scrollHeight;
       didInitialScrollRef.current = true;
       stickToBottomRef.current = true;
-    };
-    // 双 rAF：等 feed 渲染完成后再贴底，避免进房停在最上方
-    let raf2 = 0;
-    const raf1 = requestAnimationFrame(() => {
-      raf2 = requestAnimationFrame(jump);
-    });
-    return () => {
-      cancelAnimationFrame(raf1);
-      if (raf2) cancelAnimationFrame(raf2);
-    };
-  }, [loading, feed.length, feedTailId]);
+      feedViewportAnchorRef.current = null;
+      markNewBelow(false);
+      return;
+    }
+
+    // 上翻看历史时，以屏幕内正在阅读的消息作为锚点。即使 100 条窗口挤掉了
+    // 顶部旧消息，或新消息高度不同，也不会用总高度差把视口向下推。
+    const anchor = feedViewportAnchorRef.current;
+    feedIdsRef.current = nextFeedIds;
+    const restored = anchor
+      ? restoreFeedViewport(
+          el,
+          nextFeedIds,
+          anchor,
+          () => { programmaticFeedScrollRef.current = true; },
+        )
+      : false;
+    if (!restored) {
+      const nextScrollTop = Math.min(
+        lastScrollTopRef.current,
+        Math.max(0, el.scrollHeight - el.clientHeight),
+      );
+      if (Math.abs(el.scrollTop - nextScrollTop) > 0.5) {
+        programmaticFeedScrollRef.current = true;
+      }
+      el.scrollTop = nextScrollTop;
+    }
+    lastScrollTopRef.current = el.scrollTop;
+    lastScrollHeightRef.current = el.scrollHeight;
+    feedViewportAnchorRef.current = captureFeedViewport(el, nextFeedIds);
+    markNewBelow(true);
+  }, [loading, freezeFeed, feed.length, feedTailId, feedHeadId]);
 
   useEffect(() => {
     void api
@@ -1913,17 +2353,28 @@ export default function GameRoom({ session }: { session: Session }) {
 
   useEffect(() => {
     if (!tipNotice) return;
-    const timer = window.setTimeout(() => setTipNotice(null), 6_000);
+    const activeId = tipNotice.id;
+    const timer = window.setTimeout(() => {
+      setTipDanmakuQueue((current) =>
+        current[0]?.id === activeId ? current.slice(1) : current,
+      );
+    }, 7_400);
     return () => window.clearTimeout(timer);
   }, [tipNotice]);
 
-  /** 打赏页返回时，本人也能立刻看到房间顶部感谢条；其他在线玩家由 WS 接收。 */
+  /** 打赏页返回时，本人也能立刻看到群内弹幕；其他在线玩家由 WS 接收。 */
   useEffect(() => {
     const notice = (location.state as PlayLocationState | null)?.tipNotice;
     if (!notice?.nickname || !notice.amountCents) return;
-    setTipNotice({ id: Date.now(), ...notice });
+    enqueueTipDanmaku(notice);
     navigate(`${location.pathname}${location.search}`, { replace: true, state: null });
-  }, [location.state, location.pathname, location.search, navigate]);
+  }, [
+    enqueueTipDanmaku,
+    location.state,
+    location.pathname,
+    location.search,
+    navigate,
+  ]);
 
   /** 从发红包页返回时立刻插入自己的红包气泡，避免 WS 重连/历史竞态导致「发出去看不见」 */
   useEffect(() => {
@@ -1971,10 +2422,11 @@ export default function GameRoom({ session }: { session: Session }) {
   function jumpToBottom() {
     stickToBottomRef.current = true;
     markNewBelow(false);
-    requestAnimationFrame(() => {
-      const el = streamRef.current;
-      if (el) el.scrollTop = el.scrollHeight;
-    });
+    const el = streamRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+    lastScrollTopRef.current = el.scrollTop;
+    lastScrollHeightRef.current = el.scrollHeight;
   }
 
   /** 连接未就绪时给出可见提示，避免玩家以为消息/出价已发出 */
@@ -2072,7 +2524,48 @@ export default function GameRoom({ session }: { session: Session }) {
     jumpToBottom();
   }
 
-  /** 首次领取才播放短动效；已领取/已结束的红包直接打开领取详情。 */
+  function freezeCurrentFeedPosition() {
+    stickToBottomRef.current = false;
+    const el = streamRef.current;
+    if (!el) return;
+    feedViewportAnchorRef.current = captureFeedViewport(el, feedIdsRef.current);
+    lastScrollTopRef.current = el.scrollTop;
+    lastScrollHeightRef.current = el.scrollHeight;
+  }
+
+  function prepareRoomFeatureOpen() {
+    const el = streamRef.current;
+    if (el && roomFeatureScrollTopRef.current === null) {
+      roomFeatureScrollTopRef.current = el.scrollTop;
+    }
+    freezeCurrentFeedPosition();
+  }
+
+  function openRoomFeature(feature: 'leaderboards' | 'rewards') {
+    if (!roomId) return;
+    prepareRoomFeatureOpen();
+    disposeChatInputFocus();
+    navigate(`/game/${roomId}/${feature}`, {
+      state: { backgroundLocation: location },
+    });
+  }
+
+  function openPacketResult(opts: {
+    packetId: string;
+    kind: 'game' | 'group';
+    greeting?: string;
+    sender?: { name: string; avatar?: string | null };
+    amountCents?: string;
+    gone?: boolean;
+  }) {
+    if (!roomId || !opts.packetId) return;
+    freezeCurrentFeedPosition();
+    navigate(`/game/${roomId}/packets/${opts.packetId}?kind=${opts.kind}`, {
+      state: { ...opts, backgroundLocation: location },
+    });
+  }
+
+  /** 首次领取才播放短动效；已领取/已结束的红包进入独立详情页。 */
   async function openUserPacket(item: {
     packetId: string;
     greeting: string;
@@ -2081,15 +2574,15 @@ export default function GameRoom({ session }: { session: Session }) {
     mine: boolean;
   }) {
     if (rpBusy) return;
+    freezeCurrentFeedPosition();
     const { packetId } = item;
     const existing = packetClaims[packetId];
     const sender = { name: item.name, avatar: item.avatar };
 
-    const showDetail = (
+    const openResult = (
       detail: GroupPacketDetail | null,
       amountCents?: string,
       gone = false,
-      updateOnly = false,
     ) => {
       if (detail) packetDetailCacheRef.current[packetId] = detail;
       const ownClaim = detail?.claims.find((claimEntry) => claimEntry.uid === myUid);
@@ -2097,20 +2590,14 @@ export default function GameRoom({ session }: { session: Session }) {
       if (ownClaim) {
         updatePacketClaims((prev) => ({ ...prev, [packetId]: ownClaim.amountCents }));
       }
-      const nextModal = {
+      openPacketResult({
         packetId,
+        kind: 'group',
         greeting: item.greeting,
         sender,
         amountCents: resolvedAmount,
         gone: gone && !resolvedAmount,
-        claims: detail?.claims ?? [],
-        total: detail?.totalCents ?? '0',
-        count: detail?.count ?? 0,
-        remaining: detail?.remainingCount ?? 0,
-      };
-      setRpModal((current) =>
-        updateOnly && current?.packetId !== packetId ? current : nextModal,
-      );
+      });
     };
 
     setRpBusy(true);
@@ -2119,11 +2606,11 @@ export default function GameRoom({ session }: { session: Session }) {
       if (existing) {
         const cached = packetDetailCacheRef.current[packetId] ?? null;
         if (cached) {
-          showDetail(cached, existing === 'GONE' ? undefined : existing, existing === 'GONE');
+          openResult(cached, existing === 'GONE' ? undefined : existing, existing === 'GONE');
           return;
         }
         const detail = await api.groupPacket(packetId).catch(() => null);
-        showDetail(detail, existing === 'GONE' ? undefined : existing, existing === 'GONE');
+        openResult(detail, existing === 'GONE' ? undefined : existing, existing === 'GONE');
         return;
       }
 
@@ -2135,99 +2622,52 @@ export default function GameRoom({ session }: { session: Session }) {
         claimedAmount = result.amountCents;
         updatePacketClaims((prev) => ({ ...prev, [packetId]: result.amountCents }));
       } catch (claimError) {
-        const code = (claimError as Error).message;
+        const code =
+          (claimError as { code?: string }).code ?? (claimError as Error).message;
         setRpOpening(null);
         if (code === 'ALREADY_CLAIMED') {
           const detail = await api.groupPacket(packetId).catch(() => null);
-          showDetail(detail);
+          openResult(detail);
           return;
         }
         if (code === 'PACKET_EMPTY' || code === 'PACKET_EXPIRED') {
           updatePacketClaims((prev) => ({ ...prev, [packetId]: 'GONE' }));
           const detail = await api.groupPacket(packetId).catch(() => null);
-          showDetail(detail, undefined, true);
+          openResult(detail, undefined, true);
           return;
         }
         setError(packetErrorText(claimError));
         return;
       }
 
-      const detailPromise = api.groupPacket(packetId).catch(() => null);
-      const minimumMotion = new Promise<void>((resolve) => {
-        const remainingMs = Math.max(0, 380 - (Date.now() - openingStartedAt));
-        window.setTimeout(resolve, remainingMs);
-      });
-      const fastDetail = await Promise.race([
-        detailPromise,
-        new Promise<null>((resolve) => window.setTimeout(() => resolve(null), 180)),
-      ]);
-      await minimumMotion;
+      const remainingMs = Math.max(0, 380 - (Date.now() - openingStartedAt));
+      await new Promise<void>((resolve) => window.setTimeout(resolve, remainingMs));
       setRpOpening(null);
-      showDetail(fastDetail, claimedAmount);
-      if (!fastDetail) {
-        void detailPromise.then((detail) => {
-          if (detail) showDetail(detail, claimedAmount, false, true);
-        });
-      }
+      openResult(packetDetailCacheRef.current[packetId] ?? null, claimedAmount);
     } finally {
       setRpOpening(null);
       setRpBusy(false);
     }
   }
 
-  /** 内部红包结果弹窗数据：复用群红包样式，展示我的金额与全部领取名单 */
-  function gamePacketModalData(snapshot: RoomState | null, mineCents?: string) {
-    const round = snapshot?.round;
-    const claims = (round?.claims ?? []).map((claim) => ({
-      uid: claim.uid,
-      nickname: claim.nickname,
-      avatarUrl: claim.avatarUrl,
-      amountCents: claim.amountCents,
-      at: claim.at,
-    }));
-    const count = round?.participantCount ?? 0;
-    return {
-      packetId: round?.packetId ?? 'game-packet',
+  function viewGamePacket(packetId: string, mineCents?: string) {
+    openPacketResult({
+      packetId,
+      kind: 'game',
       greeting: GAME_PACKET_GREETING,
       sender: { name: '小助手', avatar: ASSISTANT_AVATAR },
       amountCents: mineCents,
-      claims,
-      total: round?.packetTotalCents ?? '0',
-      count,
-      remaining: Math.max(0, count - claims.length),
-    };
-  }
-
-  /** 红包结束后点开查看抢包/认额名单（微信式手气榜，所有人可看） */
-  async function viewGamePacket(packetId: string) {
-    if (rpBusy) return;
-    setRpBusy(true);
-    setError('');
-    try {
-      const detail = await api.gamePacket(packetId);
-      const mine = detail.claims.find((claimEntry) => claimEntry.uid === myUid);
-      setRpModal({
-        packetId,
-        greeting: GAME_PACKET_GREETING,
-        sender: { name: '小助手', avatar: ASSISTANT_AVATAR },
-        amountCents: mine?.amountCents,
-        claims: detail.claims,
-        total: detail.totalCents,
-        count: detail.participantCount,
-        remaining: Math.max(0, detail.participantCount - detail.claims.length),
-      });
-    } catch {
-      setError('红包数据加载失败，请稍后再试');
-    } finally {
-      setRpBusy(false);
-    }
+    });
   }
 
   async function claim(packetId?: string) {
     const activePacketId = state?.round?.packetId;
     if (!activePacketId || (packetId && packetId !== activePacketId)) {
       // 已结束的红包点开直接看名单，不再报错
-      if (packetId) return viewGamePacket(packetId);
+      if (packetId) {
+        viewGamePacket(packetId);
+        return;
+      }
       setError('红包已结束');
       return;
     }
@@ -2235,7 +2675,7 @@ export default function GameRoom({ session }: { session: Session }) {
     if (!state.me.canClaim) {
       // 内部红包：已抢过的点开直接看结果
       if (isInternal && state.me.claimedAmountCents) {
-        setRpModal(gamePacketModalData(state, state.me.claimedAmountCents));
+        viewGamePacket(activePacketId, state.me.claimedAmountCents);
         return;
       }
       setError('仅本局庄家与已下注闲家可领取红包');
@@ -2251,6 +2691,7 @@ export default function GameRoom({ session }: { session: Session }) {
       }
 
       // 内部红包：小助手直发，金额随机拆分并即时入余额
+      freezeCurrentFeedPosition();
       setRpOpening({
         packetId: activePacketId,
         greeting: GAME_PACKET_GREETING,
@@ -2263,20 +2704,36 @@ export default function GameRoom({ session }: { session: Session }) {
         claimedAmount = result.amountCents ?? '0';
       } catch (claimError) {
         setRpOpening(null);
-        const code = (claimError as Error).message;
+        const code =
+          (claimError as { code?: string }).code ?? (claimError as Error).message;
         if (code === 'ALREADY_CLAIMED' && state.me.claimedAmountCents) {
-          setRpModal(gamePacketModalData(state, state.me.claimedAmountCents));
+          viewGamePacket(activePacketId, state.me.claimedAmountCents);
           return;
         }
         setError(packetErrorText(claimError));
         return;
       }
-      const latest = roomId ? await api.roomState(roomId).catch(() => null) : null;
-      if (latest) setState(latest);
+      // 领取接口已经成功，先在本地立即切成「已打开」；完整房态在后台校准，
+      // 不再让第二次网络往返阻塞变暗效果和详情页打开。
+      startTransition(() => {
+        setState((current) =>
+          current?.round?.packetId === activePacketId
+            ? {
+                ...current,
+                me: {
+                  ...current.me,
+                  canClaim: false,
+                  claimedAmountCents: claimedAmount,
+                },
+              }
+            : current,
+        );
+      });
+      void refresh().catch(() => undefined);
       const remainingMs = Math.max(0, 380 - (Date.now() - openingStartedAt));
       await new Promise((resolve) => window.setTimeout(resolve, remainingMs));
       setRpOpening(null);
-      setRpModal(gamePacketModalData(latest ?? state, claimedAmount));
+      viewGamePacket(activePacketId, claimedAmount);
     } catch (e) {
       const err = e as Error & { code?: string };
       if (err.code === 'NOT_ELIGIBLE_TO_CLAIM' || err.message.includes('NOT_ELIGIBLE')) {
@@ -2290,8 +2747,16 @@ export default function GameRoom({ session }: { session: Session }) {
     }
   }
 
-  const canBid = phase === 'BANKER_BID';
+  const canBid = phase === 'BANKER_BID' && !bidWindowClosed;
   const canBet = phase === 'BETTING' && !state?.me.isBanker;
+  const ownMentionTokens = useMemo(
+    () =>
+      collectOwnMentionTokens({
+        uid: myUid || session.uid,
+        nickname: myProfile?.nickname || session.nickname,
+      }),
+    [myUid, myProfile?.nickname, session.uid, session.nickname],
+  );
   const claimLocked = phase === 'CLAIMING';
   const chatMuted = claimLocked;
   const canThrowDice =
@@ -2325,52 +2790,22 @@ export default function GameRoom({ session }: { session: Session }) {
           ? '等待服务器确认，成功后自动清空'
           : betPending
             ? '下注确认中，请勿重复发送'
-          : chatMuted
-            ? '抢包中，暂不可发言'
-            : canBid
-              ? '竞庄金额，如 8800'
-              : canBet
-                ? '下注金额，如 100'
-                : phase === 'SENDING_PACKET' && state?.me.isBanker
-                  ? '可发消息，/重推取消本局'
-                  : phase === 'CLAIM_EXPIRED' || phase === 'SETTLING'
-                    ? '可发言（数字也会当聊天发出）'
-                    : '发送消息…';
+            : chatMuted
+              ? '抢包中，暂不可发言'
+              : bidWindowClosed
+                ? '竞标已截止，正在最终确认'
+                : canBid
+                  ? '竞庄金额，如 8800'
+                  : canBet
+                    ? '下注金额，如 100'
+                    : phase === 'SENDING_PACKET' && state?.me.isBanker
+                      ? '可发消息，/重推取消本局'
+                      : phase === 'CLAIM_EXPIRED' || phase === 'SETTLING'
+                        ? '可发言（数字也会当聊天发出）'
+                        : '发送消息…';
 
   return (
     <div className="game-room">
-      {tipNotice && (
-        <div className="room-tip-notice" role="status" aria-live="polite" key={tipNotice.id}>
-          <span className="room-tip-notice-glow" aria-hidden />
-          <span className="room-tip-notice-rays" aria-hidden />
-          <span className="room-tip-notice-coins" aria-hidden>
-            <i /><i /><i /><i /><i /><i />
-          </span>
-          <span className="room-tip-notice-avatar" aria-hidden>
-            {tipNotice.avatarUrl ? (
-              <img src={tipNotice.avatarUrl} alt="" />
-            ) : (
-              <b>{(tipNotice.nickname || '?').slice(0, 1)}</b>
-            )}
-            <em>
-              <TransferIcon />
-            </em>
-          </span>
-          <span className="room-tip-notice-copy">
-            <small>心意送达</small>
-            <strong>{tipNotice.nickname} 打赏客服小妹</strong>
-            {tipNotice.message && <p>{tipNotice.message}</p>}
-            <em>
-              <b>RM</b> {rm(tipNotice.amountCents)}
-            </em>
-          </span>
-          <button type="button" aria-label="关闭感谢通知" onClick={() => setTipNotice(null)}>
-            ×
-          </button>
-          <i className="room-tip-notice-bar" aria-hidden />
-        </div>
-      )}
-
       <div className="game-room-top">
         <header className="game-room-header">
           <button className="chat-back" type="button" onClick={leaveAndGoBack} aria-label="返回">
@@ -2393,18 +2828,11 @@ export default function GameRoom({ session }: { session: Session }) {
           </div>
           <div className="game-room-header-actions" aria-label="牌桌操作">
             <button
-              className="game-room-refresh"
+              className={`game-room-refresh${refreshing ? ' refreshing' : ''}`}
               type="button"
-              onClick={() => {
-                if (!state || loading || connState === 'kicked') {
-                  retryEntry();
-                  return;
-                }
-                // 用户主动刷新时重新 join，可恢复短暂断线后被标记 LEFT 的成员身份。
-                void rejoin()
-                  .then(() => reconnectNowRef.current())
-                  .catch(() => setError('刷新失败，请检查网络后重试'));
-              }}
+              onClick={() => void refreshRoomManually()}
+              disabled={refreshing}
+              aria-busy={refreshing}
               aria-label="刷新牌桌"
               title="刷新"
             >
@@ -2452,11 +2880,37 @@ export default function GameRoom({ session }: { session: Session }) {
       </div>
 
       <div className="game-room-feed-shell">
+        {tipNotice && (
+          <div className="room-tip-danmaku-stage" aria-live="polite">
+            <div className="room-tip-danmaku" role="status" key={tipNotice.id}>
+              <span className="room-tip-danmaku-avatar" aria-hidden>
+                {tipNotice.avatarUrl ? (
+                  <img src={tipNotice.avatarUrl} alt="" />
+                ) : (
+                  <b>{(tipNotice.nickname || '?').slice(0, 1)}</b>
+                )}
+                <i>♥</i>
+              </span>
+              <span className="room-tip-danmaku-copy">
+                <strong>
+                  <b>{tipNotice.nickname}</b>
+                  <span>打赏客服小妹</span>
+                </strong>
+                <small>{tipNotice.message || '感谢这份心意'}</small>
+              </span>
+              <em>
+                <b>RM</b> {rm(tipNotice.amountCents)}
+              </em>
+              <span className="room-tip-danmaku-glint" aria-hidden />
+            </div>
+          </div>
+        )}
         <nav className="game-room-quick-actions" aria-label="房间快捷入口">
           <button
             className="game-room-quick-link leaderboard"
             type="button"
-            onClick={() => navigate(`/game/${roomId}/leaderboards`)}
+            onPointerDown={prepareRoomFeatureOpen}
+            onClick={() => openRoomFeature('leaderboards')}
             aria-label="打开排行榜"
           >
             <img
@@ -2471,7 +2925,8 @@ export default function GameRoom({ session }: { session: Session }) {
           <button
             className="game-room-quick-link rewards"
             type="button"
-            onClick={() => navigate(`/game/${roomId}/rewards`)}
+            onPointerDown={prepareRoomFeatureOpen}
+            onClick={() => openRoomFeature('rewards')}
             aria-label="打开每日奖励"
           >
             <img
@@ -2509,7 +2964,7 @@ export default function GameRoom({ session }: { session: Session }) {
                   <div className="feed-assistant-body">
                     <div className="feed-assistant-name">至尊牛牛小助手</div>
                     <div className="feed-assistant-bubble">
-                      <p>{item.text}</p>
+                      <AssistantCopy text={item.text} ownTokens={ownMentionTokens} />
                       {item.time && <time>{item.time}</time>}
                     </div>
                   </div>
@@ -2523,16 +2978,17 @@ export default function GameRoom({ session }: { session: Session }) {
                   <div className="feed-assistant-body">
                     <div className="feed-assistant-name">至尊牛牛小助手</div>
                     <div
-                      className={`feed-assistant-bubble${item.lockEmoji ? ' countdown-lock' : ' countdown-live'}`}
+                      className={`feed-assistant-bubble${item.lockText ? ' countdown-lock' : ' countdown-live'}`}
                     >
-                      {item.lockEmoji ? (
-                        <p className="countdown-lock-emoji" aria-live="polite">
-                          {item.lockEmoji}
+                      {item.lockText ? (
+                        <p className="countdown-lock-text" aria-live="polite">
+                          {item.lockText}
                         </p>
                       ) : (
                         <p aria-live="polite">
                           <RemainingCopy
                             endsAt={item.endsAt}
+                            mode={item.mode}
                             template={item.template ?? ''}
                           />
                         </p>
@@ -2667,12 +3123,17 @@ export default function GameRoom({ session }: { session: Session }) {
               );
             }
             if (item.kind === 'chat') {
+              const ownBet = item.mine && !!item.amount;
               return (
-                <div className={`feed-chat ${item.mine ? 'mine' : 'theirs'}`} key={item.id}>
+                <div className={`feed-chat ${item.mine ? 'mine' : 'theirs'}${ownBet ? ' own-bet' : ''}`} key={item.id}>
                   {!item.mine && <ChatAvatar url={item.avatar} name={item.name} />}
                   <div className="feed-chat-body">
-                    {!item.mine && <div className="feed-chat-name">{item.name}</div>}
-                    <div className={`feed-chat-bubble ${item.emoji ? 'emoji' : ''}`}>
+                    {(!item.mine || ownBet) && (
+                      <div className={`feed-chat-name${ownBet ? ' own-bet' : ''}`}>
+                        {ownBet ? (canBid ? '我的竞庄' : '我的下注') : item.name}
+                      </div>
+                    )}
+                    <div className={`feed-chat-bubble ${item.emoji ? 'emoji' : ''} ${ownBet ? 'is-bet' : ''}`}>
                       <p>{item.text}</p>
                       {item.time && <time>{item.time}</time>}
                     </div>
@@ -2683,7 +3144,7 @@ export default function GameRoom({ session }: { session: Session }) {
             if (item.kind === 'packet') {
               const senderName = item.name ?? '小助手';
               const interactive = !!item.asChat && !item.demo;
-              const dimmed = !!item.waiting || !item.claimable;
+              const dimmed = !!item.opened || !!item.waiting || !item.claimable;
               const clickable =
                 !item.waiting && (!!item.claimable || (!!item.view && !!item.packetId));
               return (
@@ -2698,7 +3159,7 @@ export default function GameRoom({ session }: { session: Session }) {
                         disabled={busy || rpBusy || !clickable}
                         onClick={() =>
                           item.view && item.packetId
-                            ? void viewGamePacket(item.packetId)
+                            ? viewGamePacket(item.packetId)
                             : void claim(item.packetId)
                         }
                       >
@@ -2810,14 +3271,24 @@ export default function GameRoom({ session }: { session: Session }) {
           disabled={chatMuted || composerUnavailable}
           busy={betPending || chatSendPending}
           placeholder={composerHint}
+          amountMode={canBid ? 'bid' : canBet ? 'bet' : null}
           stickers={stickers}
           onSendSticker={sendSticker}
           toolsHighlight={canThrowDice}
+          diceAvailable={canThrowDice}
           defaultToolTab={canThrowDice ? 'dice' : 'emoji'}
           dicePanel={
             canThrowDice ? (
               <>
-                <p className="dice-panel-hint">庄家投骰后，结果会一颗一颗发到群聊</p>
+                <div className="dice-panel-ready-head">
+                  <span className="dice-panel-art" aria-hidden="true">
+                    <Die value={5} />
+                  </span>
+                  <span>
+                    <strong>庄家投骰</strong>
+                    <small>三颗骰子将依次掷出，并同步到互动群</small>
+                  </span>
+                </div>
                 <button
                   className="primary-action dice-action"
                   type="button"
@@ -2828,13 +3299,29 @@ export default function GameRoom({ session }: { session: Session }) {
                 </button>
               </>
             ) : (
-              <p>
-                {phase !== 'SENDING_PACKET'
-                  ? '当前不是掷骰阶段'
-                  : state?.me.isBanker
-                    ? '本局已投过骰子'
-                    : '仅本局庄家可投骰，结果将发到群聊'}
-              </p>
+              <div className="dice-panel-unavailable">
+                <span className="dice-panel-lock" aria-hidden="true">
+                  <svg viewBox="0 0 24 24">
+                    <rect x="4.5" y="10" width="15" height="10" rx="3" />
+                    <path d="M8 10V7.5a4 4 0 0 1 8 0V10" />
+                    <circle cx="12" cy="15" r="1" />
+                  </svg>
+                </span>
+                <span>
+                  <strong>
+                    {phase === 'SENDING_PACKET' && state?.me.isBanker
+                      ? '本局已经完成投骰'
+                      : '投骰暂不可用'}
+                  </strong>
+                  <small>
+                    {phase !== 'SENDING_PACKET'
+                      ? '进入庄家投骰阶段后才可使用'
+                      : state?.me.isBanker
+                        ? '等待小助手继续发包流程'
+                        : '仅本局庄家可在投骰阶段使用'}
+                  </small>
+                </span>
+              </div>
             )
           }
           plusActions={[
@@ -2895,12 +3382,6 @@ export default function GameRoom({ session }: { session: Session }) {
           <RedPacketOpening data={rpOpening} />,
           document.body,
         )}
-
-      {rpModal &&
-        createPortal(
-          <RedPacketModal data={rpModal} onClose={() => setRpModal(null)} />,
-          document.body,
-        )}
     </div>
   );
 }
@@ -2950,9 +3431,13 @@ function BetResultToast({
               <i>当前余额 RM{rm(acceptance.liabilityBalanceCents)}</i>
             </span>
             <span>
-              {acceptance.maxMultiplier} 倍余额上限{' '}
+              {notice.action === 'all_in'
+                ? '1:1 余额上限'
+                : `${acceptance.liabilityMultiplier} 倍余额上限`}{' '}
               <b>RM{rm(acceptance.maxAffordableCents)}</b>
-              <i>本局最高 RM{rm(acceptance.maxAcceptedCents)}</i>
+              {notice.action === 'all_in' ? null : (
+                <i>本局最高 RM{rm(acceptance.maxAcceptedCents)}</i>
+              )}
             </span>
             <span>
               实际接受 <b>RM{rm(notice.amountCents)}</b>
@@ -3023,119 +3508,6 @@ function RedPacketOpening({
   );
 }
 
-function RedPacketModal({
-  data,
-  onClose,
-}: {
-  data: {
-    packetId: string;
-    greeting: string;
-    sender: { name: string; avatar?: string | null };
-    amountCents?: string;
-    gone?: boolean;
-    claims: Array<{
-      uid: string;
-      nickname: string | null;
-      avatarUrl: string | null;
-      amountCents: string;
-      at: string;
-    }>;
-    total: string;
-    count: number;
-    remaining: number;
-  };
-  onClose: () => void;
-}) {
-  const luckyUid = data.claims.length
-    ? data.claims.reduce((best, c) =>
-        Number(c.amountCents) > Number(best.amountCents) ? c : best,
-      ).uid
-    : null;
-  const claimedCount = data.claims.length;
-  const grabbedOut = data.count > 0 && data.remaining <= 0;
-
-  return (
-    <div className="wx-rp-modal" role="dialog" aria-modal="true" onClick={onClose}>
-      <div className="wx-rp-modal-panel" onClick={(e) => e.stopPropagation()}>
-        <div className="wx-rp-modal-hero">
-          <span className="wx-rp-sender">
-            <RedPacketSenderAvatar url={data.sender.avatar} name={data.sender.name} />
-            {data.sender.name} 发出的红包
-          </span>
-          <div className="wx-rp-greet">{data.greeting}</div>
-          {data.gone ? (
-            <div className="wx-rp-miss">手慢了，红包已被领完</div>
-          ) : data.amountCents ? (
-            <div className="wx-rp-amount">
-              <span>RM</span>
-              <b>{rm(data.amountCents)}</b>
-              <i>已存入零钱余额</i>
-            </div>
-          ) : (
-            <div className="wx-rp-coin" aria-hidden>
-              開
-            </div>
-          )}
-        </div>
-
-        <div className="wx-rp-modal-list">
-          <div className="wx-rp-list-head">
-            <span>
-              {data.count > 0
-                ? `已领取 ${claimedCount}/${data.count} 个`
-                : `已领取 ${claimedCount} 个`}
-              ，共 RM {rm(data.total)}
-            </span>
-            {grabbedOut && <span>已抢光</span>}
-          </div>
-          {claimedCount ? (
-            data.claims.map((c) => {
-              const name = c.nickname || '玩家';
-              return (
-                <div className="wx-rp-row" key={`${c.uid}-${c.at}`}>
-                  {c.avatarUrl ? (
-                    <img src={c.avatarUrl} alt="" />
-                  ) : (
-                    <span className="wx-rp-row-ph">{name.slice(0, 1)}</span>
-                  )}
-                  <div className="wx-rp-row-main">
-                    <strong>{name}</strong>
-                    <small>{formatClaimTime(c.at)}</small>
-                  </div>
-                  <div className="wx-rp-row-amt">
-                    <b>RM {rm(c.amountCents)}</b>
-                    {c.uid === luckyUid && claimedCount > 1 && (
-                      <span className="wx-rp-lucky">手气最佳</span>
-                    )}
-                  </div>
-                </div>
-              );
-            })
-          ) : (
-            <div className="wx-rp-modal-empty">还没有人领取，快抢一个吧</div>
-          )}
-        </div>
-      </div>
-      <button type="button" className="wx-rp-modal-close" onClick={onClose} aria-label="关闭">
-        ×
-      </button>
-    </div>
-  );
-}
-
-function formatClaimTime(value: string): string {
-  try {
-    return new Date(value).toLocaleString('zh-MY', {
-      month: '2-digit',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
-    });
-  } catch {
-    return '';
-  }
-}
-
 function ChatAvatar({ url, name }: { url?: string | null; name: string }) {
   const [failed, setFailed] = useState(false);
   if (url && !failed) {
@@ -3159,7 +3531,11 @@ function ChatAvatar({ url, name }: { url?: string | null; name: string }) {
 function formatTime(value?: string) {
   if (!value) return undefined;
   try {
-    return new Date(value).toLocaleTimeString('zh-MY', { hour: '2-digit', minute: '2-digit' });
+    return new Date(value).toLocaleTimeString('zh-MY', {
+      hour12: false,
+      hour: '2-digit',
+      minute: '2-digit',
+    });
   } catch {
     return undefined;
   }

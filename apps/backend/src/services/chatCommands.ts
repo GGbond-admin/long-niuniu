@@ -41,6 +41,8 @@ type BetAcceptanceDetails = {
   roomMaxCents: string;
   maxAcceptedCents: string;
   maxMultiplier: number;
+  /** 本笔预留倍数：普通=本局最高牌型倍数，梭哈=1（1:1 赔付） */
+  liabilityMultiplier: number;
   reservedCents: string;
   adjusted: boolean;
   adjustedBy: string[];
@@ -140,6 +142,7 @@ function successfulBetCommand(
           roomMaxCents: String(result.roomMaxCents),
           maxAcceptedCents: String(result.maxAcceptedCents),
           maxMultiplier: result.maxMultiplier,
+          liabilityMultiplier: result.liabilityMultiplier ?? result.maxMultiplier,
           reservedCents: String(result.reservedCents),
           adjusted,
           adjustedBy: result.adjustedBy,
@@ -518,7 +521,12 @@ export async function handleRoomChatCommand(params: {
     } catch (e) {
       return {
         kind: 'error',
-        message: e instanceof GameError ? humanizeGameError(e) : '竞标失败',
+        message:
+          e instanceof GameError && e.code === 'PHASE_ENDED'
+            ? '竞标已截止，正在进行 3、2、1 最终确认'
+            : e instanceof GameError
+              ? humanizeGameError(e)
+              : '竞标失败',
       };
     }
   }

@@ -12,6 +12,7 @@ import type { FastifyReply, FastifyRequest } from 'fastify';
 import { ZodError } from 'zod';
 import { env } from './config.js';
 import { prisma } from './lib/prisma.js';
+import { redis } from './lib/redis.js';
 import { authRoutes } from './routes/auth.js';
 import { onboardingRoutes } from './routes/onboarding.js';
 import { walletRoutes } from './routes/wallet.js';
@@ -59,7 +60,13 @@ declare module 'fastify' {
 };
 
 export async function buildServer() {
-  const app = Fastify({ logger: env.nodeEnv !== 'test', trustProxy: env.trustProxy });
+  const app = Fastify({
+    logger: env.nodeEnv !== 'test',
+    trustProxy:
+      env.trustProxy && env.trustedProxyCidrs.length > 0
+        ? env.trustedProxyCidrs
+        : false,
+  });
 
   await app.register(helmet, { contentSecurityPolicy: false });
   await app.register(cors, {
@@ -159,13 +166,14 @@ export async function buildServer() {
   app.decorate('authAdmin', async (req: FastifyRequest, reply: FastifyReply) => {
     try {
       await req.jwtVerify();
-      const claims = req.user as { sub: string; kind?: string };
+      const claims = req.user as { sub: string; kind?: string; ver?: number };
       if (claims.kind !== 'admin') throw new Error('wrong kind');
       const admin = await prisma.admin.findUnique({
         where: { id: claims.sub },
-        select: { status: true, role: true },
+        select: { status: true, role: true, tokenVersion: true },
       });
       if (!admin || admin.status !== 'ACTIVE') throw new Error('disabled admin');
+      if (claims.ver !== admin.tokenVersion) throw new Error('revoked admin token');
       Object.assign(req.user as object, { role: admin.role });
     } catch {
       await reply.code(401).send({ error: 'UNAUTHORIZED' });
@@ -243,7 +251,14 @@ export async function buildServer() {
   app.get('/readyz', async (_req, reply) => {
     try {
       await prisma.$queryRaw`SELECT 1`;
-      return { ok: true };
+      if (env.nodeEnv === 'production') await redis().ping();
+      return {
+        ok: true,
+        dependencies: {
+          postgres: 'ok',
+          redis: env.nodeEnv === 'production' ? 'ok' : 'optional',
+        },
+      };
     } catch {
       return reply.code(503).send({ ok: false });
     }

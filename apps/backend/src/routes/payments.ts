@@ -1,5 +1,4 @@
 import type { FastifyInstance } from 'fastify';
-import type { Prisma } from '@prisma/client';
 import { z } from 'zod';
 import { prisma } from '../lib/prisma.js';
 import {
@@ -10,7 +9,7 @@ import {
   resolveNotifyUrl,
 } from '../services/paymentProviders.js';
 import { createVpayOrder, queryVpayOrder, verifyNotifySign, VpayError } from '../services/vpay.js';
-import { applyVpayOrderState } from '../services/vpayDeposits.js';
+import { applyVpayOrderState, sanitizeVpayPayload } from '../services/vpayDeposits.js';
 
 const createSchema = z.object({
   amount: z.string().regex(/^(?!0+(?:\.0{1,2})?$)\d+(\.\d{1,2})?$/),
@@ -25,7 +24,7 @@ function toCents(amount: string): bigint {
 
 /** 支持精确 IP 与 `203.0.113.*` 形式的前缀通配。 */
 export function ipAllowed(ip: string, whitelist: string[]): boolean {
-  if (whitelist.length === 0) return true;
+  if (whitelist.length === 0) return false;
   const candidate = ip.replace(/^::ffff:/, '');
   return whitelist.some((entry) => {
     const rule = entry.replace(/^::ffff:/, '');
@@ -44,6 +43,20 @@ function parseExpiredTime(value: unknown, offsetMinutes: number): Date | null {
 
 const statusRefreshedAt = new Map<string, number>();
 const STATUS_REFRESH_THROTTLE_MS = 5_000;
+const STATUS_REFRESH_ENTRY_TTL_MS = 60 * 60_000;
+
+function rememberStatusRefresh(orderId: string, now = Date.now()) {
+  statusRefreshedAt.set(orderId, now);
+  if (statusRefreshedAt.size < 5_000) return;
+  for (const [id, refreshedAt] of statusRefreshedAt) {
+    if (now - refreshedAt > STATUS_REFRESH_ENTRY_TTL_MS) statusRefreshedAt.delete(id);
+  }
+  while (statusRefreshedAt.size > 10_000) {
+    const oldest = statusRefreshedAt.keys().next().value as string | undefined;
+    if (!oldest) break;
+    statusRefreshedAt.delete(oldest);
+  }
+}
 
 export async function paymentRoutes(app: FastifyInstance) {
   /** 玩家端可用充值渠道：人工转账恒在，VPay 视后台配置而定 */
@@ -88,12 +101,56 @@ export async function paymentRoutes(app: FastifyInstance) {
         return reply.code(400).send({ error: 'AMOUNT_ABOVE_MAX', maxCents: String(config.maxAmountCents) });
       }
 
-      const replay = await prisma.depositOrder.findUnique({
+      let replay = await prisma.depositOrder.findUnique({
         where: { userId_requestId: { userId, requestId: body.requestId } },
       });
       if (replay) {
-        if (replay.amountCents !== amountCents || replay.channel !== 'VPAY') {
+        if (
+          replay.amountCents !== amountCents
+          || replay.channel !== 'VPAY'
+          || replay.providerCode !== body.tradeCode
+        ) {
           return reply.code(409).send({ error: 'IDEMPOTENCY_CONFLICT' });
+        }
+        if (replay.status === 'PENDING' && !replay.payUrl) {
+          try {
+            const remote = await queryVpayOrder(config, replay.id);
+            if (remote.code === 0 && remote.data) {
+              await prisma.depositOrder.update({
+                where: { id: replay.id },
+                data: {
+                  payUrl: remote.data.pay_url ?? null,
+                  providerTradeNo: remote.data.trade_no ?? null,
+                  expiredAt: parseExpiredTime(
+                    remote.data.expired_time,
+                    config.timezoneOffsetMinutes,
+                  ),
+                  providerPayload: sanitizeVpayPayload(remote),
+                },
+              });
+              if (remote.data.state !== undefined) {
+                await applyVpayOrderState({
+                  orderId: replay.id,
+                  state: remote.data.state,
+                  paidAmount: remote.data.amount,
+                  providerTradeNo: remote.data.trade_no ?? null,
+                  payload: remote as unknown,
+                  source: 'reconcile',
+                });
+              }
+              replay =
+                (await prisma.depositOrder.findUnique({ where: { id: replay.id } }))
+                ?? replay;
+            }
+          } catch (error) {
+            req.log.warn({ err: error, orderId: replay.id }, '[vpay] recover accepted order failed');
+          }
+          if (replay.status === 'PENDING' && !replay.payUrl) {
+            return reply.code(503).send({
+              error: 'VPAY_ORDER_RECOVERY_PENDING',
+              orderId: replay.id,
+            });
+          }
         }
         return {
           ok: true,
@@ -118,13 +175,38 @@ export async function paymentRoutes(app: FastifyInstance) {
         });
       } catch (error) {
         if ((error as { code?: string }).code === 'P2002') {
+          const concurrent = await prisma.depositOrder.findUnique({
+            where: { userId_requestId: { userId, requestId: body.requestId } },
+          });
+          if (
+            concurrent
+            && concurrent.channel === 'VPAY'
+            && concurrent.amountCents === amountCents
+            && concurrent.providerCode === body.tradeCode
+          ) {
+            if (concurrent.status === 'PENDING' && !concurrent.payUrl) {
+              return reply.code(503).send({
+                error: 'VPAY_ORDER_RECOVERY_PENDING',
+                orderId: concurrent.id,
+              });
+            }
+            return {
+              ok: true,
+              orderId: concurrent.id,
+              status: concurrent.status,
+              payUrl: concurrent.payUrl,
+              expiredAt: concurrent.expiredAt,
+              duplicate: true,
+            };
+          }
           return reply.code(409).send({ error: 'IDEMPOTENCY_CONFLICT' });
         }
         throw error;
       }
 
+      let result: Awaited<ReturnType<typeof createVpayOrder>>;
       try {
-        const result = await createVpayOrder(config, {
+        result = await createVpayOrder(config, {
           outTradeNo: order.id,
           title: config.orderTitle.slice(0, 100),
           amountCents,
@@ -132,16 +214,34 @@ export async function paymentRoutes(app: FastifyInstance) {
           notifyUrl: resolveNotifyUrl(config),
           callbackUrl: resolveCallbackUrl(config),
         });
-        if (result.code !== 0 || !result.data?.pay_url) {
-          throw new VpayError(result.msg || 'VPAY_ORDER_FAILED', result.code);
-        }
+      } catch (error) {
+        // 超时、断线或无效响应都无法证明网关未受理；保留本地单并按平台单号查单恢复。
+        // 删除占位会让稍后到达的成功回调失去归属，造成用户已付款却无法入账。
+        req.log.error({ err: error }, '[vpay] create order request failed');
+        return reply.code(503).send({
+          error: 'VPAY_ORDER_RECOVERY_PENDING',
+          orderId: order.id,
+          message: error instanceof VpayError ? error.message : 'GATEWAY_ERROR',
+        });
+      }
+      if (result.code !== 0 || !result.data?.pay_url) {
+        await prisma.depositOrder
+          .deleteMany({ where: { id: order.id, status: 'PENDING' } })
+          .catch(() => undefined);
+        return reply.code(502).send({
+          error: 'VPAY_ORDER_FAILED',
+          message: result.msg || 'VPAY_ORDER_FAILED',
+        });
+      }
+
+      try {
         const updated = await prisma.depositOrder.update({
           where: { id: order.id },
           data: {
             payUrl: result.data.pay_url,
             providerTradeNo: result.data.trade_no ?? null,
             expiredAt: parseExpiredTime(result.data.expired_time, config.timezoneOffsetMinutes),
-            providerPayload: result as unknown as Prisma.InputJsonValue,
+            providerPayload: sanitizeVpayPayload(result),
           },
         });
         return {
@@ -153,14 +253,12 @@ export async function paymentRoutes(app: FastifyInstance) {
           duplicate: false,
         };
       } catch (error) {
-        // 网关未受理即视为从未下单，删掉占位工单让玩家可用同一 requestId 重试
-        await prisma.depositOrder
-          .deleteMany({ where: { id: order.id, status: 'PENDING' } })
-          .catch(() => undefined);
-        req.log.error({ err: error }, '[vpay] create order failed');
-        return reply.code(502).send({
-          error: 'VPAY_ORDER_FAILED',
-          message: error instanceof VpayError ? error.message : 'GATEWAY_ERROR',
+        // 网关已明确受理后绝不能删除本地单，否则远端付款会失去归属。
+        // 保留 PENDING 占位；相同 requestId 重试时通过 ORDER_GET 恢复支付链接。
+        req.log.error({ err: error, orderId: order.id }, '[vpay] persist accepted order failed');
+        return reply.code(503).send({
+          error: 'VPAY_ORDER_RECOVERY_PENDING',
+          orderId: order.id,
         });
       }
     },
@@ -179,7 +277,7 @@ export async function paymentRoutes(app: FastifyInstance) {
       if (order.channel === 'VPAY' && order.status === 'PENDING') {
         const last = statusRefreshedAt.get(id) ?? 0;
         if (Date.now() - last > STATUS_REFRESH_THROTTLE_MS) {
-          statusRefreshedAt.set(id, Date.now());
+          rememberStatusRefresh(id);
           try {
             const config = await getVpayConfig();
             if (isVpayReady(config)) {
@@ -194,6 +292,7 @@ export async function paymentRoutes(app: FastifyInstance) {
                   source: 'reconcile',
                 });
                 order = (await prisma.depositOrder.findFirst({ where: { id, userId } })) ?? order;
+                if (order.status !== 'PENDING') statusRefreshedAt.delete(id);
               }
             }
           } catch (error) {

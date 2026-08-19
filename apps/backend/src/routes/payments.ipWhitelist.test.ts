@@ -2,8 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { ipAllowed } from './payments.js';
 
 describe('VPay 回调 IP 白名单', () => {
-  it('未配置时放行（便于联调，上线前必须填写）', () => {
-    expect(ipAllowed('203.0.113.7', [])).toBe(true);
+  it('未配置时拒绝，避免生产漏填后白名单静默失效', () => {
+    expect(ipAllowed('203.0.113.7', [])).toBe(false);
   });
 
   it('精确匹配', () => {

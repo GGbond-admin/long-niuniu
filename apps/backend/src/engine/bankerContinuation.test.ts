@@ -2,6 +2,7 @@ import { RoundPhase } from '@prisma/client';
 import { describe, expect, it } from 'vitest';
 import {
   bankerContinuationError,
+  shouldStartWaitingRound,
   type ContinuationDestinationRound,
   type ContinuationSourceRound,
 } from './bankerContinuation.js';
@@ -120,5 +121,43 @@ describe('庄家续庄资格', () => {
       isContinued: false,
     });
     expect(check(formerBankerWinsRebid, waitingRound({ seqNo: 4 }))).toBeNull();
+  });
+});
+
+describe('续庄结束后的下一局推进', () => {
+  it('续庄窗口仍开放时，即使自动开局开启也必须等待庄家选择', () => {
+    expect(
+      shouldStartWaitingRound({
+        autoStart: true,
+        continuationError: null,
+      }),
+    ).toBe(false);
+  });
+
+  it('续庄超时后，即使自动开局关闭也进入公开竞标', () => {
+    expect(
+      shouldStartWaitingRound({
+        autoStart: false,
+        continuationError: 'CONTINUATION_WINDOW_EXPIRED',
+      }),
+    ).toBe(true);
+  });
+
+  it('上一局已经使用续庄资格时，不再等待并直接进入公开竞标', () => {
+    expect(
+      shouldStartWaitingRound({
+        autoStart: false,
+        continuationError: 'CONTINUATION_ALREADY_USED',
+      }),
+    ).toBe(true);
+  });
+
+  it('没有续庄超时且自动开局关闭时继续等待运营开局', () => {
+    expect(
+      shouldStartWaitingRound({
+        autoStart: false,
+        continuationError: undefined,
+      }),
+    ).toBe(false);
   });
 });

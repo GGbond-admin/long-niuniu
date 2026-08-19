@@ -13,9 +13,15 @@
     "build": "pnpm -r build"
   },
   "engines": {
-    "node": ">=20"
+    "node": "^20.19.0 || >=22.12.0"
   },
   "dependencies": {
     "playwright": "^1.62.1"
+  },
+  "pnpm": {
+    "overrides": {
+      "deepmerge-ts": "8.0.1",
+      "nanoid@<3.3.18": "3.3.18"
+    }
   }
 }

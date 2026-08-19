@@ -1,9 +1,13 @@
 /**
- * 利润池与称桶分配中心 — 对应《利润池与称桶分配模式说明文档》
- * 链路可视化：抽水（玩家3%/庄家5%）→ 毛利 → 扣支出 → 净利润池 → 按流水贡献 × 占成/130 分配
+ * 按局数称桶利润池后台：四步结算、永久局锁、历史快照、代理网络大屏与专属看板。
  */
 import { Fragment, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { del, patch, post, put, request, rm } from './api';
+import AgentNetworkScreen from './profit-pool/AgentNetworkScreen';
+import BatchHistory from './profit-pool/BatchHistory';
+import BatchReport from './profit-pool/BatchReport';
+import SettlementWizard from './profit-pool/SettlementWizard';
+import type { AgentNetwork } from './profit-pool/types';
 
 type Row = Record<string, any>;
 
@@ -23,111 +27,81 @@ function errText(error: unknown): string {
   return error instanceof Error ? error.message : '操作失败，请重试';
 }
 
-type PoolTab = 'overview' | 'agents' | 'history' | 'config';
+type PoolTab = 'settlement' | 'network' | 'agents' | 'history' | 'config';
 
 export default function ProfitPoolCenter() {
-  const [tab, setTab] = useState<PoolTab>('overview');
-  const [date, setDate] = useState(todayKL());
+  const [tab, setTab] = useState<PoolTab>('settlement');
   const [overview, setOverview] = useState<Row | null>(null);
   const [agents, setAgents] = useState<Row[]>([]);
-  const [history, setHistory] = useState<Row[]>([]);
+  const [network, setNetwork] = useState<AgentNetwork | null>(null);
+  const [legacyPending, setLegacyPending] = useState<Row[]>([]);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
-  const [busy, setBusy] = useState(false);
+  const [selectedBatchId, setSelectedBatchId] = useState<string | null>(null);
+  const [refreshKey, setRefreshKey] = useState(0);
 
-  async function load(target = date) {
+  async function load() {
     setError('');
     try {
-      const [ov, agentList, his] = await Promise.all([
-        request<Row>(`/api/admin/profit-pool/overview?date=${target}`),
+      const [ov, agentList, liveNetwork, legacy] = await Promise.all([
+        request<Row>('/api/admin/profit-pool/overview'),
         request<{ items: Row[] }>('/api/admin/profit-pool/agents'),
-        request<{ items: Row[] }>('/api/admin/profit-pool/history?limit=30'),
+        request<AgentNetwork>('/api/admin/profit-pool/network'),
+        request<{ items: Row[] }>('/api/admin/profit-pool/legacy/pending'),
       ]);
       setOverview(ov);
       setAgents(agentList.items);
-      setHistory(his.items);
+      setNetwork(liveNetwork);
+      setLegacyPending(legacy.items);
     } catch (err) {
       setError(errText(err));
     }
   }
 
   useEffect(() => {
-    void load(date);
-  }, [date]);
+    void load();
+  }, []);
 
-  const pool = overview?.pool as Row | undefined;
   const config = overview?.config as Row | undefined;
-  const today = (overview?.today as string) ?? todayKL();
-  const poolStatus = (pool?.status as string) ?? 'ESTIMATED';
-  const canGenerate = Boolean(pool && poolStatus === 'ESTIMATED' && date < today);
-  const canConfirm = poolStatus === 'PENDING';
+  const pendingCount = Number(overview?.statusCounts?.PENDING ?? 0);
+  const tabs: Array<{ id: PoolTab; label: string }> = [
+    { id: 'settlement', label: '称桶利润池' },
+    { id: 'network', label: '代理利润大屏' },
+    { id: 'agents', label: `代理管理（${agents.length}）` },
+    { id: 'history', label: pendingCount ? `历史报表 · ${pendingCount} 待分配` : '历史报表' },
+    { id: 'config', label: '参数配置' },
+  ];
+  const poolAgents = (network?.nodes ?? []).map((node) => ({
+    agentId: node.id,
+    selfTurnoverCents: node.turnoverCents,
+    teamTurnoverCents: node.teamTurnoverCents,
+    contributionBp: node.contributionBp,
+    selfAmountCents: node.selfAmountCents,
+    overrideAmountCents: node.overrideAmountCents,
+    amountCents: node.profitCents,
+  }));
 
-  /** 第一阶段：生成报表（PENDING，不转账） */
-  async function generate() {
-    if (!pool) return;
-    setBusy(true);
-    setError('');
-    try {
-      await post('/api/admin/profit-pool/generate', { date });
-      setNotice(`${date} 称桶报表已生成，核对无误后请点击「确认发放」`);
-      await load(date);
-    } catch (err) {
-      setError(errText(err));
-    } finally {
-      setBusy(false);
-    }
+  async function changed(message?: string) {
+    if (message) setNotice(message);
+    setRefreshKey((value) => value + 1);
+    await load();
   }
 
-  /** 第二阶段：确认发放（转账入代理余额，不可撤销） */
-  async function confirmPayout() {
-    if (!pool) return;
-    const netRm = rmSigned(pool.netPoolCents);
-    const distRm = rmSigned(pool.distributedCents);
+  async function discardLegacy(date: string) {
     if (
       !confirm(
-        `确认发放 ${date} 称桶分成？\n净利润池 ${netRm}，将向代理发放合计 ${distRm}。\n确认后立即入账，不可撤销。`,
+        `删除旧按日报表 ${date}？\n该报表尚未发放。删除后才能使用新的按局数利润池；操作会写入审计日志。`,
       )
     ) {
       return;
     }
-    setBusy(true);
-    setError('');
     try {
-      await post('/api/admin/profit-pool/confirm', { date });
-      setNotice(`${date} 称桶分成已发放到各代理可用余额`);
-      await load(date);
+      await post(`/api/admin/profit-pool/legacy/${date}/discard`, {});
+      await changed(`${date} 旧按日待发报表已删除`);
     } catch (err) {
       setError(errText(err));
-    } finally {
-      setBusy(false);
     }
   }
-
-  /** 作废待确认报表（未转账，可安全重算） */
-  async function discard() {
-    if (!confirm(`作废 ${date} 的待确认报表？\n未发生转账，作废后可修改代理/配置再重新生成。`)) {
-      return;
-    }
-    setBusy(true);
-    setError('');
-    try {
-      await post('/api/admin/profit-pool/discard', { date });
-      setNotice(`${date} 待确认报表已作废，可重新生成`);
-      await load(date);
-    } catch (err) {
-      setError(errText(err));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  const pendingCount = history.filter((row) => row.status === 'PENDING').length;
-  const tabs: Array<{ id: PoolTab; label: string }> = [
-    { id: 'overview', label: '① 结算总览' },
-    { id: 'agents', label: `② 代理管理（${agents.length}）` },
-    { id: 'history', label: pendingCount ? `分配历史 · ${pendingCount} 待确认` : '分配历史' },
-    { id: 'config', label: '参数配置' },
-  ];
 
   return (
     <div className="hub-page">
@@ -154,118 +128,90 @@ export default function ProfitPoolCenter() {
       )}
 
       <div className="hub-body">
-        {tab === 'overview' && (
+        {tab === 'settlement' && (
           <>
-            <div className="toolbar standalone">
-              <div className="toolbar-hint">
-                <small>业务日（马来西亚时区）</small>
-                <span>每天只需两步：核对昨日数据 → 确认发放</span>
-              </div>
-              <input
-                type="date"
-                value={date}
-                max={today}
-                onChange={(e) => setDate(e.target.value)}
+            {legacyPending.length > 0 && (
+              <section className="ppx-legacy-warning">
+                <div>
+                  <strong>切换前还有 {legacyPending.length} 份旧按日报表待处理</strong>
+                  <span>为防止同一局重复发放，新按局数利润池会暂时禁止生成。请确认这些旧报表未付款后逐份删除。</span>
+                </div>
+                <div>
+                  {legacyPending.map((item) => (
+                    <button
+                      type="button"
+                      key={item.id}
+                      onClick={() => void discardLegacy(item.date)}
+                    >
+                      删除 {item.date} 待发日报
+                    </button>
+                  ))}
+                </div>
+              </section>
+            )}
+            {selectedBatchId ? (
+              <BatchReport
+                poolId={selectedBatchId}
+                onClose={() => setSelectedBatchId(null)}
+                onChanged={() => void changed('利润池状态已更新')}
+                onError={setError}
               />
-              {canGenerate && (
-                <button className="primary small" disabled={busy} onClick={() => void generate()}>
-                  {busy ? '处理中…' : '生成报表'}
-                </button>
-              )}
-              {canConfirm && (
-                <>
-                  <button
-                    className="primary small"
-                    disabled={busy}
-                    onClick={() => void confirmPayout()}
-                  >
-                    {busy ? '处理中…' : '确认发放'}
-                  </button>
-                  <button className="small" disabled={busy} onClick={() => void discard()}>
-                    作废重算
-                  </button>
-                </>
-              )}
-              <button className="small" onClick={() => void load(date)}>
-                刷新
-              </button>
-            </div>
-
-            <SettleSteps status={poolStatus} isToday={date >= today} date={date} />
-
-            {pool && (
+            ) : (
               <>
-                <PoolMetrics pool={pool} status={poolStatus} />
-                <FormulaStrip pool={pool} />
+                <SettlementWizard
+                  defaultExpenseRatio={Number(config?.expenseRatio ?? 0.025)}
+                  onGenerated={(poolId, poolCode) => {
+                    setSelectedBatchId(poolId);
+                    void changed(`${poolCode} 已生成并永久锁定局数`);
+                  }}
+                  onError={setError}
+                />
+                <BatchHistory
+                  compact
+                  refreshKey={refreshKey}
+                  onSelect={setSelectedBatchId}
+                  onError={setError}
+                />
               </>
             )}
-
-            <div className="pp-grid">
-              <section className="panel">
-                <div className="panel-title">
-                  <div>
-                    <small>近 14 日</small>
-                    <h2>利润池趋势</h2>
-                  </div>
-                </div>
-                {overview?.trend ? (
-                  <TrendChart trend={overview.trend as Row[]} />
-                ) : (
-                  <p className="pp-empty">加载中…</p>
-                )}
-              </section>
-
-              <section className="panel">
-                <div className="panel-title">
-                  <div>
-                    <small>{date} 贡献占比</small>
-                    <h2>代理流水贡献</h2>
-                  </div>
-                </div>
-                {pool ? <ContributionBars agents={(pool.agents as Row[]) ?? []} /> : null}
-              </section>
-            </div>
           </>
         )}
+
+        {tab === 'network' && <AgentNetworkScreen onError={setError} />}
 
         {tab === 'agents' && (
-          <>
-            <div className="toolbar standalone">
-              <div className="toolbar-hint">
-                <small>数据日期</small>
-                <span>
-                  表中流水/分成为 {date}（{POOL_STATUS_LABEL[poolStatus] ?? poolStatus}）的数据
-                </span>
-              </div>
-              <input
-                type="date"
-                value={date}
-                max={today}
-                onChange={(e) => setDate(e.target.value)}
-              />
-              <button className="small" onClick={() => void load(date)}>
-                刷新
-              </button>
-            </div>
-            <AgentManager
-              agents={agents}
-              poolAgents={(pool?.agents as Row[]) ?? []}
-              houseInvite={(overview?.houseInvite as Row | undefined) ?? null}
-              bucketBase={Number(config?.bucketBase ?? 130)}
-              minReservePoints={Number(config?.minReservePoints ?? 5)}
-              tierPresets={(config?.tierPresets as Array<{ label: string; points: number }>) ?? []}
-              settled={Boolean(pool?.settled)}
-              onChanged={() => void load(date)}
-              onError={(message) => setError(message)}
-            />
-          </>
+          <AgentManager
+            agents={agents}
+            poolAgents={poolAgents}
+            houseInvite={(overview?.houseInvite as Row | undefined) ?? null}
+            bucketBase={Number(config?.bucketBase ?? 130)}
+            minReservePoints={Number(config?.minReservePoints ?? 5)}
+            tierPresets={(config?.tierPresets as Array<{ label: string; points: number }>) ?? []}
+            settled={overview?.latest?.status === 'DISTRIBUTED'}
+            onChanged={() => void changed('代理资料已更新，下一批将使用新配置')}
+            onError={setError}
+          />
         )}
 
-        {tab === 'history' && <HistoryPanel items={history} />}
+        {tab === 'history' &&
+          (selectedBatchId ? (
+            <BatchReport
+              poolId={selectedBatchId}
+              onClose={() => setSelectedBatchId(null)}
+              onChanged={() => void changed('利润池状态已更新')}
+              onError={setError}
+            />
+          ) : (
+            <BatchHistory
+              refreshKey={refreshKey}
+              onSelect={setSelectedBatchId}
+              onError={setError}
+            />
+          ))}
 
         {tab === 'config' &&
           (config ? (
-            <ConfigPanel config={config} onSaved={() => void load(date)} onError={setError} />
+            <ConfigPanel config={config} onSaved={() => void changed('参数已保存')} onError={setError} />
           ) : (
             <p className="pp-empty">加载中…</p>
           ))}
@@ -1254,13 +1200,11 @@ function ConfigPanel({
   const [expense, setExpense] = useState(String((Number(config.expenseRatio) * 100).toFixed(2)));
   const [base, setBase] = useState(String(config.bucketBase));
   const [reserve, setReserve] = useState(String(config.minReservePoints ?? 5));
-  const [autoSettle, setAutoSettle] = useState(Boolean(config.autoSettle));
 
   useEffect(() => {
     setExpense(String((Number(config.expenseRatio) * 100).toFixed(2)));
     setBase(String(config.bucketBase));
     setReserve(String(config.minReservePoints ?? 5));
-    setAutoSettle(Boolean(config.autoSettle));
   }, [config]);
 
   async function save() {
@@ -1269,6 +1213,10 @@ function ConfigPanel({
     const minReservePoints = Number(reserve);
     if (!(ratio >= 0 && ratio <= 1)) {
       onError('支出比例必须在 0–100 之间');
+      return;
+    }
+    if (!Number.isInteger(bucketBase) || bucketBase < 1 || bucketBase > 10_000) {
+      onError('称桶基准必须是 1–10000 的整数');
       return;
     }
     if (!Number.isInteger(minReservePoints) || minReservePoints < 0) {
@@ -1280,7 +1228,6 @@ function ConfigPanel({
         expenseRatio: ratio,
         bucketBase,
         minReservePoints,
-        autoSettle,
       });
       onSaved();
     } catch (err) {
@@ -1309,21 +1256,14 @@ function ConfigPanel({
           最低预留点数（上级给下级）
           <input value={reserve} onChange={(e) => setReserve(e.target.value)} />
         </label>
-        <label className="pp-check">
-          <input
-            type="checkbox"
-            checked={autoSettle}
-            onChange={(e) => setAutoSettle(e.target.checked)}
-          />
-          每日自动生成前一日报表（发放始终需手动确认）
-        </label>
         <button className="primary small" onClick={() => void save()}>
           保存配置
         </button>
       </div>
       <p className="pp-hint">
         抽水比例（玩家赢 3% / 庄家赢 5%）在「游戏运营中心 → 游戏配置 → 费用与抽水」中调整；
-        净利润池为负时当日不分配，负额自动结转次日冲抵；
+        每一批支出比例仍须在生成向导中明确确认，默认值只用于预填；
+        新利润池只按房间局号范围生成，不再自动生成日报；
         分配采用占成差额制：上级赚取与直属下级的占成差额，同一笔利润不重复分配。
       </p>
     </section>

@@ -188,6 +188,7 @@ export default function Deposit({
         AMOUNT_BELOW_MIN: `低于快捷充值最低金额 RM${minAmount}`,
         AMOUNT_ABOVE_MAX: `超过快捷充值最高金额 RM${maxAmount}`,
         VPAY_ORDER_FAILED: '支付通道暂时无法下单，请稍后重试或改用银行转账。',
+        VPAY_ORDER_RECOVERY_PENDING: '订单已提交，支付通道仍在确认中；请稍后按相同金额重试以恢复支付链接。',
         IDEMPOTENCY_CONFLICT: '订单信息已变化，请返回重新选择金额。',
       };
       setError(messages[code ?? ''] ?? `下单失败：${(err as Error).message}`);

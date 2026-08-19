@@ -64,6 +64,7 @@ const amountSchema = z.object({
 });
 const tipSchema = amountSchema.extend({
   requestId: z.string().uuid(),
+  paymentPin: z.string().regex(/^\d{6}$/),
 });
 const WS_SESSION_REVALIDATE_MS = 15_000;
 const WS_MESSAGE_RATE_WINDOW_MS = 5_000;
@@ -344,6 +345,7 @@ function serializeBetAcceptance(result: Awaited<ReturnType<typeof placeBet>>) {
     roomMaxCents: String(result.roomMaxCents),
     maxAcceptedCents: String(result.maxAcceptedCents),
     maxMultiplier: result.maxMultiplier,
+    liabilityMultiplier: result.liabilityMultiplier,
     adjusted: result.adjusted,
     adjustedBy: result.adjustedBy,
   };
@@ -388,6 +390,38 @@ export async function gameRoomRoutes(app: FastifyInstance) {
     return state;
   });
 
+  /** 60 秒房间连接票据：避免把 12 小时登录 JWT 放进 WebSocket URL/代理日志。 */
+  app.post(
+    '/api/game/rooms/:id/ws-ticket',
+    { preHandler: player },
+    async (req, reply) => {
+      const { id } = req.params as { id: string };
+      const claims = req.user as {
+        sub: string;
+        deviceId?: string;
+        deviceVersion?: number;
+      };
+      const member = await prisma.roomMember.findUnique({
+        where: { roomId_userId: { roomId: id, userId: claims.sub } },
+        select: { status: true },
+      });
+      if (member?.status !== 'ACTIVE') {
+        return reply.code(403).send({ error: 'NOT_IN_ROOM' });
+      }
+      const ticket = app.jwt.sign(
+        {
+          sub: claims.sub,
+          kind: 'user_ws',
+          roomId: id,
+          deviceId: claims.deviceId,
+          deviceVersion: claims.deviceVersion,
+        },
+        { expiresIn: '60s' },
+      );
+      return { ticket, expiresIn: 60 };
+    },
+  );
+
   app.post('/api/game/rooms/:id/leave', { preHandler: authenticatedRoom }, async (req) => {
     const { id } = req.params as { id: string };
     const userId = (req.user as { sub: string }).sub;
@@ -395,9 +429,16 @@ export async function gameRoomRoutes(app: FastifyInstance) {
     return { ok: true };
   });
 
-  app.get('/api/game/rooms/:id/state', { preHandler: authenticatedRoom }, async (req) => {
+  app.get('/api/game/rooms/:id/state', { preHandler: player }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const userId = (req.user as { sub: string }).sub;
+    const member = await prisma.roomMember.findUnique({
+      where: { roomId_userId: { roomId: id, userId } },
+      select: { status: true },
+    });
+    if (member?.status !== 'ACTIVE') {
+      return reply.code(403).send({ error: 'NOT_IN_ROOM' });
+    }
     const startedAt = performance.now();
     const state = await buildRoomState(id, userId);
     const totalMs = performance.now() - startedAt;
@@ -552,9 +593,17 @@ export async function gameRoomRoutes(app: FastifyInstance) {
     return { ok: true, amountCents: String(result.amountCents) };
   });
 
-  app.get('/api/game/group-packets/:id', { preHandler: [app.authUser] }, async (req) => {
+  app.get('/api/game/group-packets/:id', { preHandler: [app.authUser, app.requireKyc] }, async (req, reply) => {
     const { id } = req.params as { id: string };
+    const userId = (req.user as { sub: string }).sub;
     const packet = await groupPacketDetail(id);
+    const member = await prisma.roomMember.findUnique({
+      where: { roomId_userId: { roomId: packet.roomId, userId } },
+      select: { status: true },
+    });
+    if (member?.status !== 'ACTIVE') {
+      return reply.code(403).send({ error: 'NOT_IN_ROOM' });
+    }
     return {
       id: packet.id,
       sender: packet.sender,
@@ -617,12 +666,18 @@ export async function gameRoomRoutes(app: FastifyInstance) {
         where: { id: userId },
         select: { uid: true, nickname: true, avatarUrl: true },
       }),
-      tipSupport({ roomId: id, userId, amountCents, requestId: body.requestId }),
+      tipSupport({
+        roomId: id,
+        userId,
+        amountCents,
+        requestId: body.requestId,
+        paymentPin: body.paymentPin,
+      }),
     ]);
     if (!user) throw new GameError('USER_NOT_ACTIVE');
     const amount = String(amountCents);
     const message = result.duplicate ? '打赏已确认，本次不会重复扣款。' : pickTipMessage();
-    const nickname = result.nickname;
+    const nickname = user.nickname ?? user.uid;
     if (!result.duplicate) {
       appendChat(id, {
         type: 'USER_TIP',
@@ -659,10 +714,11 @@ export async function gameRoomRoutes(app: FastifyInstance) {
   // ── WebSocket：实时阶段推送 + 房内聊天 ──
   app.get('/api/game/rooms/:id/ws', { websocket: true }, async (socket: WebSocket, req) => {
     const { id } = req.params as { id: string };
-    const { token } = req.query as { token?: string };
+    const { ticket } = req.query as { ticket?: string };
     let claims: {
       sub: string;
       kind?: string;
+      roomId?: string;
       deviceId?: string;
       deviceVersion?: number;
     };
@@ -670,10 +726,13 @@ export async function gameRoomRoutes(app: FastifyInstance) {
       claims = app.jwt.verify<{
         sub: string;
         kind?: string;
+        roomId?: string;
         deviceId?: string;
         deviceVersion?: number;
-      }>(token ?? '');
-      if (claims.kind !== 'user') throw new Error('wrong kind');
+      }>(ticket ?? '');
+      if (claims.kind !== 'user_ws' || claims.roomId !== id) {
+        throw new Error('wrong ticket');
+      }
     } catch {
       socket.close(4401, 'UNAUTHORIZED');
       return;
@@ -743,6 +802,7 @@ export async function gameRoomRoutes(app: FastifyInstance) {
     let messageQueue: Promise<void> = Promise.resolve();
     let queuedMessages = 0;
     let lastRateWarningAt = 0;
+    let invalidSessionReason = 'DEVICE_SESSION_EXPIRED';
     const messageTimestamps: number[] = [];
 
     const sessionIsCurrent = async (force = false) => {
@@ -763,9 +823,14 @@ export async function gameRoomRoutes(app: FastifyInstance) {
                 status: true,
               },
             },
+            roomMemberships: {
+              where: { roomId: id },
+              select: { status: true },
+              take: 1,
+            },
           },
         });
-        const valid = Boolean(
+        const accountValid = Boolean(
           current &&
             current.status === 'ACTIVE' &&
             current.kind !== 'VIRTUAL' &&
@@ -773,6 +838,11 @@ export async function gameRoomRoutes(app: FastifyInstance) {
             current.device.deviceId === claims.deviceId &&
             current.device.authVersion === claims.deviceVersion,
         );
+        const memberValid = current?.roomMemberships[0]?.status === 'ACTIVE';
+        invalidSessionReason = accountValid && !memberValid
+          ? 'NOT_IN_ROOM'
+          : 'DEVICE_SESSION_EXPIRED';
+        const valid = accountValid && memberValid;
         if (valid) lastSessionValidatedAt = Date.now();
         return valid;
       })();
@@ -783,7 +853,7 @@ export async function gameRoomRoutes(app: FastifyInstance) {
       }
     };
     const closeExpiredSession = () => {
-      if (socket.readyState === socket.OPEN) socket.close(4403, 'DEVICE_SESSION_EXPIRED');
+      if (socket.readyState === socket.OPEN) socket.close(4403, invalidSessionReason);
     };
     const sessionTimer = setInterval(() => {
       void sessionIsCurrent(true)

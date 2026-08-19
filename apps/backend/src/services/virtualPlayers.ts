@@ -199,7 +199,8 @@ export async function createVirtualPlayer(input: VirtualPlayerInput) {
     avatarUrl = pickRandomPresetAvatar(usage.avatars);
   }
 
-  const targetBalanceCents = asCents(input.targetBalanceCents, 500_000n);
+  // 未经财务明确配置的新虚拟玩家默认零预算，避免“创建角色”隐式铸币。
+  const targetBalanceCents = asCents(input.targetBalanceCents, 0n);
   const initialFundCents = asCents(input.initialFundCents, targetBalanceCents);
   const bidWeight = clampRatio(input.bidWeight, 0.7);
   const betRatioMin = clampRatio(input.betRatioMin, 0.05);
@@ -468,15 +469,33 @@ export async function fundVirtualPlayer(
 
 /** 余额低于目标时补到目标。 */
 export async function topUpVirtualIfNeeded(userId: string, operatorId = 'SYSTEM') {
-  const profile = await prisma.virtualPlayer.findUnique({
-    where: { userId },
-    include: { user: { include: { wallet: true } } },
+  return serializable(async (tx) => {
+    // 目标余额判断必须和入账共享行锁；否则两个 worker 都会按旧余额各补一次。
+    await tx.$queryRaw(
+      Prisma.sql`SELECT "id" FROM "wallets" WHERE "user_id" = ${userId} FOR UPDATE`,
+    );
+    const profile = await tx.virtualPlayer.findUnique({
+      where: { userId },
+      include: { user: { include: { wallet: true } } },
+    });
+    if (!profile?.enabled || !profile.user.wallet) return null;
+    const available = profile.user.wallet.availableCents;
+    if (available >= profile.targetBalanceCents) return null;
+
+    const need = profile.targetBalanceCents - available;
+    const adjustmentId = randomUUID();
+    await transfer(tx, {
+      amountCents: need,
+      from: { accountType: AccountType.ADJUST_CLEARING },
+      to: { userId, accountType: AccountType.USER_AVAILABLE },
+      refType: 'adjust',
+      refId: adjustmentId,
+      idempotencyKey: `virtual-fund:${adjustmentId}`,
+      operatorId,
+      memo: '虚拟玩家自动补款',
+    });
+    return tx.wallet.findUniqueOrThrow({ where: { userId } });
   });
-  if (!profile?.enabled || !profile.user.wallet) return null;
-  const available = profile.user.wallet.availableCents;
-  if (available >= profile.targetBalanceCents) return null;
-  const need = profile.targetBalanceCents - available;
-  return fundVirtualPlayer(userId, need, operatorId, '虚拟玩家自动补款');
 }
 
 /** 一键启用/停用虚拟玩家；roomId 为空时作用于全部 */

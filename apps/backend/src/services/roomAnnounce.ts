@@ -5,7 +5,10 @@
 import { BetStatus, RoundPhase } from '@prisma/client';
 import { bettingRange, fromCents } from '../engine/betting.js';
 import { DEFAULT_FEE_CONFIG, rakeRatioFor } from '../engine/fees.js';
-import { formatScoreboard } from '../bot/messages.js';
+import {
+  formatScoreboard,
+  type ScoreboardPresentation,
+} from '../bot/messages.js';
 import { prisma } from '../lib/prisma.js';
 import { cancelReasonText } from './errorMessages.js';
 import {
@@ -113,10 +116,16 @@ export type AnnounceMessage = (
 ) & {
   /** 发送本条前等待的毫秒数：给红包卡片留出停留时间，避免立刻被顶出屏幕 */
   delayMs?: number;
+  /** 成绩单等需要后续原位更新的消息使用稳定语义键。 */
+  messageKey?: string;
+  scoreboardChunkIndex?: number;
 };
 
-function text(content: string): AnnounceMessage {
-  return { kind: 'text', content };
+function text(
+  content: string,
+  options?: Pick<AnnounceMessage, 'messageKey' | 'scoreboardChunkIndex'>,
+): AnnounceMessage {
+  return { kind: 'text', content, ...options };
 }
 
 function banner(key: AnnounceBanner): AnnounceMessage {
@@ -207,7 +216,7 @@ export async function buildRoundAnnounceMessages(params: {
             betMin: fromCents(range?.betMinCents ?? 200),
             betMax: fromCents(range?.betMaxCents ?? 0),
             shMin: fromCents(range?.shMinCents ?? 2_000),
-            shMax: fromCents(range?.shMaxCents ?? 0),
+            shMax: '各自余额',
           }),
         ),
       ),
@@ -275,13 +284,32 @@ export async function buildRoundAnnounceMessages(params: {
   }
 
   if (params.to === RoundPhase.FINISHED) {
-    const messages = [text(stripHtml(templates.settlingWait))];
+    const messages = [
+      text(stripHtml(templates.settlingWait), { messageKey: 'finished:settling' }),
+    ];
     if (round.scoreboard) {
-      for (const chunk of formatScoreboard(round.scoreboard)) {
-        messages.push(text(stripHtml(chunk)));
+      const presentation =
+        round.scoreboard.presentation
+        && typeof round.scoreboard.presentation === 'object'
+        && !Array.isArray(round.scoreboard.presentation)
+          ? round.scoreboard.presentation as ScoreboardPresentation
+          : {};
+      const chunks = formatScoreboard(round.scoreboard, presentation);
+      for (let index = 0; index < chunks.length; index += 1) {
+        messages.push(
+          text(stripHtml(chunks[index]!), {
+            messageKey: `scoreboard:${index}`,
+            scoreboardChunkIndex: index,
+          }),
+        );
       }
     } else {
-      messages.push(text(`🏆 第 ${round.seqNo} 局结算完成`));
+      messages.push(
+        text(`🏆 第 ${round.seqNo} 局结算完成`, {
+          messageKey: 'scoreboard:0',
+          scoreboardChunkIndex: 0,
+        }),
+      );
     }
     // 局末询问庄家是否续庄（按钮由前端续庄窗展示）
     if (
@@ -299,6 +327,7 @@ export async function buildRoundAnnounceMessages(params: {
               pot: fromCents(round.potCents),
             }),
           ),
+          { messageKey: 'continuation' },
         ),
       );
     }

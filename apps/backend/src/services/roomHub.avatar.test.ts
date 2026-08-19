@@ -25,7 +25,7 @@ vi.mock('../lib/redis.js', () => ({
           nickname: '旧昵称',
           avatarUrl: null,
         },
-        at: '2026-08-07T10:00:00.000Z',
+        at: new Date().toISOString(),
       }),
     ]),
   }),

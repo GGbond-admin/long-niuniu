@@ -2,6 +2,7 @@
  * 推送服务：业务事件 → Bot 私聊（后台模板可配，见 03 文档推送中心）
  */
 import { Bot } from 'grammy';
+import type { Prisma } from '@prisma/client';
 import { prisma } from '../lib/prisma.js';
 import { env } from '../config.js';
 import { decryptSecret } from '../lib/crypto.js';
@@ -155,48 +156,71 @@ export class PushService {
     });
     if (!job) return null;
     try {
-    const audience = job.audience as { type?: string; uids?: string[] };
-    const payload = job.payload as Record<string, unknown>;
-    const where =
-      audience.type === 'uids'
-        ? { uid: { in: audience.uids ?? [] }, status: 'ACTIVE' as const }
-        : audience.type === 'kyc_approved'
-          ? { status: 'ACTIVE' as const, kyc: { status: 'APPROVED' as const } }
-          : { status: 'ACTIVE' as const };
-    const users = await prisma.user.findMany({ where, select: { id: true } });
-    let body = job.template?.body ?? String(payload.body ?? '');
-    for (const [key, value] of Object.entries(payload)) {
-      body = body.replaceAll(`{{${key}}}`, String(value));
-    }
-    let successCount = 0;
-    for (const user of users) {
-      const existing = await prisma.pushLog.findFirst({
-        where: { jobId: job.id, userId: user.id, success: true },
-      });
-      if (existing) {
-        successCount += 1;
-        continue;
+      const audience = job.audience as {
+        type?: string;
+        uids?: string[];
+        roomId?: string;
+      };
+      const payload = job.payload as Record<string, unknown>;
+      let where: Prisma.UserWhereInput;
+      if (audience.type === 'uids') {
+        where = { uid: { in: audience.uids ?? [] }, status: 'ACTIVE' };
+      } else if (audience.type === 'kyc_approved') {
+        where = { status: 'ACTIVE', kyc: { status: 'APPROVED' } };
+      } else if (audience.type === 'room' && audience.roomId) {
+        where = {
+          status: 'ACTIVE',
+          roomMemberships: {
+            some: {
+              roomId: audience.roomId,
+              status: 'ACTIVE',
+            },
+          },
+        };
+      } else if (audience.type === 'all') {
+        where = { status: 'ACTIVE' };
+      } else {
+        // 历史脏任务或未知受众必须明确失败，不能伪装成零收件人的成功任务。
+        throw new Error('INVALID_PUSH_AUDIENCE');
       }
-      const result = await sendToUser(user.id, body, job.botId ?? undefined);
-      await prisma.pushLog.create({
-        data: {
-          jobId: job.id,
-          userId: user.id,
-          success: result.success,
-          error: result.error,
-          messageId: result.messageId,
-        },
-      });
-      if (result.success) successCount += 1;
-    }
-    const status =
-      users.length === 0 || successCount === users.length
-        ? 'SENT'
-        : successCount > 0
-          ? 'PARTIAL'
-          : 'FAILED';
-    await prisma.pushJob.update({ where: { id: job.id }, data: { status } });
-    return { status, total: users.length, success: successCount };
+      const users = await prisma.user.findMany({ where, select: { id: true } });
+      let body =
+        typeof payload.__templateBody === 'string'
+          ? payload.__templateBody
+          : job.template?.body ?? String(payload.body ?? '');
+      for (const [key, value] of Object.entries(payload)) {
+        if (key.startsWith('__')) continue;
+        body = body.replaceAll(`{{${key}}}`, String(value));
+      }
+      let successCount = 0;
+      for (const user of users) {
+        const existing = await prisma.pushLog.findFirst({
+          where: { jobId: job.id, userId: user.id, success: true },
+        });
+        if (existing) {
+          successCount += 1;
+          continue;
+        }
+        const result = await sendToUser(user.id, body, job.botId ?? undefined);
+        await prisma.pushLog.create({
+          data: {
+            jobId: job.id,
+            userId: user.id,
+            success: result.success,
+            error: result.error,
+            messageId: result.messageId,
+          },
+        });
+        if (result.success) successCount += 1;
+      }
+      const status =
+        users.length === 0 || successCount === users.length
+          ? 'SENT'
+          : successCount > 0
+            ? 'PARTIAL'
+            : 'FAILED';
+      await prisma.pushJob.update({ where: { id: job.id }, data: { status } });
+      return { status, total: users.length, success: successCount };
     } catch (error) {
       await prisma.pushJob
         .update({ where: { id: job.id }, data: { status: 'FAILED' } })

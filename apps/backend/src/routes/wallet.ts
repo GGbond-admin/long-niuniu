@@ -55,7 +55,13 @@ const LEDGER_CATEGORIES: Record<string, string[]> = {
     'settle_banker_return',
   ],
   fee: ['rake', 'fee_banker_seat', 'fee_service', 'fee_packet_agent', 'tip', 'withdraw_fee'],
-  packet: ['group_packet_create', 'group_packet_claim', 'group_packet_refund'],
+  packet: [
+    'group_packet_create',
+    'group_packet_claim',
+    'group_packet_refund',
+    'packet_internal_claim',
+    'claim_forfeit_refund',
+  ],
   refund: [
     'withdraw_refund',
     'round_cancel_refund',
@@ -122,6 +128,78 @@ export function paginateWalletEntries<T extends { id: string }>(entries: T[], li
   return {
     page,
     nextCursor: entries.length > limit ? page.at(-1)?.id ?? null : null,
+  };
+}
+
+export type WalletOrderKind = 'deposit' | 'withdrawal';
+
+export interface WalletOrderRef {
+  id: string;
+  kind: WalletOrderKind;
+  createdAt: Date;
+}
+
+export interface WalletOrderCursor extends WalletOrderRef {}
+
+const walletOrderCursorPayload = z.object({
+  version: z.literal(1),
+  id: z.string().min(1).max(128),
+  kind: z.enum(['deposit', 'withdrawal']),
+  createdAt: z.string().datetime(),
+});
+
+function compareWalletOrders(a: WalletOrderRef, b: WalletOrderRef): number {
+  const byDate = b.createdAt.getTime() - a.createdAt.getTime();
+  if (byDate !== 0) return byDate;
+  if (a.kind !== b.kind) return a.kind === 'deposit' ? -1 : 1;
+  return b.id.localeCompare(a.id);
+}
+
+function encodeWalletOrderCursor(cursor: WalletOrderRef): string {
+  return Buffer.from(
+    JSON.stringify({
+      version: 1,
+      id: cursor.id,
+      kind: cursor.kind,
+      createdAt: cursor.createdAt.toISOString(),
+    }),
+  ).toString('base64url');
+}
+
+export function decodeWalletOrderCursor(value: string): WalletOrderCursor | null {
+  try {
+    const payload = walletOrderCursorPayload.parse(
+      JSON.parse(Buffer.from(value, 'base64url').toString('utf8')),
+    );
+    return {
+      id: payload.id,
+      kind: payload.kind,
+      createdAt: new Date(payload.createdAt),
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function walletOrderIsAfterCursor(
+  order: WalletOrderRef,
+  cursor: WalletOrderCursor,
+): boolean {
+  return compareWalletOrders(order, cursor) > 0;
+}
+
+export function paginateWalletOrders<T extends WalletOrderRef>(
+  candidates: T[],
+  limit: number,
+) {
+  const ordered = [...candidates].sort(compareWalletOrders);
+  const page = ordered.slice(0, limit);
+  return {
+    page,
+    nextCursor:
+      ordered.length > limit && page.length
+        ? encodeWalletOrderCursor(page[page.length - 1]!)
+        : null,
   };
 }
 
@@ -222,7 +300,8 @@ export async function walletRoutes(app: FastifyInstance) {
     if (replay) {
       const payeeChanged =
         body.payeeAccountId !== undefined && replay.payeeAccountId !== body.payeeAccountId;
-      if (replay.amountCents !== amountCents || payeeChanged) {
+      const proofChanged = replay.proofUrl !== body.proofUrl;
+      if (replay.amountCents !== amountCents || payeeChanged || proofChanged) {
         return reply.code(409).send({ error: 'IDEMPOTENCY_CONFLICT' });
       }
       return {
@@ -243,8 +322,8 @@ export async function walletRoutes(app: FastifyInstance) {
 
     const snapshot = {
       bankName: payee.bankName,
-      accountNo: decryptSecret(payee.accountNo),
-      accountName: decryptSecret(payee.accountName),
+      accountNo: payee.accountNo,
+      accountName: payee.accountName,
       label: payee.label,
     };
 
@@ -259,7 +338,8 @@ export async function walletRoutes(app: FastifyInstance) {
           const payeeChanged =
             body.payeeAccountId !== undefined &&
             existing.payeeAccountId !== body.payeeAccountId;
-          if (existing.amountCents !== amountCents || payeeChanged) {
+          const proofChanged = existing.proofUrl !== body.proofUrl;
+          if (existing.amountCents !== amountCents || payeeChanged || proofChanged) {
             throw new Error('IDEMPOTENCY_CONFLICT');
           }
           return { order: existing, duplicate: true };
@@ -284,6 +364,28 @@ export async function walletRoutes(app: FastifyInstance) {
       };
     } catch (error) {
       if ((error as Error).message === 'IDEMPOTENCY_CONFLICT') {
+        return reply.code(409).send({ error: 'IDEMPOTENCY_CONFLICT' });
+      }
+      if ((error as { code?: string }).code === 'P2002') {
+        const concurrent = await prisma.depositOrder.findUnique({
+          where: {
+            userId_requestId: { userId, requestId: body.requestId },
+          },
+        });
+        if (
+          concurrent
+          && concurrent.channel === 'MANUAL'
+          && concurrent.amountCents === amountCents
+          && concurrent.payeeAccountId === payee.id
+          && concurrent.proofUrl === body.proofUrl
+        ) {
+          return {
+            ok: true,
+            orderId: concurrent.id,
+            status: concurrent.status,
+            duplicate: true,
+          };
+        }
         return reply.code(409).send({ error: 'IDEMPOTENCY_CONFLICT' });
       }
       throw error;
@@ -436,19 +538,91 @@ export async function walletRoutes(app: FastifyInstance) {
   });
 
   /** 玩家查看自己的充提工单状态 */
-  app.get('/api/wallet/orders', { preHandler: [app.authUser, app.requireKyc] }, async (req) => {
+  app.get('/api/wallet/orders', { preHandler: [app.authUser, app.requireKyc] }, async (req, reply) => {
     const userId = (req.user as { sub: string }).sub;
-    const [deposits, withdrawals] = await Promise.all([
-      prisma.depositOrder.findMany({ where: { userId }, orderBy: { createdAt: 'desc' }, take: 50 }),
-      prisma.withdrawOrder.findMany({ where: { userId }, orderBy: { createdAt: 'desc' }, take: 50 }),
+    const query = z
+      .object({
+        cursor: z.string().min(1).max(512).optional(),
+        limit: z.coerce.number().int().min(1).max(50).default(50),
+      })
+      .parse(req.query);
+    const cursor = query.cursor ? decodeWalletOrderCursor(query.cursor) : null;
+    if (query.cursor && !cursor) {
+      return reply.code(400).send({ error: 'INVALID_ORDER_CURSOR' });
+    }
+
+    const [depositRows, withdrawalRows] = await Promise.all([
+      prisma.depositOrder.findMany({
+        where: {
+          userId,
+          ...(cursor
+            ? {
+                OR: [
+                  { createdAt: { lt: cursor.createdAt } },
+                  ...(cursor.kind === 'deposit'
+                    ? [{ createdAt: cursor.createdAt, id: { lt: cursor.id } }]
+                    : []),
+                ],
+              }
+            : {}),
+        },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        take: query.limit + 1,
+      }),
+      prisma.withdrawOrder.findMany({
+        where: {
+          userId,
+          ...(cursor
+            ? {
+                OR: [
+                  { createdAt: { lt: cursor.createdAt } },
+                  cursor.kind === 'withdrawal'
+                    ? { createdAt: cursor.createdAt, id: { lt: cursor.id } }
+                    : { createdAt: cursor.createdAt },
+                ],
+              }
+            : {}),
+        },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        take: query.limit + 1,
+      }),
     ]);
+    const page = paginateWalletOrders(
+      [
+        ...depositRows.map((order) => ({
+          id: order.id,
+          kind: 'deposit' as const,
+          createdAt: order.createdAt,
+          order,
+        })),
+        ...withdrawalRows.map((order) => ({
+          id: order.id,
+          kind: 'withdrawal' as const,
+          createdAt: order.createdAt,
+          order,
+        })),
+      ],
+      query.limit,
+    );
+    const deposits = page.page.flatMap((item) =>
+      item.kind === 'deposit' ? [item.order] : [],
+    );
+    const withdrawals = page.page.flatMap((item) =>
+      item.kind === 'withdrawal' ? [item.order] : [],
+    );
     return {
+      nextCursor: page.nextCursor,
       deposits: deposits.map((order) => ({
         id: order.id,
+        channel: order.channel,
         amountCents: String(order.amountCents),
         status: order.status,
         rejectReason: order.rejectReason,
         proofUrl: order.proofUrl,
+        payUrl:
+          order.channel === 'VPAY' && order.status === 'PENDING'
+            ? order.payUrl
+            : null,
         createdAt: order.createdAt,
       })),
       withdrawals: withdrawals.map((order) => {
@@ -610,8 +784,9 @@ export async function walletRoutes(app: FastifyInstance) {
         const targetSnapshot = {
           type: account.type,
           institution: account.institution,
-          accountNo: decryptSecret(account.accountNo),
-          accountName: decryptSecret(account.accountName),
+          // 快照同样属于敏感资料；沿用 WithdrawAccount 的密文，后台展示时再解密。
+          accountNo: account.accountNo,
+          accountName: account.accountName,
           channel: account.type === 'BANK' ? 'bank' : 'ewallet',
           feeCents: String(feeCents),
           feeRatio: isFree ? 0 : feeRatio,
@@ -655,6 +830,30 @@ export async function walletRoutes(app: FastifyInstance) {
         return reply.code(400).send({ error: 'INVALID_WITHDRAW_ACCOUNT' });
       }
       if (code === 'IDEMPOTENCY_CONFLICT') {
+        return reply.code(409).send({ error: 'IDEMPOTENCY_CONFLICT' });
+      }
+      if (code === 'P2002') {
+        const concurrent = await prisma.withdrawOrder.findUnique({
+          where: {
+            userId_requestId: { userId, requestId: body.requestId },
+          },
+        });
+        if (
+          concurrent
+          && concurrent.amountCents === amountCents
+          && concurrent.withdrawAccountId === body.accountId
+        ) {
+          const feeCents = withdrawFeeCents(concurrent.targetSnapshot);
+          return {
+            ok: true,
+            orderId: concurrent.id,
+            status: concurrent.status,
+            feeCents: String(feeCents),
+            netCents: String(concurrent.amountCents - feeCents),
+            freeQuota: withdrawUsedFreeQuota(concurrent.targetSnapshot),
+            duplicate: true,
+          };
+        }
         return reply.code(409).send({ error: 'IDEMPOTENCY_CONFLICT' });
       }
       throw e;

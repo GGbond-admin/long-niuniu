@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { api, rm } from '../api';
 import { goBack } from '../lib/nav';
+import { useIsolatedPageScroll } from '../lib/useIsolatedPageScroll';
 
 type RewardData = Awaited<ReturnType<typeof api.rewards>>;
 type RewardItem = RewardData['items'][number];
@@ -78,6 +79,7 @@ export default function Rewards() {
   const [error, setError] = useState('');
   const [retryKey, setRetryKey] = useState(0);
   const [gameTitle, setGameTitle] = useState('当前游戏');
+  const pageScrollRef = useIsolatedPageScroll<HTMLDivElement>();
 
   useEffect(() => {
     let alive = true;
@@ -136,7 +138,7 @@ export default function Rewards() {
   const emptyCopy = EMPTY_COPY[tab];
 
   return (
-    <div className="page subpage rw-page">
+    <div className="page subpage feature-scroll-page rw-page" ref={pageScrollRef}>
       <header className="subpage-header">
         <button type="button" onClick={() => goBack(navigate, location, roomId ? `/game/${roomId}` : '/')} aria-label="返回">
           ‹

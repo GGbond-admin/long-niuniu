@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { settleRound } from './settlement.js';
+import {
+  compareScoreboardHandOrder,
+  continueRoomBankerTrend,
+  settleRound,
+} from './settlement.js';
 import { toCents } from './betting.js';
-import { DEFAULT_HAND_CONFIG } from './hand.js';
+import { DEFAULT_HAND_CONFIG, HandType } from './hand.js';
 
 const handConfig = {
   ...DEFAULT_HAND_CONFIG,
@@ -43,7 +47,7 @@ describe('单局结算（06 文档 §6 / 04 文档 T01–T08）', () => {
     expect(pair.playerNetCents).toBe(toCents('77.6'));
   });
 
-  it('庄钱不足按赔付顺序：高倍优先，赔到归零后其余喝水（下注与庄家赔付规则 四）', () => {
+  it('庄钱不足按赔付顺序：牌型高者优先，赔到归零后其余喝水（下注与庄家赔付规则 四）', () => {
     // 故意乱序传入（D→C→B→A），验证结算不依赖入参顺序
     const r = settleRound({
       bankerUserId: 'banker',
@@ -71,8 +75,60 @@ describe('单局结算（06 文档 §6 / 04 文档 T01–T08）', () => {
     expect(byUser.get('D')!.paidCents).toBe(0);
     expect(byUser.get('D')!.shortfallCents).toBe(toCents('5000'));
     expect(r.potRemainingCents).toBe(0);
-    // 成绩单仍按入参顺序展示
-    expect(r.pairs.map((pair) => pair.userId)).toEqual(['D', 'C', 'B', 'A']);
+    // 成绩单按玩家自己的牌型等级从高到低：豹子 → 金牛9点 → 金牛7点 → 普通9点
+    expect(r.pairs.map((pair) => pair.userId)).toEqual(['A', 'B', 'C', 'D']);
+  });
+
+  it('赔付顺序按牌型等级，不随后台倍数改动而变（金牛调到 20 倍仍排在豹子之后）', () => {
+    const r = settleRound({
+      bankerUserId: 'banker',
+      bankerClaimCents: toCents('0.02'), // 普通 2 点自爆 → 闲家全赢
+      potCents: toCents('100'), // 只够赔一位
+      players: [
+        { userId: 'jinniu', betCents: toCents('100'), claimCents: toCents('0.90') }, // 金牛
+        { userId: 'baozi', betCents: toCents('100'), claimCents: toCents('1.11') }, // 豹子
+      ],
+      handConfig: {
+        ...handConfig,
+        multipliers: { ...handConfig.multipliers, [HandType.JINNIU]: 20 },
+      },
+    });
+    const byUser = new Map(r.pairs.map((pair) => [pair.userId, pair]));
+    expect(byUser.get('baozi')!.paidCents).toBe(toCents('100'));
+    expect(byUser.get('jinniu')!.paidCents).toBe(0);
+  });
+
+  it('成绩单名字按牌型等级从高到低，同级再比点数', () => {
+    const order = [
+      { handType: 'NORMAL', points: 9, claimCents: 900 },
+      { handType: 'DUIZI', points: 4, claimCents: 122 },
+      { handType: 'BAOZI', points: 8, claimCents: 666 },
+      { handType: 'JINNIU', points: 9, claimCents: 90 },
+      { handType: 'JINNIU', points: 5, claimCents: 50 },
+    ].sort(compareScoreboardHandOrder);
+    expect(order.map((line) => line.handType)).toEqual([
+      'BAOZI',
+      'DUIZI',
+      'JINNIU',
+      'JINNIU',
+      'NORMAL',
+    ]);
+    expect(order[2]?.points).toBe(9);
+    expect(order[3]?.points).toBe(5);
+  });
+
+  it('换庄后走势成绩延续上一局，不重置', () => {
+    expect(continueRoomBankerTrend(['9点', '反顺', '对子'], '豹子', 10)).toEqual([
+      '9点',
+      '反顺',
+      '对子',
+      '豹子',
+    ]);
+    expect(continueRoomBankerTrend(['9点', '反顺', '对子'], '1点', 3)).toEqual([
+      '反顺',
+      '对子',
+      '1点',
+    ]);
   });
 
   it('同倍数同点数：红包金额大者先赔（2.35 优先于 1.18）', () => {
@@ -105,6 +161,114 @@ describe('单局结算（06 文档 §6 / 04 文档 T01–T08）', () => {
     const byUser = new Map(r.pairs.map((pair) => [pair.userId, pair]));
     expect(byUser.get('early')!.paidCents).toBe(toCents('100'));
     expect(byUser.get('late')!.paidCents).toBe(0);
+  });
+
+  it('梭哈赢固定 1:1：豹子 17x 也只拿等额下注（普通下注与梭哈下注规则 二）', () => {
+    const r = settleRound({
+      bankerUserId: 'banker',
+      bankerClaimCents: toCents('0.02'), // 庄家自爆
+      potCents: toCents('10000'),
+      players: [
+        { userId: 'sh', betCents: toCents('100'), claimCents: toCents('1.11'), isAllIn: true },
+        { userId: 'normal', betCents: toCents('100'), claimCents: toCents('1.11') },
+      ],
+      handConfig,
+    });
+    const byUser = new Map(r.pairs.map((pair) => [pair.userId, pair]));
+    const sh = byUser.get('sh')!;
+    expect(sh.multiplier).toBe(1);
+    expect(sh.handMultiplier).toBe(17);
+    expect(sh.payableCents).toBe(toCents('100'));
+    expect(sh.paidCents).toBe(toCents('100'));
+    expect(sh.rakeCents).toBe(toCents('3')); // 梭哈同样抽闲赢 3%
+    expect(sh.playerNetCents).toBe(toCents('97'));
+    // 同牌型的普通下注仍按 17 倍
+    expect(byUser.get('normal')!.paidCents).toBe(toCents('1700'));
+  });
+
+  it('梭哈输固定 1 倍：庄家豹子也只从等额预留金扣走注额', () => {
+    const r = settleRound({
+      bankerUserId: 'banker',
+      bankerClaimCents: toCents('1.11'), // 豹子 17x
+      potCents: toCents('10000'),
+      players: [
+        {
+          userId: 'sh',
+          betCents: toCents('100'),
+          claimCents: toCents('1.50'), // 普通 6 点
+          reservedCents: toCents('100'), // 梭哈只需预留 1 倍
+          isAllIn: true,
+        },
+      ],
+      handConfig,
+    });
+    const pair = r.pairs[0];
+    expect(pair.outcome).toBe('BANKER_WIN');
+    expect(pair.multiplier).toBe(1);
+    expect(pair.handMultiplier).toBe(17);
+    expect(pair.payableCents).toBe(toCents('100'));
+    expect(pair.paidCents).toBe(toCents('100'));
+    expect(pair.shortfallCents).toBe(0);
+    expect(pair.playerNetCents).toBe(-toCents('100'));
+    expect(pair.rakeCents).toBe(toCents('5'));
+    expect(pair.bankerNetCents).toBe(toCents('95'));
+  });
+
+  it('庄钱不足：梭哈与普通同队排序，按各自牌型等级排（梭哈豹子先于普通牛牛）', () => {
+    const r = settleRound({
+      bankerUserId: 'banker',
+      bankerClaimCents: toCents('0.02'),
+      potCents: toCents('100'), // 只够赔梭哈那一位
+      players: [
+        { userId: 'normal', betCents: toCents('100'), claimCents: toCents('1.18') }, // 牛牛 10x
+        { userId: 'sh', betCents: toCents('100'), claimCents: toCents('1.11'), isAllIn: true }, // 豹子 17x → 1:1
+      ],
+      handConfig,
+    });
+    const byUser = new Map(r.pairs.map((pair) => [pair.userId, pair]));
+    expect(byUser.get('sh')!.paidCents).toBe(toCents('100'));
+    expect(byUser.get('normal')!.paidCents).toBe(0);
+    expect(byUser.get('normal')!.shortfallCents).toBe(toCents('1000'));
+  });
+
+  it('梭哈仍走免死与自爆判定，只是赔付额按 1 倍', () => {
+    const mianSi = settleRound({
+      bankerUserId: 'banker',
+      bankerClaimCents: toCents('1.11'),
+      potCents: toCents('10000'),
+      players: [
+        { userId: 'sh', betCents: toCents('100'), claimCents: toCents('0.01'), isAllIn: true },
+      ],
+      handConfig,
+    });
+    expect(mianSi.pairs[0]).toMatchObject({
+      outcome: 'TIE',
+      multiplier: 0,
+      payableCents: 0,
+      rakeCents: 0,
+    });
+
+    const bust = settleRound({
+      bankerUserId: 'banker',
+      bankerClaimCents: toCents('1.11'),
+      potCents: toCents('10000'),
+      players: [
+        {
+          userId: 'sh',
+          betCents: toCents('100'),
+          claimCents: toCents('0.03'), // 3 点自爆
+          reservedCents: toCents('100'),
+          isAllIn: true,
+        },
+      ],
+      handConfig,
+    });
+    expect(bust.pairs[0]).toMatchObject({
+      outcome: 'BANKER_WIN',
+      isBustPlayer: true,
+      multiplier: 1,
+      paidCents: toCents('100'),
+    });
   });
 
   it('抽水分侧：玩家赢 3%、庄家赢 5%，与利润池文档一致', () => {

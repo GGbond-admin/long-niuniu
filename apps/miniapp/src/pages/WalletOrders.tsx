@@ -1,9 +1,17 @@
 import { useEffect, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { api, rm } from '../api';
+import { formatDateTime } from '../lib/datetime';
 import { backToTab } from '../lib/nav';
+import { openExternalLink } from '../telegram';
 
 type Orders = Awaited<ReturnType<typeof api.walletOrders>>;
+
+function mergeById<T extends { id: string }>(current: T[], older: T[]): T[] {
+  return Array.from(
+    new Map([...current, ...older].map((item) => [item.id, item])).values(),
+  );
+}
 
 export default function WalletOrders() {
   const navigate = useNavigate();
@@ -11,6 +19,8 @@ export default function WalletOrders() {
   const [orders, setOrders] = useState<Orders | null>(null);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  const [olderError, setOlderError] = useState('');
 
   useEffect(() => {
     api
@@ -19,6 +29,28 @@ export default function WalletOrders() {
       .catch((err) => setError((err as Error).message || '工单加载失败'))
       .finally(() => setLoading(false));
   }, []);
+
+  async function loadOlder() {
+    if (!orders || loadingOlder) return;
+    if (!orders.nextCursor) return;
+    setLoadingOlder(true);
+    setOlderError('');
+    try {
+      const page = await api.walletOrders({ cursor: orders.nextCursor });
+      setOrders((current) => {
+        if (!current) return current;
+        return {
+          deposits: mergeById(current.deposits, page.deposits),
+          withdrawals: mergeById(current.withdrawals, page.withdrawals),
+          nextCursor: page.nextCursor,
+        };
+      });
+    } catch (err) {
+      setOlderError((err as Error).message || '更早工单加载失败');
+    } finally {
+      setLoadingOlder(false);
+    }
+  }
 
   const rows = [
     ...(orders?.deposits ?? []).map((item) => ({ ...item, kind: '充值' as const })),
@@ -60,7 +92,7 @@ export default function WalletOrders() {
                   <strong>
                     {order.kind} RM {rm(order.amountCents)}
                   </strong>
-                  <small>{new Date(order.createdAt).toLocaleString('zh-MY')}</small>
+                  <small>{formatDateTime(order.createdAt)}</small>
                   {order.kind === '提现' && order.status !== 'REJECTED' && (
                     <small>
                       {order.status === 'COMPLETED' ? '实际' : '预计'}到账 RM{' '}
@@ -76,6 +108,15 @@ export default function WalletOrders() {
                   {order.kind === '提现' && order.status === 'REJECTED' && (
                     <small>提现金额已退回可用余额</small>
                   )}
+                  {order.kind === '充值' && order.status === 'PENDING' && order.payUrl && (
+                    <button
+                      type="button"
+                      className="text-link-btn"
+                      onClick={() => openExternalLink(order.payUrl!)}
+                    >
+                      继续支付
+                    </button>
+                  )}
                 </div>
                 <span className={`status ${order.status.toLowerCase()}`}>
                   {{ PENDING: '待处理', COMPLETED: '已完成', REJECTED: '已驳回' }[order.status] ??
@@ -86,6 +127,19 @@ export default function WalletOrders() {
           )}
         </div>
       )}
+      {olderError && <div className="inline-alert error">{olderError}</div>}
+      {!loading &&
+        !error &&
+        orders?.nextCursor && (
+          <button
+            type="button"
+            className="fd-more"
+            disabled={loadingOlder}
+            onClick={() => void loadOlder()}
+          >
+            {loadingOlder ? '加载中…' : '加载更早工单'}
+          </button>
+        )}
     </div>
   );
 }

@@ -9,6 +9,7 @@ import {
   IconList,
   IconPlus,
 } from '../components/Icons';
+import { formatDateTime } from '../lib/datetime';
 import { formatLedgerAmount, ledgerLabel } from '../lib/ledger';
 
 type WalletData = Awaited<ReturnType<typeof api.wallet>>;
@@ -222,7 +223,7 @@ export default function Wallet({
               <div className="transaction-icon">RM</div>
               <div>
                 <strong>{ledgerLabel(entry.refType)}</strong>
-                <small>{new Date(entry.createdAt).toLocaleString('zh-MY')}</small>
+                <small>{formatDateTime(entry.createdAt)}</small>
               </div>
               <b className={entry.direction === 'CREDIT' ? 'positive' : 'negative'}>
                 {formatLedgerAmount(entry.direction, entry.amountCents)}
