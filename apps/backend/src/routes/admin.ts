@@ -1,3 +1,4 @@
+import { RoomStartMode } from '@prisma/client';
 import type { FastifyInstance } from 'fastify';
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { compare, hash } from 'bcryptjs';
@@ -75,6 +76,26 @@ const configSchema = z.object({
 const gameCodeSchema = z.string().refine(isSupportedGameCode, {
   message: 'GAME_NOT_SUPPORTED',
 });
+
+async function syncRoomStartModeFromRoundConfig(
+  gameCode: string,
+  value: unknown,
+): Promise<void> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return;
+  const autoStart = (value as { autoStart?: unknown }).autoStart;
+  if (autoStart === true) {
+    await prisma.room.updateMany({
+      where: { gameCode },
+      data: { roundStartMode: RoomStartMode.AUTO },
+    });
+  } else if (autoStart === false) {
+    await prisma.room.updateMany({
+      where: { gameCode, roundStartMode: RoomStartMode.AUTO },
+      data: { roundStartMode: RoomStartMode.MANUAL },
+    });
+  }
+}
+
 const orderReviewSchema = z
   .object({
     action: z.enum(['complete', 'reject']),
@@ -430,6 +451,9 @@ export async function adminRoutes(app: FastifyInstance) {
       deepMerge(before?.value ?? {}, value),
     );
     await setGameConfig(gameCode, key, validated, adminId);
+    if (key === 'round') {
+      await syncRoomStartModeFromRoundConfig(gameCode, validated);
+    }
     await prisma.auditLog.create({
       data: {
         adminId,
@@ -473,6 +497,9 @@ export async function adminRoutes(app: FastifyInstance) {
       deepMerge(before?.value ?? {}, value),
     );
     await setGameConfig(SUPREME_NIUNIU_GAME_CODE, key, validated, adminId);
+    if (key === 'round') {
+      await syncRoomStartModeFromRoundConfig(SUPREME_NIUNIU_GAME_CODE, validated);
+    }
     await prisma.auditLog.create({
       data: {
         adminId,

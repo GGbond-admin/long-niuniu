@@ -32,6 +32,13 @@ vi.mock('./gameSettings.js', () => ({
 }));
 vi.mock('./bidAuction.js', () => ({ announceBidPlaced: vi.fn() }));
 vi.mock('./chatCommands.js', () => ({ runBankerDiceCeremony: vi.fn() }));
+vi.mock('./bankerContinuationFlow.js', () => ({
+  continueBankerWithFallback: vi.fn(),
+}));
+vi.mock('./roomChatPolicy.js', () => ({
+  ROOM_ANNOUNCED_FINISHED: 'ROOM_ANNOUNCED_FINISHED',
+  getRoomChatPolicy: vi.fn(async () => ({ muted: false, stage: null })),
+}));
 vi.mock('./virtualPlayers.js', () => ({
   listEnabledVirtualsForRoom: vi.fn(async () =>
     mocks.prisma.virtualPlayer.findMany(),

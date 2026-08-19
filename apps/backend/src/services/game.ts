@@ -7,6 +7,7 @@ import {
   PacketChannel,
   Prisma,
   RoundPhase,
+  RoomStartMode,
   UserKind,
   UserStatus,
 } from '@prisma/client';
@@ -25,9 +26,9 @@ import {
   effectiveTurnoverForPlayer,
 } from '../engine/rebate.js';
 import {
-  continueRoomBankerTrend,
+  bankerTrendLabelFromSummary,
+  continueBankerTrend,
   settleRound as calculateSettlement,
-  trendFromBankerSummary,
 } from '../engine/settlement.js';
 import { env } from '../config.js';
 import { blindIndex, decryptSecret, encryptSecret, normalizeIdentity } from '../lib/crypto.js';
@@ -40,6 +41,10 @@ import {
   setAssistantService,
   settingsSnapshot,
 } from './gameSettings.js';
+import {
+  CONTINUATION_REJECTED_INSUFFICIENT,
+  ROOM_ANNOUNCED_FINISHED,
+} from './roomChatPolicy.js';
 import { freezeBanker, transfer, unfreeze } from './wallet.js';
 
 /** 与 VirtualPlayer 能力字段对齐；避免 circular import virtualPlayers.ts */
@@ -79,6 +84,14 @@ export class GameError extends Error {
   ) {
     super(code);
   }
+}
+
+export type RoundStartSource = 'MANUAL' | 'AUTO' | 'REPLACEMENT';
+
+function roomModeAllowsStart(mode: RoomStartMode, source: RoundStartSource): boolean {
+  if (source === 'MANUAL') return mode === RoomStartMode.MANUAL;
+  if (source === 'AUTO') return mode === RoomStartMode.AUTO;
+  return mode !== RoomStartMode.STOPPED;
 }
 
 function safeNumber(value: bigint, field: string): number {
@@ -280,7 +293,12 @@ export async function ensureWaitingRound(roomId: string) {
   });
 }
 
-export async function startRound(roundId: string, force = false, actorId?: string) {
+export async function startRound(
+  roundId: string,
+  force = false,
+  actorId?: string,
+  source: RoundStartSource = 'MANUAL',
+) {
   const identity = await prisma.round.findUnique({
     where: { id: roundId },
     select: { room: { select: { gameCode: true } } },
@@ -295,6 +313,19 @@ export async function startRound(roundId: string, force = false, actorId?: strin
     if (!round) throw new GameError('ROUND_NOT_FOUND');
     if (round.phase !== RoundPhase.WAITING) throw new GameError('INVALID_PHASE');
     if (round.room.status !== 'ACTIVE') throw new GameError('ROOM_PAUSED');
+    if (round.room.chatMutedAt) {
+      throw new GameError('ROOM_GLOBAL_MUTED', {
+        mutedAt: round.room.chatMutedAt.toISOString(),
+        reason: round.room.chatMuteReason,
+      });
+    }
+    const roomStartMode = round.room.roundStartMode ?? RoomStartMode.MANUAL;
+    if (!roomModeAllowsStart(roomStartMode, source)) {
+      throw new GameError('ROUND_START_DISABLED', {
+        roomStartMode,
+        source,
+      });
+    }
 
     const eligibleCount = await tx.roomMember.count({
       where: {
@@ -331,20 +362,46 @@ export async function startRound(roundId: string, force = false, actorId?: strin
 }
 
 /**
- * 竞标防狙击：最后 5 秒内出现新的最高价时，把剩余时间拉回 5 秒，
- * 直到无人再加价为止，最高有效价者上庄。
+ * 竞标防狙击：主计时最后 5 秒内出现有效加价时，把剩余时间拉回 5 秒。
+ * 3/2/1 已开始后仍接受加价，但不再打断最终倒数。
  */
 const BID_EXTENSION_WINDOW_MS = 5_000;
+/** 首口之后，玩家出价必须至少比当前最高价高 RM100。 */
+export const BANKER_BID_INCREMENT_CENTS = 10_000n;
 
 export async function placeBankerBid(roundId: string, userId: string, amountCents: bigint) {
   if (amountCents <= 0n) throw new GameError('INVALID_AMOUNT');
+  if (amountCents % 100n !== 0n) throw new GameError('BID_MUST_BE_INTEGER');
   return serializable(async (tx) => {
     const round = await tx.round.findUnique({ where: { id: roundId } });
     if (!round) throw new GameError('ROUND_NOT_FOUND');
     if (round.phase !== RoundPhase.BANKER_BID) throw new GameError('INVALID_PHASE');
-    if (!round.bidEndsAt || round.bidEndsAt <= new Date()) throw new GameError('PHASE_ENDED');
+    if (!round.bidEndsAt) throw new GameError('PHASE_ENDED');
+    // 名义计时结束后仍开放最后喊价；3、2、1 播完并公布最终名单后才封盘。
+    const finalListSent = await tx.roundEvent.findFirst({
+      where: { roundId, type: 'BID_FINAL_LIST' },
+      select: { id: true },
+    });
+    if (finalListSent) throw new GameError('PHASE_ENDED');
+
+    const topBid = await tx.bankerBid.findFirst({
+      where: { roundId },
+      orderBy: [{ amountCents: 'desc' }, { createdAt: 'asc' }],
+      select: { amountCents: true },
+    });
+    if (topBid) {
+      const minimumCents = topBid.amountCents + BANKER_BID_INCREMENT_CENTS;
+      if (amountCents < minimumCents) {
+        throw new GameError('BID_INCREMENT_TOO_LOW', {
+          currentCents: topBid.amountCents,
+          minimumCents,
+          incrementCents: BANKER_BID_INCREMENT_CENTS,
+        });
+      }
+    }
+    const acceptedAmountCents = amountCents;
     const settings = parseSettingsSnapshot(round.configSnapshot);
-    const amount = safeNumber(amountCents, 'bid');
+    const amount = safeNumber(acceptedAmountCents, 'bid');
     if (
       amount < settings.round.bankerBidMinCents ||
       amount > settings.round.bankerBidMaxCents
@@ -357,26 +414,26 @@ export async function placeBankerBid(roundId: string, userId: string, amountCent
     const user = await requireGameUser(tx, userId, round.roomId, 'bid');
     const baseFees =
       bankerSeatFee(amount, settings.fees) + settings.fees.serviceFeeCents;
-    if (user.wallet.availableCents < amountCents + BigInt(baseFees)) {
+    if (user.wallet.availableCents < acceptedAmountCents + BigInt(baseFees)) {
       throw new GameError('INSUFFICIENT_BALANCE');
     }
     // 收官前 5 秒内若出现新的最高价，则把倒计时重置为 5 秒，给他人反超空间
     const now = Date.now();
     let extendedEndsAt: Date | null = null;
     if (round.bidEndsAt.getTime() - now <= BID_EXTENSION_WINDOW_MS) {
-      const topBid = await tx.bankerBid.findFirst({
-        where: { roundId },
-        orderBy: [{ amountCents: 'desc' }, { createdAt: 'asc' }],
-        select: { amountCents: true },
+      // 3 已经播出后保持 3→2→1 连续推进；期间仍可继续按 RM100 加价。
+      const finalCountdownStarted = await tx.roundEvent.findFirst({
+        where: { roundId, type: 'BID_COUNTDOWN_3' },
+        select: { id: true },
       });
-      if (!topBid || amountCents > topBid.amountCents) {
+      if (!finalCountdownStarted) {
         extendedEndsAt = new Date(now + BID_EXTENSION_WINDOW_MS);
       }
     }
     const bid = await tx.bankerBid.upsert({
       where: { roundId_userId: { roundId, userId } },
-      create: { roundId, userId, amountCents },
-      update: { amountCents, won: false, createdAt: new Date() },
+      create: { roundId, userId, amountCents: acceptedAmountCents },
+      update: { amountCents: acceptedAmountCents, won: false, createdAt: new Date() },
     });
     if (extendedEndsAt) {
       await tx.round.update({
@@ -389,12 +446,18 @@ export async function placeBankerBid(roundId: string, userId: string, amountCent
         'BID_TIME_EXTENDED',
         {
           bidEndsAt: extendedEndsAt.toISOString(),
-          amountCents: String(amountCents),
+          amountCents: String(acceptedAmountCents),
         },
         userId,
       );
     }
-    await event(tx, roundId, 'BANKER_BID_PLACED', { amountCents: String(amountCents) }, userId);
+    await event(
+      tx,
+      roundId,
+      'BANKER_BID_PLACED',
+      { amountCents: String(acceptedAmountCents) },
+      userId,
+    );
     return { ...bid, extendedEndsAt };
   });
 }
@@ -739,12 +802,42 @@ async function cancelRoundTx(tx: Tx, roundId: string, reason: string, actorId?: 
     );
     await tx.bet.update({ where: { id: bet.id }, data: { status: BetStatus.REFUNDED } });
   }
-  if (round.bankerId && round.bankerReservedCents > 0n) {
+  let bankerRefundCents = round.bankerReservedCents;
+  if (round.bankerId && round.packet?.sentAt) {
+    const packetFeePrepaid = await packetEscrowWasPrepaid(tx, {
+      roundId: round.id,
+      bankerId: round.bankerId,
+      totalCents: round.packet.totalCents,
+    });
+    if (packetFeePrepaid) {
+      if (bankerRefundCents < round.packet.totalCents) {
+        throw new GameError('ROUND_INCOMPLETE');
+      }
+      bankerRefundCents -= round.packet.totalCents;
+      if (round.packet.channel === PacketChannel.TNG) {
+        await transfer(tx, {
+          amountCents: round.packet.totalCents,
+          from: { accountType: AccountType.ADJUST_CLEARING },
+          to: {
+            userId: round.bankerId,
+            accountType: AccountType.USER_AVAILABLE,
+          },
+          refType: 'cancelled_packet_fee_refund',
+          refId: round.packet.id,
+          roundId: round.id,
+          idempotencyKey: `cancelled-packet-fee-refund:${round.packet.id}`,
+          operatorId: actorId,
+          memo: reason,
+        });
+      }
+    }
+  }
+  if (round.bankerId && bankerRefundCents > 0n) {
     await unfreeze(
       tx,
       round.bankerId,
       AccountType.USER_FREEZE_BANKER,
-      round.bankerReservedCents,
+      bankerRefundCents,
       round.id,
       'round_cancel_refund',
       `cancel:banker:${round.id}`,
@@ -801,6 +894,52 @@ export async function pauseAssistantService(roomId: string, reason: string, acto
     assistantEnabled: roundConfig.assistantEnabled,
     autoStart: roundConfig.autoStart,
   };
+}
+
+/**
+ * 设置房间开局模式。STOPPED 先关闭数据库门闩再更新配置，保证多实例调度不会抢开下一局；
+ * MANUAL/AUTO 则先恢复播报配置，再开放对应开局来源。
+ */
+export async function setRoomStartMode(
+  roomId: string,
+  mode: RoomStartMode,
+  actorId?: string,
+) {
+  const before = await prisma.room.findUnique({ where: { id: roomId } });
+  if (!before) throw new GameError('ROOM_NOT_FOUND');
+  if (mode !== RoomStartMode.STOPPED && before.chatMutedAt) {
+    throw new GameError('ROOM_GLOBAL_MUTED', {
+      mutedAt: before.chatMutedAt.toISOString(),
+      reason: before.chatMuteReason,
+    });
+  }
+
+  if (mode === RoomStartMode.STOPPED) {
+    const room = await prisma.room.update({
+      where: { id: roomId },
+      data: { roundStartMode: mode },
+    });
+    const roundConfig = await setAssistantService(
+      room.gameCode,
+      { assistantEnabled: true, autoStart: false },
+      actorId,
+    );
+    return { before, room, roundConfig };
+  }
+
+  const roundConfig = await setAssistantService(
+    before.gameCode,
+    {
+      assistantEnabled: true,
+      autoStart: mode === RoomStartMode.AUTO,
+    },
+    actorId,
+  );
+  const room = await prisma.room.update({
+    where: { id: roomId },
+    data: { roundStartMode: mode },
+  });
+  return { before, room, roundConfig };
 }
 
 /** @deprecated 使用 pauseAssistantService */
@@ -882,11 +1021,19 @@ export async function closeBetting(roundId: string) {
       participants,
       packetTotalCents: String(totalCents),
     });
+    const repostStartsAt = Date.now();
+    const repostEndsAt =
+      repostStartsAt + settings.round.repostWindowSeconds * 1_000;
+    const diceEndsAt =
+      repostEndsAt + settings.round.bankerDiceTimeoutSeconds * 1_000;
     await event(tx, round.id, 'BANKER_REPOST_WINDOW', {
-      endsAt: new Date(
-        Date.now() + settings.round.repostWindowSeconds * 1_000,
-      ).toISOString(),
+      endsAt: new Date(repostEndsAt).toISOString(),
       seconds: settings.round.repostWindowSeconds,
+    });
+    await event(tx, round.id, 'BANKER_DICE_DEADLINE', {
+      startsAt: new Date(repostEndsAt).toISOString(),
+      endsAt: new Date(diceEndsAt).toISOString(),
+      seconds: settings.round.bankerDiceTimeoutSeconds,
     });
     return updated;
   });
@@ -961,6 +1108,12 @@ export async function publishPacket(params: {
     const settings = parseSettingsSnapshot(round.configSnapshot);
     const now = new Date();
     const expiresAt = new Date(now.getTime() + settings.round.claimDurationSeconds * 1000);
+    await ensurePacketEscrow(tx, {
+      roundId: round.id,
+      bankerId: round.bankerId,
+      packetId: round.packet.id,
+      totalCents: round.packet.totalCents,
+    });
     await transfer(tx, {
       amountCents: round.packet.totalCents,
       from: { accountType: AccountType.PLATFORM_RESERVE },
@@ -1161,6 +1314,118 @@ export function splitRemainingCents(total: bigint, count: number): bigint[] {
 }
 
 /**
+ * 代包费在关盘时已经冻结。任何红包离开平台前，先把整包费用转入
+ * 红包备付金；结算继续使用同一幂等键，只会回放而不会重复收费。
+ */
+async function ensurePacketEscrow(
+  tx: Tx,
+  input: {
+    roundId: string;
+    bankerId: string | null;
+    packetId: string;
+    totalCents: bigint;
+  },
+) {
+  if (!input.bankerId) throw new GameError('BANKER_NOT_SET');
+  try {
+    await transfer(tx, {
+      amountCents: input.totalCents,
+      from: {
+        userId: input.bankerId,
+        accountType: AccountType.USER_FREEZE_BANKER,
+      },
+      to: { accountType: AccountType.PLATFORM_RESERVE },
+      refType: 'fee_packet_agent',
+      refId: input.roundId,
+      roundId: input.roundId,
+      idempotencyKey: `settle:fee_packet_agent:${input.roundId}`,
+      memo: `packet-escrow:${input.packetId}`,
+    });
+  } catch (error) {
+    if ((error as { code?: string }).code === 'INSUFFICIENT_BALANCE') {
+      throw new GameError('PACKET_ESCROW_UNAVAILABLE');
+    }
+    throw error;
+  }
+}
+
+async function packetEscrowWasPrepaid(
+  tx: Tx,
+  input: {
+    roundId: string;
+    bankerId: string;
+    totalCents: bigint;
+  },
+) {
+  const posting = await tx.ledgerEntry.findUnique({
+    where: {
+      idempotencyKey: `settle:fee_packet_agent:${input.roundId}:out`,
+    },
+    select: {
+      userId: true,
+      accountType: true,
+      direction: true,
+      amountCents: true,
+      refType: true,
+      refId: true,
+      roundId: true,
+    },
+  });
+  if (!posting) return false;
+  if (
+    posting.userId !== input.bankerId
+    || posting.accountType !== AccountType.USER_FREEZE_BANKER
+    || posting.direction !== 'DEBIT'
+    || posting.amountCents !== input.totalCents
+    || posting.refType !== 'fee_packet_agent'
+    || posting.refId !== input.roundId
+    || posting.roundId !== input.roundId
+  ) {
+    throw new GameError('IDEMPOTENCY_CONFLICT');
+  }
+  return true;
+}
+
+async function payInternalPacketClaim(
+  tx: Tx,
+  input: {
+    packetId: string;
+    roundId: string;
+    claimId: string;
+    userId: string;
+    amountCents: bigint;
+    tail: boolean;
+  },
+) {
+  try {
+    await transfer(tx, {
+      amountCents: input.amountCents,
+      from: { accountType: AccountType.PLATFORM_RESERVE },
+      to: { userId: input.userId, accountType: AccountType.USER_AVAILABLE },
+      refType: 'packet_internal_claim',
+      refId: input.claimId,
+      roundId: input.roundId,
+      idempotencyKey: input.tail
+        ? `pkt-internal-tail:${input.packetId}:${input.userId}`
+        : `pkt-internal-claim:${input.packetId}:${input.userId}`,
+    });
+  } catch (error) {
+    if ((error as { code?: string }).code === 'INSUFFICIENT_BALANCE') {
+      throw new GameError('PACKET_ESCROW_UNAVAILABLE');
+    }
+    throw error;
+  }
+}
+
+export function balanceBeforePrepaidPacketFee(
+  currentBalanceCents: bigint,
+  packetFeeCents: bigint,
+  prepaid: boolean,
+) {
+  return currentBalanceCents + (prepaid ? packetFeeCents : 0n);
+}
+
+/**
  * 抢包超时后：若开启自动认尾包，为未认额的庄/闲补录金额（source=AUTO_TAIL）。
  * 内部红包强制补录（否则牌局无法凑齐结算），且补录金额同步转入玩家余额。
  * 返回补录的 userId 列表，供上层广播。
@@ -1220,6 +1485,14 @@ export async function applyAutoTailClaims(roundId: string): Promise<string[]> {
     if (remaining <= 0n) return [];
 
     const parts = splitRemainingCents(remaining, missing.length).filter((n) => n > 0n);
+    if (round.packet.channel === PacketChannel.INTERNAL) {
+      await ensurePacketEscrow(tx, {
+        roundId: round.id,
+        bankerId: round.bankerId,
+        packetId: round.packet.id,
+        totalCents: round.packet.totalCents,
+      });
+    }
     const assigned: string[] = [];
     for (let i = 0; i < parts.length; i++) {
       const userId = missing[i]!;
@@ -1245,14 +1518,13 @@ export async function applyAutoTailClaims(roundId: string): Promise<string[]> {
         },
       });
       if (round.packet.channel === PacketChannel.INTERNAL) {
-        await transfer(tx, {
-          amountCents,
-          from: { accountType: AccountType.PLATFORM_RESERVE },
-          to: { userId, accountType: AccountType.USER_AVAILABLE },
-          refType: 'packet_internal_claim',
-          refId: claim.id,
+        await payInternalPacketClaim(tx, {
+          packetId: round.packet.id,
           roundId: round.id,
-          idempotencyKey: `pkt-internal-tail:${round.packet.id}:${userId}`,
+          claimId: claim.id,
+          userId,
+          amountCents,
+          tail: true,
         });
       }
       await event(tx, round.id, 'CLAIM_AUTO_TAIL', {
@@ -1447,11 +1719,24 @@ export async function claimInternalPacket(packetId: string, userId: string) {
   return serializable(async (tx) => {
     const packet = await tx.packet.findUnique({
       where: { id: packetId },
-      include: { round: { include: { claims: true } } },
+      include: {
+        round: {
+          include: {
+            claims: true,
+            room: { select: { chatMutedAt: true, chatMuteReason: true } },
+          },
+        },
+      },
     });
     if (!packet) throw new GameError('PACKET_NOT_FOUND');
     if (packet.channel !== PacketChannel.INTERNAL) throw new GameError('PACKET_NOT_INTERNAL');
     const round = packet.round;
+    if (round.room?.chatMutedAt) {
+      throw new GameError('ROOM_GLOBAL_MUTED', {
+        mutedAt: round.room.chatMutedAt.toISOString(),
+        reason: round.room.chatMuteReason,
+      });
+    }
     const existing = round.claims.find((claim) => claim.userId === userId);
     if (existing) {
       throw new GameError('ALREADY_CLAIMED', { amountCents: String(existing.amountCents) });
@@ -1480,6 +1765,12 @@ export async function claimInternalPacket(packetId: string, userId: string) {
 
     const amountCents = internalRandomShare(remainingCents, remainingCount);
     const hand = evaluateHand(safeNumber(amountCents, 'claim'));
+    await ensurePacketEscrow(tx, {
+      roundId: round.id,
+      bankerId: round.bankerId,
+      packetId: packet.id,
+      totalCents: packet.totalCents,
+    });
     const claim = await tx.claim.create({
       data: {
         packetId: packet.id,
@@ -1493,14 +1784,13 @@ export async function claimInternalPacket(packetId: string, userId: string) {
         confirmedAt: new Date(),
       },
     });
-    await transfer(tx, {
-      amountCents,
-      from: { accountType: AccountType.PLATFORM_RESERVE },
-      to: { userId, accountType: AccountType.USER_AVAILABLE },
-      refType: 'packet_internal_claim',
-      refId: claim.id,
+    await payInternalPacketClaim(tx, {
+      packetId: packet.id,
       roundId: round.id,
-      idempotencyKey: `pkt-internal-claim:${packet.id}:${userId}`,
+      claimId: claim.id,
+      userId,
+      amountCents,
+      tail: false,
     });
     await event(tx, round.id, 'CLAIM_INTERNAL', {
       userId,
@@ -1869,7 +2159,16 @@ export async function settleGameRound(roundId: string, actorId?: string) {
       if (!bet.user.wallet) throw new GameError('WALLET_NOT_FOUND');
       beforeBalances.set(bet.userId, totalBalance(bet.user.wallet));
     }
-    const bankerBefore = totalBalance(banker.wallet);
+    const packetFeePrepaid = await packetEscrowWasPrepaid(tx, {
+      roundId: round.id,
+      bankerId: round.bankerId,
+      totalCents: round.packet.totalCents,
+    });
+    const bankerBefore = balanceBeforePrepaidPacketFee(
+      totalBalance(banker.wallet),
+      round.packet.totalCents,
+      packetFeePrepaid,
+    );
     const calculation = calculateSettlement({
       bankerUserId: round.bankerId,
       bankerClaimCents: safeNumber(bankerClaim.amountCents, 'bankerClaim'),
@@ -1883,6 +2182,7 @@ export async function settleGameRound(roundId: string, actorId?: string) {
         isAllIn: bet.isAllIn,
       })),
       participantCount: round.bets.length + 1,
+      packetFeeCents: safeNumber(round.packet.totalCents, 'packetFee'),
       handConfig: settings.hand,
       feeConfig: settings.fees,
     });
@@ -2136,34 +2436,36 @@ export async function settleGameRound(roundId: string, actorId?: string) {
       day,
     );
 
-    const [existingStat, lastFinished] = await Promise.all([
+    const trendHistoryLimit = Math.max(1, Math.trunc(settings.round.trendLength));
+    const [existingStat, previousBankerRounds] = await Promise.all([
       tx.bankerStat.findUnique({
         where: { userId_roomId: { userId: round.bankerId, roomId: round.roomId } },
       }),
-      tx.round.findFirst({
+      tx.round.findMany({
         where: {
           roomId: round.roomId,
+          bankerId: round.bankerId,
           phase: RoundPhase.FINISHED,
           id: { not: round.id },
         },
         orderBy: { seqNo: 'desc' },
+        take: trendHistoryLimit,
         select: { scoreboard: { select: { bankerSummary: true } } },
       }),
     ]);
-    const roomTrend = trendFromBankerSummary(lastFinished?.scoreboard?.bankerSummary);
-    const previousTrend = roomTrend.length
-      ? roomTrend
-      : Array.isArray(existingStat?.trendRecent)
-        ? (existingStat.trendRecent as string[])
-        : [];
+    const previousTrend = previousBankerRounds
+      .slice()
+      .reverse()
+      .map((item) => bankerTrendLabelFromSummary(item.scoreboard?.bankerSummary))
+      .filter((item): item is string => item !== null);
     const bankerLabel =
       calculation.bankerHand.type === 'NORMAL'
         ? `${calculation.bankerHand.points}点`
         : HAND_LABEL[calculation.bankerHand.type];
-    const trend = continueRoomBankerTrend(
+    const trend = continueBankerTrend(
       previousTrend,
       bankerLabel,
-      settings.round.trendLength,
+      trendHistoryLimit,
     );
     const resetDaily = existingStat?.todayDate !== day;
     const bankerStat = await tx.bankerStat.upsert({
@@ -2286,18 +2588,120 @@ export async function settleGameRound(roundId: string, actorId?: string) {
   });
 }
 
+function continuationReserveCents(
+  potCents: bigint,
+  settings: ReturnType<typeof parseSettingsSnapshot>,
+): bigint {
+  const pot = safeNumber(potCents, 'pot');
+  const baseFees = bankerSeatFee(pot, settings.fees) + settings.fees.serviceFeeCents;
+  return potCents + BigInt(baseFees);
+}
+
+export async function bankerContinuationFunding(previousRoundId: string) {
+  const previous = await prisma.round.findUnique({
+    where: { id: previousRoundId },
+    select: {
+      id: true,
+      roomId: true,
+      bankerId: true,
+      potCents: true,
+      configSnapshot: true,
+    },
+  });
+  if (!previous) throw new GameError('ROUND_NOT_FOUND');
+  if (!previous.bankerId) throw new GameError('BANKER_NOT_SET');
+  if (!previous.configSnapshot) throw new GameError('ROUND_CONFIG_SNAPSHOT_MISSING');
+  const banker = await prisma.user.findUnique({
+    where: { id: previous.bankerId },
+    select: {
+      id: true,
+      uid: true,
+      nickname: true,
+      tgUsername: true,
+      kind: true,
+      wallet: { select: { availableCents: true } },
+      virtualPlayer: {
+        select: { enabled: true, canContinue: true },
+      },
+    },
+  });
+  if (!banker) throw new GameError('BANKER_NOT_FOUND');
+  if (!banker.wallet) throw new GameError('WALLET_NOT_FOUND');
+  const settings = parseSettingsSnapshot(previous.configSnapshot);
+  const requiredCents = continuationReserveCents(previous.potCents, settings);
+  const availableCents = banker.wallet.availableCents;
+  return {
+    roomId: previous.roomId,
+    bankerId: banker.id,
+    uid: banker.uid,
+    nickname: banker.nickname,
+    tgUsername: banker.tgUsername,
+    requiredCents,
+    availableCents,
+    sufficient: availableCents >= requiredCents,
+    autoFundableVirtual:
+      banker.kind === UserKind.VIRTUAL
+      && banker.virtualPlayer?.enabled === true
+      && banker.virtualPlayer.canContinue,
+  };
+}
+
 export async function continueBanker(previousRoundId: string, userId: string) {
   const previous = await prisma.round.findUnique({ where: { id: previousRoundId } });
   if (!previous) throw new GameError('ROUND_NOT_FOUND');
   const waiting = await ensureWaitingRound(previous.roomId);
   return serializable(async (tx) => {
     const lastRound = await tx.round.findUnique({ where: { id: previousRoundId } });
-    const nextRound = await tx.round.findUnique({ where: { id: waiting.id } });
+    const nextRound = await tx.round.findUnique({
+      where: { id: waiting.id },
+      include: {
+        room: {
+          select: {
+            roundStartMode: true,
+            chatMutedAt: true,
+            chatMuteReason: true,
+          },
+        },
+      },
+    });
     if (!lastRound || !nextRound) throw new GameError('ROUND_NOT_FOUND');
+    if (nextRound.room.chatMutedAt) {
+      throw new GameError('ROOM_GLOBAL_MUTED', {
+        mutedAt: nextRound.room.chatMutedAt.toISOString(),
+        reason: nextRound.room.chatMuteReason,
+      });
+    }
+    if (nextRound.room.roundStartMode !== RoomStartMode.AUTO) {
+      throw new GameError('ROUND_START_DISABLED', {
+        roomStartMode: nextRound.room.roundStartMode,
+        source: 'AUTO',
+      });
+    }
     if (!lastRound.configSnapshot) throw new GameError('ROUND_CONFIG_SNAPSHOT_MISSING');
     const settings = parseSettingsSnapshot(lastRound.configSnapshot);
+    const [continuationAnnouncement, rejectedContinuation] = await Promise.all([
+      tx.roundEvent.findFirst({
+        where: {
+          roundId: lastRound.id,
+          type: ROOM_ANNOUNCED_FINISHED,
+        },
+        orderBy: { createdAt: 'asc' },
+        select: { createdAt: true },
+      }),
+      tx.roundEvent.findFirst({
+        where: {
+          roundId: lastRound.id,
+          type: CONTINUATION_REJECTED_INSUFFICIENT,
+        },
+        select: { id: true },
+      }),
+    ]);
+    if (rejectedContinuation) throw new GameError('CONTINUATION_ALREADY_USED');
     const eligibilityError = bankerContinuationError({
-      previous: lastRound,
+      previous: {
+        ...lastRound,
+        continuationStartedAt: continuationAnnouncement?.createdAt ?? null,
+      },
       next: nextRound,
       userId,
       windowSeconds: settings.round.continuationWindowSeconds,
@@ -2305,10 +2709,13 @@ export async function continueBanker(previousRoundId: string, userId: string) {
     if (eligibilityError) throw new GameError(eligibilityError);
 
     const user = await requireGameUser(tx, userId, lastRound.roomId, 'continue');
-    const pot = safeNumber(lastRound.potCents, 'pot');
-    const baseFees = bankerSeatFee(pot, settings.fees) + settings.fees.serviceFeeCents;
-    const reserve = lastRound.potCents + BigInt(baseFees);
-    if (user.wallet.availableCents < reserve) throw new GameError('INSUFFICIENT_BALANCE');
+    const reserve = continuationReserveCents(lastRound.potCents, settings);
+    if (user.wallet.availableCents < reserve) {
+      throw new GameError('INSUFFICIENT_BALANCE', {
+        requiredCents: String(reserve),
+        availableCents: String(user.wallet.availableCents),
+      });
+    }
     await freezeBanker(
       tx,
       userId,

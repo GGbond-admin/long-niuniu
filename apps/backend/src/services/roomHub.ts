@@ -25,6 +25,7 @@ import {
   type ScoreboardSyncLease,
   withScoreboardSyncLock,
 } from './scoreboardSyncLock.js';
+import type { RoomMuteState } from './roomModeration.js';
 
 export interface RoomClient {
   socket: WebSocket;
@@ -32,6 +33,12 @@ export interface RoomClient {
   uid: string;
   nickname: string;
   avatarUrl?: string | null;
+  chatMutedAt?: Date | null;
+  chatMutedUntil?: Date | null;
+  chatMuteReason?: string | null;
+  roomChatMutedAt?: Date | null;
+  roomChatMuteReason?: string | null;
+  isGameAdmin?: boolean;
 }
 
 export interface RoomObserver {
@@ -42,6 +49,14 @@ export interface RoomObserver {
 }
 
 export type RoomChatGameAction = 'bid' | 'bet' | 'all_in' | 'withdraw';
+
+export type RoomChatReply = {
+  messageId: string;
+  uid: string;
+  nickname: string;
+  content: string;
+  type: 'TEXT' | 'EMOJI';
+};
 
 export interface RoomChatMessage {
   id: string;
@@ -64,20 +79,29 @@ export interface RoomChatMessage {
     | 'GAME_PACKET'
     | 'COUNTDOWN';
   content: string;
-  from: { uid: string; nickname: string; avatarUrl?: string | null } | null;
+  from: {
+    uid: string;
+    nickname: string;
+    avatarUrl?: string | null;
+    role?: 'GAME_ADMIN';
+  } | null;
   /** 玩家端发送时的短期关联 ID；用于确认回显，不参与消息幂等。 */
   requestId?: string;
   /** 仅真实执行成功的游戏指令携带；禁止前端仅凭数字文本猜测为下注。 */
   gameAction?: RoomChatGameAction;
+  /** 服务端从原消息生成的不可伪造引用快照。 */
+  replyTo?: RoomChatReply;
   at: string;
 }
 
 export type CountdownPayload = {
-  mode: 'bid' | 'bet' | 'claim' | 'lock';
+  mode: 'bid' | 'bet' | 'claim' | 'lock' | 'repost';
   /** 与顶栏同一截止时间，前端每秒刷新剩余秒数 */
   endsAt?: string;
   /** 文案模板，可用 {{remaining}} */
   template?: string;
+  /** 倒计时结束后替换显示的文案 */
+  afterTemplate?: string;
   /** lock 模式：当前展示的大号数字（3/2/1） */
   emoji?: string;
 };
@@ -88,6 +112,8 @@ const CHAT_HISTORY_LIMIT = 2_000;
 const CLIENT_CHAT_HISTORY_LIMIT = 100;
 /** 管理观察端保留更长窗口，但同样禁止一次挂载完整 2,000 条。 */
 const OBSERVER_CHAT_HISTORY_LIMIT = 300;
+/** 玩家端最多显示 500 条；向前扫描多留两页，应对边界删除与同毫秒消息。 */
+const PAGINATED_CHAT_HISTORY_SCAN_LIMIT = 700;
 const CHAT_REDIS_TTL_SECONDS = 7 * 24 * 60 * 60;
 /** 慢客户端积压超过 1 MiB 时主动断开，让其重连后只补最近窗口。 */
 const MAX_SOCKET_BUFFER_BYTES = 1 * 1024 * 1024;
@@ -95,6 +121,10 @@ const MAX_SOCKET_BUFFER_BYTES = 1 * 1024 * 1024;
 const clientsByRoom = new Map<string, Set<RoomClient>>();
 const observersByRoom = new Map<string, Set<RoomObserver>>();
 const chatHistoryByRoom = new Map<string, RoomChatMessage[]>();
+const paginatedChatHistoryLoads = new Map<
+  string,
+  Promise<{ messages: RoomChatMessage[]; hasMore: boolean; cursorExpired?: boolean }>
+>();
 type ChatTombstone = { deletedAt: number; generation: number };
 const deletedChatMessageIdsByRoom = new Map<
   string,
@@ -268,6 +298,102 @@ function closeUserConnectionsLocal(userId: string, reason: string): void {
   }
 }
 
+export type RoomMemberModerationState = {
+  muted: boolean;
+  mutedAt: string | null;
+  mutedUntil: string | null;
+  reason: string | null;
+};
+
+function applyMemberModerationLocal(
+  roomId: string,
+  userId: string,
+  moderation: RoomMemberModerationState,
+) {
+  const clients = clientsByRoom.get(roomId);
+  if (!clients) return;
+  for (const client of clients) {
+    if (client.userId !== userId) continue;
+    client.chatMutedAt =
+      moderation.muted && moderation.mutedAt
+        ? new Date(moderation.mutedAt)
+        : null;
+    client.chatMutedUntil =
+      moderation.muted && moderation.mutedUntil
+        ? new Date(moderation.mutedUntil)
+        : null;
+    client.chatMuteReason = moderation.muted ? moderation.reason : null;
+    send(client, { type: 'moderation', ...moderation });
+  }
+}
+
+/** Makes a room-member mute change effective on every backend instance immediately. */
+export async function broadcastRoomMemberModeration(input: {
+  roomId: string;
+  userId: string;
+  moderation: RoomMemberModerationState;
+}): Promise<void> {
+  applyMemberModerationLocal(input.roomId, input.userId, input.moderation);
+  try {
+    await redis().publish(
+      ROOM_BROADCAST_CHANNEL,
+      JSON.stringify({
+        origin: roomHubInstanceId,
+        control: 'member_moderation',
+        roomId: input.roomId,
+        userId: input.userId,
+        moderation: input.moderation,
+      }),
+    );
+  } catch (error) {
+    if (env.nodeEnv === 'production') throw error;
+  }
+}
+
+function applyRoomModerationLocal(
+  roomId: string,
+  moderation: RoomMuteState,
+) {
+  const clients = clientsByRoom.get(roomId);
+  if (clients) {
+    for (const client of clients) {
+      client.roomChatMutedAt =
+        moderation.muted && moderation.mutedAt
+          ? new Date(moderation.mutedAt)
+          : null;
+      client.roomChatMuteReason = moderation.muted ? moderation.reason : null;
+      send(client, { type: 'room_moderation', ...moderation });
+    }
+  }
+  const observers = observersByRoom.get(roomId);
+  if (observers) {
+    for (const observer of observers) {
+      send(observer, { type: 'room_moderation', roomId, ...moderation });
+    }
+  }
+}
+
+/** Makes a whole-room mute change effective on every backend instance immediately. */
+export async function broadcastRoomModeration(input: {
+  roomId: string;
+  moderation: RoomMuteState;
+}): Promise<void> {
+  applyRoomModerationLocal(input.roomId, input.moderation);
+  try {
+    await redis().publish(
+      ROOM_BROADCAST_CHANNEL,
+      JSON.stringify({
+        origin: roomHubInstanceId,
+        control: 'room_moderation',
+        roomId: input.roomId,
+        roomModeration: input.moderation,
+      }),
+    );
+  } catch (error) {
+    if (env.nodeEnv === 'production') throw error;
+  }
+}
+
 /** 设备解绑或支付密码重置后，立即关闭本机及其它实例上的旧玩家连接。 */
 export async function invalidateUserConnections(
   userId: string,
@@ -381,7 +507,12 @@ export async function broadcastUserProfileChanged(user: {
         message.from?.uid === user.uid
           ? {
               ...message,
-              from: { uid: user.uid, nickname, avatarUrl: user.avatarUrl },
+              from: {
+                uid: user.uid,
+                nickname,
+                avatarUrl: user.avatarUrl,
+                role: message.from.role,
+              },
             }
           : message,
       ),
@@ -439,6 +570,8 @@ async function startRoomBroadcastSubscriber(): Promise<void> {
         userId?: string;
         reason?: string;
         fenced?: boolean;
+        moderation?: RoomMemberModerationState;
+        roomModeration?: RoomMuteState;
       };
       if (event.origin === roomHubInstanceId && event.fenced !== true) return;
       if (event.control === 'close_user' && typeof event.userId === 'string') {
@@ -446,6 +579,27 @@ async function startRoomBroadcastSubscriber(): Promise<void> {
           event.userId,
           typeof event.reason === 'string' ? event.reason : 'DEVICE_SESSION_EXPIRED',
         );
+        return;
+      }
+      if (
+        event.control === 'member_moderation'
+        && typeof event.roomId === 'string'
+        && typeof event.userId === 'string'
+        && event.moderation
+      ) {
+        applyMemberModerationLocal(
+          event.roomId,
+          event.userId,
+          event.moderation,
+        );
+        return;
+      }
+      if (
+        event.control === 'room_moderation'
+        && typeof event.roomId === 'string'
+        && event.roomModeration
+      ) {
+        applyRoomModerationLocal(event.roomId, event.roomModeration);
         return;
       }
       if (event.control === 'broadcast_all') {
@@ -888,7 +1042,15 @@ export async function appendSystemChatOnce(
   roomId: string,
   id: string,
   content: string,
+  options?: { force?: boolean },
 ): Promise<RoomChatMessage | null> {
+  if (options?.force) {
+    return appendChatOnce(roomId, id, {
+      type: 'SYSTEM',
+      content,
+      from: null,
+    });
+  }
   return appendAssistantChatOnce(roomId, id, { type: 'SYSTEM', content });
 }
 
@@ -1042,6 +1204,7 @@ export function ensureRoundAnnouncement(params: {
                     mode: message.mode,
                     endsAt: message.endsAt,
                     template: message.template,
+                    afterTemplate: message.afterTemplate,
                   } satisfies CountdownPayload),
                   from: null,
                 }, lease);
@@ -1185,6 +1348,15 @@ export function ensureRoundAnnouncement(params: {
     }
   })();
   roundAnnouncementInFlight.set(key, task);
+  if (params.to === 'FINISHED') {
+    return task.then(() => {
+      gameBus.announcementCompleted({
+        roundId: params.roundId,
+        roomId: params.roomId,
+        to: params.to,
+      });
+    });
+  }
   return task;
 }
 
@@ -1255,6 +1427,61 @@ export function chatHistory(roomId: string): RoomChatMessage[] {
   });
   if (filtered.length !== history.length) chatHistoryByRoom.set(roomId, filtered);
   return filtered;
+}
+
+/**
+ * 从服务端历史生成回复快照，禁止客户端自行提供昵称或原文。
+ * 内存未命中时仅扫描玩家端可见窗口的有界 Redis 片段，避免加载整房历史。
+ */
+export async function resolveChatReply(
+  roomId: string,
+  messageId: string,
+  requesterUid: string,
+): Promise<RoomChatReply | null> {
+  let target = chatHistory(roomId).find((message) => message.id === messageId);
+  if (!target) {
+    try {
+      const rows = await redis().lrange(
+        chatRedisKey(roomId),
+        -PAGINATED_CHAT_HISTORY_SCAN_LIMIT,
+        -1,
+      );
+      for (let index = rows.length - 1; index >= 0; index -= 1) {
+        try {
+          const message = JSON.parse(rows[index]!) as RoomChatMessage;
+          if (
+            message?.id === messageId
+            && isChatWithinRetention(message)
+            && !shouldSuppressDeletedChat(roomId, message)
+          ) {
+            target = message;
+            break;
+          }
+        } catch {
+          // 单条损坏不影响回复其余消息。
+        }
+      }
+    } catch {
+      return null;
+    }
+  }
+
+  if (
+    !target?.from
+    || target.from.uid === requesterUid
+    || (target.type !== 'TEXT' && target.type !== 'EMOJI')
+  ) {
+    return null;
+  }
+  const content = target.content.trim().slice(0, 120);
+  if (!content) return null;
+  return {
+    messageId: target.id,
+    uid: target.from.uid,
+    nickname: target.from.nickname.trim() || `UID${target.from.uid}`,
+    content,
+    type: target.type,
+  };
 }
 
 async function hydrateChatProfiles(messages: RoomChatMessage[]): Promise<RoomChatMessage[]> {
@@ -1362,7 +1589,9 @@ export async function loadChatHistory(roomId: string): Promise<RoomChatMessage[]
         byId.set(message.id, message);
       }
     }
-    const merged = [...byId.values()].sort((a, b) => a.at.localeCompare(b.at));
+    const merged = [...byId.values()].sort((left, right) =>
+      left.at.localeCompare(right.at),
+    );
     const trimmed =
       merged.length > CHAT_HISTORY_LIMIT
         ? merged.slice(merged.length - CHAT_HISTORY_LIMIT)
@@ -1384,16 +1613,119 @@ export async function loadChatHistory(roomId: string): Promise<RoomChatMessage[]
   return hydrated;
 }
 
+type ChatHistoryPage = {
+  messages: RoomChatMessage[];
+  hasMore: boolean;
+  cursorExpired?: boolean;
+};
+
+async function scanChatHistoryBefore(
+  roomId: string,
+  before: Pick<RoomChatMessage, 'id' | 'at'>,
+  pageSize: number,
+): Promise<ChatHistoryPage> {
+  const instance = redis();
+  const key = chatRedisKey(roomId);
+  const tombstoneGenerationsBeforeRead = new Map(
+    [...pruneChatTombstones(roomId)].map(([messageId, tombstone]) => [
+      messageId,
+      tombstone.generation,
+    ]),
+  );
+  // 单次 LRANGE 是 Redis 原子快照；避免多次负索引读取期间新增/删除造成块间缺口。
+  const rows = await instance.lrange(
+    key,
+    -PAGINATED_CHAT_HISTORY_SCAN_LIMIT,
+    -1,
+  );
+  const byId = new Map<string, RoomChatMessage>();
+  const tombstonesAfterRead = pruneChatTombstones(roomId);
+  for (const row of rows) {
+    try {
+      const message = JSON.parse(row) as RoomChatMessage;
+      if (!message?.id || !isChatWithinRetention(message)) continue;
+      const currentTombstone = tombstonesAfterRead.get(message.id);
+      if (currentTombstone) {
+        if (
+          tombstoneGenerationsBeforeRead.get(message.id)
+          !== currentTombstone.generation
+        ) {
+          // 删除发生在快照读取期间；旧快照不得清除新的 tombstone。
+          continue;
+        }
+        // 删除已先于广播原子落到 Redis；当前快照仍有该 ID，说明它已被合法重建。
+        clearChatDeleted(roomId, message.id);
+      }
+      // LRANGE 按旧到新返回；重复 ID 删除再插入，确保较新的行与位置优先。
+      byId.delete(message.id);
+      byId.set(message.id, message);
+    } catch {
+      // 单条损坏不影响其余历史分页。
+    }
+  }
+
+  const history = [...byId.values()];
+  const cursorIndex =
+    before.id === '~'
+      ? history.length
+      : history.findIndex((message) => message.id === before.id);
+  if (cursorIndex < 0) {
+    const resetMessages = (
+      await hydrateChatProfiles(history.slice(-CLIENT_CHAT_HISTORY_LIMIT))
+    ).filter(
+      (message) =>
+        !shouldSuppressDeletedChat(roomId, message) && isChatWithinRetention(message),
+    );
+    return {
+      messages: resetMessages,
+      hasMore: history.length > CLIENT_CHAT_HISTORY_LIMIT,
+      cursorExpired: true,
+    };
+  }
+
+  const startIndex = Math.max(0, cursorIndex - pageSize);
+  const selected = history.slice(startIndex, cursorIndex);
+  const messages = (await hydrateChatProfiles(selected)).filter(
+    (message) =>
+      !shouldSuppressDeletedChat(roomId, message) && isChatWithinRetention(message),
+  );
+  return {
+    messages,
+    hasMore: startIndex > 0,
+  };
+}
+
+export function loadChatHistoryBefore(
+  roomId: string,
+  before: Pick<RoomChatMessage, 'id' | 'at'>,
+  limit = 50,
+): Promise<ChatHistoryPage> {
+  const pageSize = Math.max(1, Math.min(100, Math.trunc(limit) || 50));
+  const loadKey = JSON.stringify([roomId, before.at, before.id, pageSize]);
+  const current = paginatedChatHistoryLoads.get(loadKey);
+  if (current) return current;
+
+  let loading!: Promise<ChatHistoryPage>;
+  loading = scanChatHistoryBefore(roomId, before, pageSize).finally(() => {
+    if (paginatedChatHistoryLoads.get(loadKey) === loading) {
+      paginatedChatHistoryLoads.delete(loadKey);
+    }
+  });
+  paginatedChatHistoryLoads.set(loadKey, loading);
+  return loading;
+}
+
 /** 连接只读取最近窗口，避免每次进群都解析并补全 2,000 条长期历史。 */
 async function loadRecentChatHistory(
   roomId: string,
   limit: number,
-): Promise<RoomChatMessage[]> {
-  const memory = chatHistory(roomId).slice(-limit);
+): Promise<{ messages: RoomChatMessage[]; hasMore: boolean }> {
+  const windowSize = limit + 1;
+  const memory = chatHistory(roomId).slice(-windowSize);
   try {
     const instance = redis();
     const key = chatRedisKey(roomId);
-    const rows = await instance.lrange(key, -limit, -1);
+    const rows = await instance.lrange(key, -windowSize, -1);
     const byId = new Map<string, RoomChatMessage>();
     const tombstoneConflicts = new Map<string, number>();
     for (const row of rows) {
@@ -1413,7 +1745,7 @@ async function loadRecentChatHistory(
       }
     }
     if (tombstoneConflicts.size) {
-      const confirmedRows = await instance.lrange(key, -limit, -1);
+      const confirmedRows = await instance.lrange(key, -windowSize, -1);
       for (const row of confirmedRows) {
         try {
           const message = JSON.parse(row) as RoomChatMessage;
@@ -1445,18 +1777,22 @@ async function loadRecentChatHistory(
         byId.set(message.id, message);
       }
     }
-    const recent = [...byId.values()]
-      .sort((left, right) => left.at.localeCompare(right.at))
-      .slice(-limit);
-    return (await hydrateChatProfiles(recent)).filter(
+    const recent = [...byId.values()].sort((left, right) =>
+      left.at.localeCompare(right.at),
+    );
+    const hydrated = (await hydrateChatProfiles(recent.slice(-limit))).filter(
       (message) =>
         !shouldSuppressDeletedChat(roomId, message) && isChatWithinRetention(message),
     );
+    return { messages: hydrated, hasMore: recent.length > limit };
   } catch {
-    return (await hydrateChatProfiles(chatHistory(roomId).slice(-limit))).filter(
+    const recent = chatHistory(roomId).slice(-windowSize);
+    const hydrated = (await hydrateChatProfiles(recent.slice(-limit))).filter(
       (message) =>
         !shouldSuppressDeletedChat(roomId, message) && isChatWithinRetention(message),
     );
+    // Redis 暂时不可用时不能断言“没有更早消息”，让客户端保留重试入口。
+    return { messages: hydrated, hasMore: true };
   }
 }
 
@@ -1475,9 +1811,13 @@ export function addClient(roomId: string, client: RoomClient) {
       }),
     )
     .catch(() => undefined);
-  void loadRecentChatHistory(roomId, CLIENT_CHAT_HISTORY_LIMIT).then((messages) => {
+  void loadRecentChatHistory(roomId, CLIENT_CHAT_HISTORY_LIMIT).then((page) => {
     if (client.socket.readyState === client.socket.OPEN) {
-      send(client, { type: 'chat_history', messages });
+      send(client, {
+        type: 'chat_history',
+        messages: page.messages,
+        hasMore: page.hasMore,
+      });
     }
   });
   broadcastToRoom(roomId, { type: 'presence', online: clients.size });
@@ -1501,9 +1841,13 @@ export function addObserver(roomId: string, observer: RoomObserver) {
     observersByRoom.set(roomId, observers);
   }
   observers.add(observer);
-  void loadRecentChatHistory(roomId, OBSERVER_CHAT_HISTORY_LIMIT).then((messages) => {
+  void loadRecentChatHistory(roomId, OBSERVER_CHAT_HISTORY_LIMIT).then((page) => {
     if (observer.socket.readyState === observer.socket.OPEN) {
-      send(observer, { type: 'chat_history', messages });
+      send(observer, {
+        type: 'chat_history',
+        messages: page.messages,
+        hasMore: page.hasMore,
+      });
     }
   });
   send(observer, { type: 'presence', online: onlineCount(roomId) });

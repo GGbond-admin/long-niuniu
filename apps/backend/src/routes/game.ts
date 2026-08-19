@@ -1,4 +1,4 @@
-import { RoundPhase } from '@prisma/client';
+import { RoomStartMode, RoundPhase } from '@prisma/client';
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import type { WebSocket } from 'ws';
 import { z } from 'zod';
@@ -7,6 +7,7 @@ import { safeDecryptSecret } from '../lib/crypto.js';
 import { prisma } from '../lib/prisma.js';
 import {
   cancelRound,
+  canClaimPacket,
   claimCandidates,
   claimInternalPacket,
   claimUrlForParticipant,
@@ -16,7 +17,6 @@ import {
   ensureWaitingRound,
   forfeitMissingPlayer,
   GameError,
-  pauseAssistantService,
   publishInternalPacket,
   publishPacket,
   refreshUnannouncedClaimDeadline,
@@ -25,13 +25,13 @@ import {
   recordClaim,
   resumeBotService,
   settleGameRound,
+  setRoomStartMode,
   startRound,
 } from '../services/game.js';
 import { gameBus } from '../services/gameBus.js';
 import { finalizeInternalRound } from '../services/internalPacket.js';
 import {
   getGameSettings,
-  setAssistantService,
   setBankerBidMin,
   setPacketChannel,
 } from '../services/gameSettings.js';
@@ -63,6 +63,7 @@ import {
 import {
   addObserver,
   appendGamePacketMessage,
+  broadcastRoomModeration,
   broadcastToRoom,
   broadcastToRoomObservers,
   ensureRoundAnnouncement,
@@ -72,6 +73,7 @@ import {
   systemCountdown,
   type RoomObserver,
 } from '../services/roomHub.js';
+import { setRoomMuteState } from '../services/roomModeration.js';
 import {
   buildRoundAnnounceMessages,
   type AnnounceBanner,
@@ -380,11 +382,21 @@ export async function gameRoutes(app: FastifyInstance) {
           select: { uid: true, nickname: true, avatarUrl: true },
         })
       : null;
+    const ownClaim = packet.round.claims.some((claim) => claim.userId === userId);
+    const claimOpen =
+      packet.round.phase === RoundPhase.CLAIMING &&
+      packet.status === 'SENT' &&
+      !!packet.expiresAt &&
+      packet.expiresAt.getTime() > Date.now();
+    const canClaim =
+      claimOpen && !ownClaim ? await canClaimPacket(packet.id, userId) : false;
     return {
       id: packet.id,
       channel: packet.channel,
       status: packet.status,
       phase: packet.round.phase,
+      expiresAt: packet.expiresAt?.toISOString() ?? null,
+      canClaim,
       totalCents: String(packet.totalCents),
       participantCount: packet.participantCount,
       banker: banker
@@ -415,8 +427,24 @@ export async function gameRoutes(app: FastifyInstance) {
       try {
         const packet = await prisma.packet.findUnique({
           where: { id },
-          select: { channel: true, roundId: true },
+          select: {
+            channel: true,
+            roundId: true,
+            round: {
+              select: {
+                room: {
+                  select: { chatMutedAt: true, chatMuteReason: true },
+                },
+              },
+            },
+          },
         });
+        if (packet?.round.room.chatMutedAt) {
+          throw new GameError('ROOM_GLOBAL_MUTED', {
+            mutedAt: packet.round.room.chatMutedAt.toISOString(),
+            reason: packet.round.room.chatMuteReason,
+          });
+        }
         if (packet?.channel === 'INTERNAL') {
           const result = await claimInternalPacket(id, userId);
           gameBus.claimRecorded({
@@ -1080,11 +1108,15 @@ export async function adminGameRoutes(app: FastifyInstance) {
     return {
       items: items.map((item) => {
         const settings = settingsByGame.get(item.code)!;
+        const roundStartMode =
+          item.room?.roundStartMode
+          ?? (settings.round.autoStart ? RoomStartMode.AUTO : RoomStartMode.MANUAL);
         return {
           ...item,
           botService: {
             assistantEnabled: settings.round.assistantEnabled !== false,
-            autoStart: Boolean(settings.round.autoStart),
+            autoStart: roundStartMode === RoomStartMode.AUTO,
+            roundStartMode,
           },
           packetChannel: settings.round.packetChannel === 'INTERNAL' ? 'INTERNAL' : 'TNG',
           bankerBidMinCents: settings.round.bankerBidMinCents,
@@ -1210,6 +1242,52 @@ export async function adminGameRoutes(app: FastifyInstance) {
       }),
     ]);
     return { ok: true };
+  });
+
+  app.post('/api/admin/rooms/:id/chat-mute', { preHandler: operations }, async (req) => {
+    const { id } = req.params as { id: string };
+    const adminId = (req.user as { sub: string }).sub;
+    const body = z
+      .object({
+        muted: z.boolean(),
+        reason: z.string().trim().min(2).max(200).optional(),
+      })
+      .parse(req.body ?? {});
+    await requireSupportedRoom(id);
+    const result = await setRoomMuteState({
+      roomId: id,
+      muted: body.muted,
+      reason: body.reason,
+      adminId,
+    });
+    if (!result) throw new GameError('ROOM_NOT_FOUND');
+
+    await prisma.auditLog.create({
+      data: {
+        adminId,
+        action: body.muted ? 'room_chat_mute' : 'room_chat_unmute',
+        target: id,
+        before: {
+          muted: Boolean(result.before.chatMutedAt),
+          mutedAt: result.before.chatMutedAt,
+          reason: result.before.chatMuteReason,
+        },
+        after: result.moderation,
+        ip: req.ip,
+      },
+    });
+    systemChat(
+      id,
+      body.muted
+        ? `【全群禁言】互动群输入已全部关闭。原因：${result.moderation.reason ?? '运营设置'}`
+        : '【解除禁言】互动群已恢复发言与游戏操作。',
+      { force: true },
+    );
+    await broadcastRoomModeration({
+      roomId: id,
+      moderation: result.moderation,
+    });
+    return { ok: true, roomMute: result.moderation };
   });
 
   app.get('/api/admin/rounds', { preHandler: roomObservers }, async (req) => {
@@ -1454,44 +1532,79 @@ export async function adminGameRoutes(app: FastifyInstance) {
     const { force } = z.object({ force: z.boolean().default(true) }).parse(req.body ?? {});
     await requireSupportedRoom(id);
     const waiting = await ensureWaitingRound(id);
-    const started = await startRound(waiting.id, force, adminId);
+    if (waiting.phase !== RoundPhase.WAITING) throw new GameError('INVALID_PHASE');
+    const mode = await setRoomStartMode(id, RoomStartMode.MANUAL, adminId);
+    const started = await startRound(waiting.id, force, adminId, 'MANUAL');
     await prisma.auditLog.create({
       data: {
         adminId,
         action: force ? 'round_force_start' : 'round_start',
         target: started.id,
-        before: { phase: RoundPhase.WAITING },
-        after: { roomId: id, phase: started.phase },
+        before: {
+          phase: RoundPhase.WAITING,
+          roundStartMode: mode.before.roundStartMode,
+        },
+        after: {
+          roomId: id,
+          phase: started.phase,
+          roundStartMode: RoomStartMode.MANUAL,
+          autoStart: false,
+        },
         ip: req.ip,
       },
     });
+    broadcastToRoomObservers(id, {
+      type: 'bot_service',
+      roomId: id,
+      assistantEnabled: true,
+      autoStart: false,
+      roundStartMode: RoomStartMode.MANUAL,
+    });
     emitTransition(started.id, started.roomId, RoundPhase.WAITING, started.phase);
-    return { ok: true, round: started };
+    return {
+      ok: true,
+      round: started,
+      botService: {
+        assistantEnabled: true,
+        autoStart: false,
+        roundStartMode: RoomStartMode.MANUAL,
+      },
+    };
   });
 
-  /** 暂停小助手：停止群内自动播报与自动开局，不关闭互动群入口。 */
+  /** 结束游戏：当前局继续完成，关闭一切后续开局，入口与收尾播报保持可用。 */
   app.post('/api/admin/rooms/:id/end', { preHandler: operations }, async (req) => {
     const { id } = req.params as { id: string };
     const adminId = (req.user as { sub: string }).sub;
     const { reason } = z
-      .object({ reason: z.string().trim().min(2).max(200).default('运营暂停至尊牛牛小助手') })
+      .object({ reason: z.string().trim().min(2).max(200).default('运营结束游戏') })
       .parse(req.body ?? {});
-    const room = await requireSupportedRoom(id);
-    const result = await pauseAssistantService(id, reason, adminId);
+    await requireSupportedRoom(id);
+    const active = await currentRoundForRoom(id);
+    const hasRunningRound = Boolean(
+      active
+      && !new Set<RoundPhase>([
+        RoundPhase.WAITING,
+        RoundPhase.FINISHED,
+        RoundPhase.CANCELLED,
+      ]).has(active.phase),
+    );
+    const result = await setRoomStartMode(id, RoomStartMode.STOPPED, adminId);
     await prisma.auditLog.create({
       data: {
         adminId,
-        action: 'assistant_service_pause',
+        action: 'game_stop_after_current_round',
         target: id,
         before: {
-          roomStatus: room.status,
-          assistantEnabled: result.assistantEnabledBefore,
-          autoStart: result.autoStartBefore,
+          roomStatus: result.before.status,
+          roundStartMode: result.before.roundStartMode,
         },
         after: {
           roomStatus: result.room.status,
-          assistantEnabled: false,
+          roundStartMode: RoomStartMode.STOPPED,
+          assistantEnabled: true,
           autoStart: false,
+          currentRoundContinues: hasRunningRound,
           reason,
         },
         ip: req.ip,
@@ -1499,20 +1612,28 @@ export async function adminGameRoutes(app: FastifyInstance) {
     });
     systemChat(
       id,
-      `【运营暂停至尊牛牛小助手】群内自动播报与自动开局已关闭（入口仍开放）。原因：${reason}`,
+      hasRunningRound
+        ? `【本局结束后停局】当前局继续完成，结算后不再开启下一局。原因：${reason}`
+        : `【游戏已结束】当前没有进行中的牌局，后续不会自动开局。原因：${reason}`,
       { force: true },
     );
     broadcastToRoomObservers(id, {
       type: 'bot_service',
       roomId: id,
-      assistantEnabled: false,
+      assistantEnabled: true,
       autoStart: false,
+      roundStartMode: RoomStartMode.STOPPED,
       roomStatus: result.room.status,
     });
     return {
       ok: true,
       room: { id: result.room.id, status: result.room.status },
-      botService: { assistantEnabled: false, autoStart: false },
+      currentRoundContinues: hasRunningRound,
+      botService: {
+        assistantEnabled: true,
+        autoStart: false,
+        roundStartMode: RoomStartMode.STOPPED,
+      },
     };
   });
 
@@ -1553,40 +1674,41 @@ export async function adminGameRoutes(app: FastifyInstance) {
     };
   });
 
-  /** 开关自动开局（需小助手已开启）。 */
-  app.post('/api/admin/rooms/:id/auto-start', { preHandler: operations }, async (req, reply) => {
+  /** 打开自动连续开局；兼容 enabled=false 时回到手动单局模式。 */
+  app.post('/api/admin/rooms/:id/auto-start', { preHandler: operations }, async (req) => {
     const { id } = req.params as { id: string };
     const adminId = (req.user as { sub: string }).sub;
     const { enabled } = z.object({ enabled: z.boolean() }).parse(req.body ?? {});
-    const room = await requireSupportedRoom(id);
-    const settings = await getGameSettings(room.gameCode);
-    if (enabled && settings.round.assistantEnabled === false) {
-      return reply.code(409).send({
-        error: 'ASSISTANT_DISABLED',
-        message: '请先开启至尊牛牛小助手，再打开自动开局',
-      });
-    }
-    const next = await setAssistantService(room.gameCode, { autoStart: enabled }, adminId);
+    await requireSupportedRoom(id);
+    const mode = enabled ? RoomStartMode.AUTO : RoomStartMode.MANUAL;
+    const next = await setRoomStartMode(id, mode, adminId);
     await prisma.auditLog.create({
       data: {
         adminId,
         action: enabled ? 'auto_start_enable' : 'auto_start_disable',
         target: id,
-        after: { autoStart: next.autoStart, assistantEnabled: next.assistantEnabled },
+        before: { roundStartMode: next.before.roundStartMode },
+        after: {
+          roundStartMode: mode,
+          autoStart: next.roundConfig.autoStart,
+          assistantEnabled: next.roundConfig.assistantEnabled,
+        },
         ip: req.ip,
       },
     });
     broadcastToRoomObservers(id, {
       type: 'bot_service',
       roomId: id,
-      assistantEnabled: next.assistantEnabled !== false,
-      autoStart: Boolean(next.autoStart),
+      assistantEnabled: next.roundConfig.assistantEnabled !== false,
+      autoStart: Boolean(next.roundConfig.autoStart),
+      roundStartMode: mode,
     });
     return {
       ok: true,
       botService: {
-        assistantEnabled: next.assistantEnabled !== false,
-        autoStart: Boolean(next.autoStart),
+        assistantEnabled: next.roundConfig.assistantEnabled !== false,
+        autoStart: Boolean(next.roundConfig.autoStart),
+        roundStartMode: mode,
       },
     };
   });
@@ -1597,7 +1719,11 @@ export async function adminGameRoutes(app: FastifyInstance) {
     const body = actionSchema.parse(req.body);
     const before = await requireSupportedRound(id);
     let result: { phase?: RoundPhase };
-    if (body.action === 'start') result = await startRound(id, body.force, adminId);
+    if (body.action === 'start') {
+      if (before.phase !== RoundPhase.WAITING) throw new GameError('INVALID_PHASE');
+      await setRoomStartMode(before.roomId, RoomStartMode.MANUAL, adminId);
+      result = await startRound(id, body.force, adminId, 'MANUAL');
+    }
     else if (body.action === 'close_bidding') {
       if (before.phase !== RoundPhase.BANKER_BID) throw new GameError('INVALID_PHASE');
       await prisma.round.updateMany({

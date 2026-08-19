@@ -36,6 +36,15 @@ type Props = {
   toolsHighlight?: boolean;
   /** 竞庄/下注阶段：输入数字时显示金额预览，发送键改为对应动作 */
   amountMode?: 'bet' | 'bid' | null;
+  /** 当前最高竞标额（分）。有值时校验玩家至少加价 RM100。 */
+  bidHighCents?: number | null;
+  /** 被群管理员禁言时，仅保留合法游戏指令输入，隐藏表情、贴纸和扩展动作。 */
+  restrictedToGameCommands?: boolean;
+  /** 头像艾特或选择回复时，请求插入文字并唤起输入框。 */
+  inputRequest?: { id: number; insertText?: string };
+  /** 当前选择的回复目标，仅用于输入区预览。 */
+  replyPreview?: { nickname: string; content: string } | null;
+  onCancelReply?: () => void;
 };
 
 function ToolGridIcon() {
@@ -56,6 +65,14 @@ function KeyboardIcon() {
       <path d="M6.25 9h.01M9.5 9h.01M12.75 9h.01M16 9h.01M18.5 9h.01" />
       <path d="M6.25 12.25h.01M9.5 12.25h.01M12.75 12.25h.01M16 12.25h.01M18.5 12.25h.01" />
       <path d="M7.25 15.5h9.5" />
+    </svg>
+  );
+}
+
+function SendIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M4.25 5.1 20 12 4.25 18.9l2.25-5.35L14 12 6.5 10.45 4.25 5.1Z" />
     </svg>
   );
 }
@@ -93,21 +110,24 @@ function StickerToolIcon() {
   );
 }
 
-function formatComposerRm(cents: number) {
+function formatComposerRm(cents: number, wholeOnly = false) {
   return (cents / 100).toLocaleString('en-MY', {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
+    minimumFractionDigits: wholeOnly ? 0 : 2,
+    maximumFractionDigits: wholeOnly ? 0 : 2,
   });
 }
 
-function readComposerAmount(value: string): {
+function readComposerAmount(value: string, amountMode: 'bet' | 'bid'): {
   kind: 'withdraw' | 'all_in' | 'amount';
   cents: number;
 } | null {
   const trimmed = value.trim();
-  if (trimmed === '0') return { kind: 'withdraw', cents: 0 };
+  if (trimmed === '0') {
+    return amountMode === 'bet' ? { kind: 'withdraw', cents: 0 } : null;
+  }
   const match = trimmed.match(/^(sh\s*)?(\d+)(?:\.(\d{1,2}))?$/i);
   if (!match) return null;
+  if (amountMode === 'bid' && (match[1] || match[3] !== undefined)) return null;
   const whole = Number(match[2]);
   const fraction = Number((match[3] ?? '').padEnd(2, '0'));
   const cents = whole * 100 + fraction;
@@ -133,19 +153,42 @@ export default function ChatComposer({
   maxLength = 200,
   toolsHighlight = false,
   amountMode = null,
+  bidHighCents = null,
+  restrictedToGameCommands = false,
+  inputRequest,
+  replyPreview = null,
+  onCancelReply,
 }: Props) {
   const [value, setValue] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [inputFocused, setInputFocused] = useState(false);
   const [panel, setPanel] = useState<'tools' | 'plus' | null>(null);
   const [toolTab, setToolTab] = useState<'dice' | 'emoji' | 'sticker'>(
     dicePanel ? defaultToolTab : 'emoji',
   );
   const inputRef = useRef<HTMLInputElement>(null);
-  const showPlus = (plusActions?.length ?? 0) > 0;
+  const handledInputRequestRef = useRef<number | null>(null);
+  const showPlus = !restrictedToGameCommands && (plusActions?.length ?? 0) > 0;
   const showDice = !!dicePanel;
   const sendBusy = busy || submitting;
-  const parsedAmount = amountMode ? readComposerAmount(value) : null;
-  const sendLabel = submitting
+  const normalizedValue = value.trim().replace(/,/g, '');
+  const invalidBidDecimal =
+    amountMode === 'bid' && /^\d+\.\d*$/.test(normalizedValue);
+  const parsedAmount = amountMode
+    ? readComposerAmount(value, amountMode)
+    : null;
+  const minimumBidCents =
+    amountMode === 'bid'
+    && typeof bidHighCents === 'number'
+    && Number.isSafeInteger(bidHighCents)
+    && bidHighCents > 0
+      ? bidHighCents + 10_000
+      : null;
+  const invalidBidIncrement =
+    parsedAmount?.kind === 'amount'
+    && minimumBidCents !== null
+    && parsedAmount.cents < minimumBidCents;
+  const sendLabel = sendBusy
     ? '发送中'
     : parsedAmount?.kind === 'withdraw'
       ? '撤回'
@@ -156,22 +199,84 @@ export default function ChatComposer({
             ? '上庄'
             : '下注'
           : '发送';
-  const amountPreview = parsedAmount
-    ? parsedAmount.kind === 'withdraw'
-      ? { title: '撤回本局下注', detail: '冻结金额原路退回' }
-      : parsedAmount.kind === 'all_in'
-        ? { title: `梭哈 RM ${formatComposerRm(parsedAmount.cents)}`, detail: '按梭哈规则提交' }
-        : {
-            title: `${amountMode === 'bid' ? '竞庄' : '下注'} RM ${formatComposerRm(parsedAmount.cents)}`,
-            detail: '点右侧按钮提交',
-          }
-    : null;
+  const amountPreview: {
+    title: string;
+    detail: string;
+    invalid?: boolean;
+  } | null = invalidBidDecimal
+    ? {
+        title: '竞庄金额只支持整数',
+        detail: '请删除小数点及小数部分',
+        invalid: true,
+      }
+    : invalidBidIncrement
+      ? {
+          title: `下一口最低 RM ${formatComposerRm(minimumBidCents!, true)}`,
+          detail: `当前最高 RM ${formatComposerRm(bidHighCents!, true)} · 至少加 RM 100`,
+          invalid: true,
+        }
+    : parsedAmount
+      ? parsedAmount.kind === 'withdraw'
+        ? { title: '撤回本局下注', detail: '冻结金额原路退回' }
+        : parsedAmount.kind === 'all_in'
+          ? { title: `梭哈 RM ${formatComposerRm(parsedAmount.cents)}`, detail: '按梭哈规则提交' }
+          : {
+              title: `${amountMode === 'bid' ? '竞庄' : '下注'} RM ${formatComposerRm(
+                parsedAmount.cents,
+                amountMode === 'bid',
+              )}`,
+              detail: '点右侧按钮提交',
+            }
+      : null;
 
   useEffect(() => {
     return disposeChatInputFocus;
   }, []);
 
+  useEffect(() => {
+    if (!disabled) return;
+    setInputFocused(false);
+    setPanel(null);
+    inputRef.current?.blur();
+    setChatInputFocus(false);
+  }, [disabled]);
+
+  useEffect(() => {
+    if (!restrictedToGameCommands) return;
+    setPanel(null);
+    if (showDice && diceAvailable) setToolTab('dice');
+  }, [restrictedToGameCommands, showDice, diceAvailable]);
+
+  useEffect(() => {
+    if (
+      !inputRequest
+      || handledInputRequestRef.current === inputRequest.id
+      || disabled
+    ) {
+      return;
+    }
+    handledInputRequestRef.current = inputRequest.id;
+    setPanel(null);
+    if (inputRequest.insertText) {
+      setValue((current) => {
+        const separator = current && !/\s$/.test(current) ? ' ' : '';
+        return `${current}${separator}${inputRequest.insertText}`.slice(0, maxLength);
+      });
+    }
+    requestAnimationFrame(() => {
+      const input = inputRef.current;
+      input?.focus();
+      if (!input) return;
+      try {
+        input.setSelectionRange(input.value.length, input.value.length);
+      } catch {
+        // ignore old WebView selection errors
+      }
+    });
+  }, [disabled, inputRequest, maxLength]);
+
   function markInputFocus(focused: boolean) {
+    setInputFocused(focused);
     setChatInputFocus(focused);
     if (!focused) return;
     requestAnimationFrame(() => {
@@ -180,7 +285,7 @@ export default function ChatComposer({
   }
 
   function insertEmoji(emoji: string) {
-    if (disabled) return;
+    if (disabled || restrictedToGameCommands) return;
     const el = inputRef.current;
     if (el) {
       const start = el.selectionStart ?? value.length;
@@ -203,7 +308,7 @@ export default function ChatComposer({
   function submit(event: FormEvent) {
     event.preventDefault();
     const content = value.trim();
-    if (disabled || sendBusy || !content) return;
+    if (disabled || sendBusy || !content || invalidBidDecimal || invalidBidIncrement) return;
     setPanel(null);
     try {
       const result = onSend(content);
@@ -243,19 +348,39 @@ export default function ChatComposer({
 
   return (
     <div className="chat-composer-shell">
+      {replyPreview && (
+        <div className="composer-reply-preview" role="status">
+          <div>
+            <strong>回复 {replyPreview.nickname}</strong>
+            <span>{replyPreview.content}</span>
+          </div>
+          <button type="button" aria-label="取消回复" onClick={onCancelReply}>
+            ×
+          </button>
+        </div>
+      )}
       {amountPreview && (
-        <div className="composer-amount-preview" role="status">
+        <div
+          className={`composer-amount-preview${amountPreview.invalid ? ' invalid' : ''}`}
+          role="status"
+        >
           <strong>{amountPreview.title}</strong>
           <small>{amountPreview.detail}</small>
         </div>
       )}
-      <form className={`game-room-composer${showPlus ? ' has-plus' : ''}`} onSubmit={submit}>
+      <form
+        className={`game-room-composer${inputFocused ? ' keyboard-open' : ''}${restrictedToGameCommands ? ' command-only' : ''}`}
+        onSubmit={submit}
+      >
         <button
           type="button"
           className={`composer-icon ${panel === 'tools' ? 'active' : ''} ${toolsHighlight && panel !== 'tools' ? 'highlight' : ''}`}
           aria-label={panel === 'tools' ? '收起工具，显示键盘' : '打开工具'}
           onClick={toggleTools}
-          disabled={sendBusy}
+          disabled={
+            sendBusy
+            || (restrictedToGameCommands && !(showDice && diceAvailable))
+          }
         >
           {panel === 'tools' ? <KeyboardIcon /> : <ToolGridIcon />}
         </button>
@@ -269,25 +394,45 @@ export default function ChatComposer({
           }}
           onBlur={() => markInputFocus(false)}
           placeholder={placeholder}
+          aria-label={
+            replyPreview
+              ? `回复 ${replyPreview.nickname}`
+              : amountMode === 'bid'
+                ? '竞庄金额'
+                : amountMode === 'bet'
+                  ? '下注金额'
+                  : '消息输入框'
+          }
           disabled={disabled}
           aria-busy={sendBusy}
+          aria-invalid={invalidBidDecimal || invalidBidIncrement || undefined}
           maxLength={maxLength}
-          inputMode="text"
+          inputMode={amountMode === 'bid' ? 'numeric' : 'text'}
           enterKeyHint="send"
           autoComplete="off"
           autoCorrect="off"
         />
-        <button
-          type="submit"
-          disabled={disabled || sendBusy || !value.trim()}
-          onPointerDown={(event) => event.preventDefault()}
-        >
-          {sendLabel}
-        </button>
-        {showPlus && (
+        {inputFocused || !showPlus ? (
+          <button
+            type="submit"
+            className={`composer-send${sendBusy ? ' busy' : ''}`}
+            aria-label={sendLabel}
+            title={sendLabel}
+            disabled={
+              disabled
+              || sendBusy
+              || !value.trim()
+              || invalidBidDecimal
+              || invalidBidIncrement
+            }
+            onPointerDown={(event) => event.preventDefault()}
+          >
+            <SendIcon />
+          </button>
+        ) : (
           <button
             type="button"
-            className={`composer-icon ${panel === 'plus' ? 'active' : ''}`}
+            className={`composer-icon composer-more ${panel === 'plus' ? 'active' : ''}`}
             aria-label="更多"
             disabled={sendBusy}
             onClick={() => {
@@ -321,28 +466,32 @@ export default function ChatComposer({
                 <span>骰子</span>
               </button>
             )}
-            <button
-              type="button"
-              className={toolTab === 'emoji' ? 'active' : ''}
-              onClick={() => setToolTab('emoji')}
-              aria-label="表情"
-              aria-selected={toolTab === 'emoji'}
-              role="tab"
-            >
-              <EmojiToolIcon />
-              <span>表情</span>
-            </button>
-            <button
-              type="button"
-              className={toolTab === 'sticker' ? 'active' : ''}
-              onClick={() => setToolTab('sticker')}
-              aria-label="贴纸"
-              aria-selected={toolTab === 'sticker'}
-              role="tab"
-            >
-              <StickerToolIcon />
-              <span>贴纸</span>
-            </button>
+            {!restrictedToGameCommands && (
+              <>
+                <button
+                  type="button"
+                  className={toolTab === 'emoji' ? 'active' : ''}
+                  onClick={() => setToolTab('emoji')}
+                  aria-label="表情"
+                  aria-selected={toolTab === 'emoji'}
+                  role="tab"
+                >
+                  <EmojiToolIcon />
+                  <span>表情</span>
+                </button>
+                <button
+                  type="button"
+                  className={toolTab === 'sticker' ? 'active' : ''}
+                  onClick={() => setToolTab('sticker')}
+                  aria-label="贴纸"
+                  aria-selected={toolTab === 'sticker'}
+                  role="tab"
+                >
+                  <StickerToolIcon />
+                  <span>贴纸</span>
+                </button>
+              </>
+            )}
           </div>
 
           {showDice && toolTab === 'dice' && (

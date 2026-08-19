@@ -8,13 +8,14 @@ import { BetStatus, RoundPhase } from '@prisma/client';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { WebSocket } from 'ws';
 import { z } from 'zod';
-import { bankerContinuationError } from '../engine/bankerContinuation.js';
+import {
+  bankerContinuationError,
+  continuationDeadline,
+} from '../engine/bankerContinuation.js';
 import { bettingRange, toCentsBigInt } from '../engine/betting.js';
 import { prisma } from '../lib/prisma.js';
 import {
   canClaimPacket,
-  continueBanker,
-  currentRoundPhaseForRoom,
   currentRoundForRoom,
   GameError,
   joinRoom,
@@ -28,11 +29,12 @@ import { announceBidPlaced } from '../services/bidAuction.js';
 import {
   confirmedChatGameAction,
   handleRoomChatCommand,
+  isBankerRepostCommand,
   isRoomCommandCandidate,
-  isChatMuted,
   privateBetConfirmationFor,
   runBankerDiceCeremony,
 } from '../services/chatCommands.js';
+import { continueBankerWithFallback } from '../services/bankerContinuationFlow.js';
 import {
   claimGroupPacket,
   groupPacketDetail,
@@ -52,16 +54,28 @@ import {
   appendChat,
   appendChatOnce,
   broadcastToRoomCluster,
+  loadChatHistoryBefore,
   onlineCount,
   removeClient,
+  resolveChatReply,
   type RoomClient,
 } from '../services/roomHub.js';
+import {
+  CONTINUATION_REJECTED_INSUFFICIENT,
+  getRoomChatPolicy,
+  roomChatPolicyMessage,
+  ROOM_ANNOUNCED_FINISHED,
+} from '../services/roomChatPolicy.js';
+import {
+  GLOBAL_ROOM_MUTE_MESSAGE,
+  roomMuteStateOf,
+} from '../services/roomModeration.js';
 
 const amountSchema = z.object({
   amount: z
     .string()
     .max(32, '金额过大')
-    .regex(/^\d+(\.\d{1,2})?$/, '金额格式不正确'),
+    .regex(/^\d+$/, '竞标金额必须是整数'),
 });
 const tipSchema = amountSchema.extend({
   requestId: z.string().uuid(),
@@ -79,6 +93,30 @@ function validSocketRequestId(value: unknown): string | undefined {
     : undefined;
 }
 
+function validReplyMessageId(value: unknown): string | undefined {
+  return typeof value === 'string' && /^[A-Za-z0-9:_-]{1,160}$/.test(value)
+    ? value
+    : undefined;
+}
+
+function validChatHistoryCursor(value: {
+  beforeId?: unknown;
+  beforeAt?: unknown;
+}): { id: string; at: string } | null {
+  if (
+    typeof value.beforeId !== 'string'
+    || value.beforeId.length < 1
+    || value.beforeId.length > 160
+    || /[\u0000-\u001f]/.test(value.beforeId)
+    || typeof value.beforeAt !== 'string'
+    || value.beforeAt.length > 40
+    || !Number.isFinite(Date.parse(value.beforeAt))
+  ) {
+    return null;
+  }
+  return { id: value.beforeId, at: value.beforeAt };
+}
+
 function parseAmountCents(amount: string): bigint {
   try {
     return toCentsBigInt(amount);
@@ -88,6 +126,61 @@ function parseAmountCents(amount: string): bigint {
         ? 'AMOUNT_TOO_LARGE'
         : 'INVALID_AMOUNT',
     );
+  }
+}
+
+function activeMemberMute(member: {
+  chatMutedAt?: Date | null;
+  chatMutedUntil?: Date | null;
+  chatMuteReason?: string | null;
+} | null | undefined) {
+  const active = Boolean(
+    member?.chatMutedAt
+    && (!member.chatMutedUntil || member.chatMutedUntil.getTime() > Date.now()),
+  );
+  return active
+    ? {
+        active: true,
+        mutedAt: member?.chatMutedAt?.toISOString() ?? null,
+        mutedUntil: member?.chatMutedUntil?.toISOString() ?? null,
+        reason: member?.chatMuteReason ?? null,
+      }
+    : {
+        active: false,
+        mutedAt: null,
+        mutedUntil: null,
+        reason: null,
+      };
+}
+
+function activeRoomMute(client: {
+  roomChatMutedAt?: Date | null;
+  roomChatMuteReason?: string | null;
+}) {
+  return client.roomChatMutedAt
+    ? {
+        active: true,
+        mutedAt: client.roomChatMutedAt.toISOString(),
+        reason: client.roomChatMuteReason ?? null,
+      }
+    : {
+        active: false,
+        mutedAt: null,
+        reason: null,
+      };
+}
+
+async function requireRoomInputOpen(roomId: string): Promise<void> {
+  const room = await prisma.room.findUnique({
+    where: { id: roomId },
+    select: { chatMutedAt: true, chatMuteReason: true },
+  });
+  if (!room) throw new GameError('ROOM_NOT_FOUND');
+  if (room.chatMutedAt) {
+    throw new GameError('ROOM_GLOBAL_MUTED', {
+      mutedAt: room.chatMutedAt.toISOString(),
+      reason: room.chatMuteReason,
+    });
   }
 }
 
@@ -108,7 +201,14 @@ async function buildRoomState(roomId: string, userId: string) {
         id: roomId,
         gameCode: { in: SUPPORTED_GAME_CODES },
       },
-      include: { _count: { select: { members: { where: { status: 'ACTIVE' } } } } },
+      include: {
+        _count: { select: { members: { where: { status: 'ACTIVE' } } } },
+        gameAdminAssignments: {
+          where: { userId, status: 'ACTIVE' },
+          select: { id: true },
+          take: 1,
+        },
+      },
     }),
     prisma.roomMember.findUnique({
       where: { roomId_userId: { roomId, userId } },
@@ -127,6 +227,7 @@ async function buildRoomState(roomId: string, userId: string) {
 
   const [
     settings,
+    chatPolicy,
     bankerRow,
     eligiblePlayers,
     claimable,
@@ -140,6 +241,7 @@ async function buildRoomState(roomId: string, userId: string) {
         ? parseSettingsSnapshot(round.configSnapshot)
         : getGameSettings(room.gameCode),
     ),
+    getRoomChatPolicy(roomId, now),
     round?.bankerId
       ? prisma.user.findUnique({
           where: { id: round.bankerId },
@@ -160,6 +262,7 @@ async function buildRoomState(roomId: string, userId: string) {
               in: [
                 'BANKER_DICE',
                 'BANKER_REPOST_WINDOW',
+                'BANKER_DICE_DEADLINE',
                 'BANKER_DICE_READY_FOR_PACKET',
               ],
             },
@@ -171,7 +274,20 @@ async function buildRoomState(roomId: string, userId: string) {
     prisma.round.findFirst({
       where: { roomId, phase: RoundPhase.FINISHED },
       orderBy: { seqNo: 'desc' },
-      include: { scoreboard: true },
+      include: {
+        scoreboard: true,
+        events: {
+          where: {
+            type: {
+              in: [
+                ROOM_ANNOUNCED_FINISHED,
+                CONTINUATION_REJECTED_INSUFFICIENT,
+              ],
+            },
+          },
+          orderBy: { createdAt: 'asc' },
+        },
+      },
     }),
     prisma.announcement.findMany({
       where: {
@@ -236,6 +352,27 @@ async function buildRoomState(roomId: string, userId: string) {
     typeof repostWindowPayload?.endsAt === 'string'
       ? repostWindowPayload.endsAt
       : null;
+  const diceDeadlineEvent = diceEvents.find(
+    (event) => event.type === 'BANKER_DICE_DEADLINE',
+  );
+  const diceDeadlinePayload =
+    diceDeadlineEvent?.payload
+    && typeof diceDeadlineEvent.payload === 'object'
+    && !Array.isArray(diceDeadlineEvent.payload)
+      ? diceDeadlineEvent.payload as { endsAt?: unknown }
+      : null;
+  const explicitDiceEndsAt =
+    typeof diceDeadlinePayload?.endsAt === 'string'
+      ? diceDeadlinePayload.endsAt
+      : null;
+  const repostEndsAtMs = repostEndsAt ? new Date(repostEndsAt).getTime() : Number.NaN;
+  const diceEndsAt =
+    explicitDiceEndsAt
+    ?? (Number.isFinite(repostEndsAtMs)
+      ? new Date(
+          repostEndsAtMs + settings.round.bankerDiceTimeoutSeconds * 1_000,
+        ).toISOString()
+      : null);
   const diceStarted = !!latestDiceEvent;
   const canRepostRound =
     !diceThrown
@@ -244,18 +381,33 @@ async function buildRoomState(roomId: string, userId: string) {
     && new Date(repostEndsAt).getTime() > now.getTime();
 
   let continuation: { previousRoundId: string; mine: boolean; deadline: string } | null = null;
-  if (lastFinished?.bankerId && lastFinished.configSnapshot && round) {
+  if (
+    room.roundStartMode === 'AUTO'
+    && lastFinished?.bankerId
+    && lastFinished.configSnapshot
+    && round
+  ) {
     const windowSettings = parseSettingsSnapshot(lastFinished.configSnapshot);
+    const continuationStartedAt =
+      lastFinished.events.find((event) => event.type === ROOM_ANNOUNCED_FINISHED)
+        ?.createdAt ?? null;
+    const continuationRejected = lastFinished.events.some(
+      (event) => event.type === CONTINUATION_REJECTED_INSUFFICIENT,
+    );
     const eligibilityError = bankerContinuationError({
-      previous: lastFinished,
+      previous: {
+        ...lastFinished,
+        continuationStartedAt,
+      },
       next: round,
       userId: lastFinished.bankerId,
       windowSeconds: windowSettings.round.continuationWindowSeconds,
     });
-    if (!eligibilityError && lastFinished.finishedAt) {
-      const deadline =
-        lastFinished.finishedAt.getTime() +
-        windowSettings.round.continuationWindowSeconds * 1_000;
+    const deadline = continuationDeadline(
+      continuationStartedAt,
+      windowSettings.round.continuationWindowSeconds,
+    );
+    if (!continuationRejected && !eligibilityError && deadline !== null) {
       continuation = {
         previousRoundId: lastFinished.id,
         mine: lastFinished.bankerId === userId,
@@ -275,9 +427,12 @@ async function buildRoomState(roomId: string, userId: string) {
       minPlayers: room.minPlayers,
       members: room._count.members,
       online: onlineCount(room.id),
+      chatMute: roomMuteStateOf(room),
     },
     me: {
       joined: member?.status === 'ACTIVE',
+      chatMute: activeMemberMute(member),
+      isGameAdmin: room.gameAdminAssignments.length > 0,
       isBanker: !!round?.bankerId && round.bankerId === userId,
       bidCents: myBid ? String(myBid.amountCents) : null,
       bet: myBet
@@ -314,6 +469,7 @@ async function buildRoomState(roomId: string, userId: string) {
           diceThrown,
           diceStarted,
           repostEndsAt,
+          diceEndsAt,
           canRepostRound,
           participantCount: round.packet?.participantCount ?? null,
           /** 发包完成后才暴露，前端据此弹出可领红包：TNG 需有链接，内部红包直接可领 */
@@ -355,12 +511,14 @@ async function buildRoomState(roomId: string, userId: string) {
         }
       : null,
     continuation,
+    chatPolicy,
     pins,
     config: {
       bidDurationSeconds: settings.round.bidDurationSeconds,
       betDurationSeconds: settings.round.betDurationSeconds,
       claimDurationSeconds: settings.round.claimDurationSeconds,
       repostWindowSeconds: settings.round.repostWindowSeconds,
+      bankerDiceTimeoutSeconds: settings.round.bankerDiceTimeoutSeconds,
       bankerBidMinCents: settings.round.bankerBidMinCents,
       bankerBidMaxCents: settings.round.bankerBidMaxCents,
       autoTailPacketEnabled: settings.round.autoTailPacketEnabled ?? false,
@@ -493,6 +651,7 @@ export async function gameRoomRoutes(app: FastifyInstance) {
   app.post('/api/game/rooms/:id/bid', { preHandler: player }, async (req) => {
     const { id } = req.params as { id: string };
     const userId = (req.user as { sub: string }).sub;
+    await requireRoomInputOpen(id);
     const { amount } = amountSchema.parse(req.body);
     const round = await currentRoundForRoom(id);
     if (!round || round.phase !== RoundPhase.BANKER_BID) throw new GameError('INVALID_PHASE');
@@ -506,7 +665,7 @@ export async function gameRoomRoutes(app: FastifyInstance) {
       roundId: round.id,
       roomId: id,
       userId,
-      amountCents,
+      amountCents: bid.amountCents,
       extendedEndsAt: bid?.extendedEndsAt ?? null,
     }).catch(() => undefined);
     activity(id, 'bid', { uid: user.uid, nickname: user.nickname ?? user.uid });
@@ -516,6 +675,7 @@ export async function gameRoomRoutes(app: FastifyInstance) {
   app.post('/api/game/rooms/:id/bet', { preHandler: player }, async (req) => {
     const { id } = req.params as { id: string };
     const userId = (req.user as { sub: string }).sub;
+    await requireRoomInputOpen(id);
     const body = amountSchema.extend({ allIn: z.boolean().default(false) }).parse(req.body);
     const round = await currentRoundForRoom(id);
     if (!round || round.phase !== RoundPhase.BETTING) throw new GameError('INVALID_PHASE');
@@ -542,6 +702,7 @@ export async function gameRoomRoutes(app: FastifyInstance) {
   app.post('/api/game/rooms/:id/withdraw-bet', { preHandler: player }, async (req) => {
     const { id } = req.params as { id: string };
     const userId = (req.user as { sub: string }).sub;
+    await requireRoomInputOpen(id);
     const round = await currentRoundForRoom(id);
     if (!round || round.phase !== RoundPhase.BETTING) throw new GameError('INVALID_PHASE');
     await withdrawBet(round.id, userId);
@@ -556,6 +717,7 @@ export async function gameRoomRoutes(app: FastifyInstance) {
   app.post('/api/game/rooms/:id/continue', { preHandler: player }, async (req) => {
     const { id } = req.params as { id: string };
     const userId = (req.user as { sub: string }).sub;
+    await requireRoomInputOpen(id);
     const body = z.object({ previousRoundId: z.string().min(1) }).parse(req.body);
     const previous = await prisma.round.findUnique({ where: { id: body.previousRoundId } });
     if (
@@ -566,13 +728,7 @@ export async function gameRoomRoutes(app: FastifyInstance) {
     ) {
       throw new GameError('NOT_ROUND_BANKER');
     }
-    const continued = await continueBanker(body.previousRoundId, userId);
-    gameBus.transition({
-      roundId: continued.id,
-      roomId: continued.roomId,
-      from: RoundPhase.WAITING,
-      to: RoundPhase.BETTING,
-    });
+    await continueBankerWithFallback(body.previousRoundId, userId);
     return buildRoomState(id, userId);
   });
 
@@ -592,7 +748,16 @@ export async function gameRoomRoutes(app: FastifyInstance) {
       .parse(req.body);
     const user = await prisma.user.findUnique({
       where: { id: userId },
-      select: { uid: true, nickname: true, avatarUrl: true },
+      select: {
+        uid: true,
+        nickname: true,
+        avatarUrl: true,
+        gameAdminAssignments: {
+          where: { room: { id }, status: 'ACTIVE' },
+          select: { id: true },
+          take: 1,
+        },
+      },
     });
     if (!user) throw new GameError('USER_NOT_ACTIVE');
     const result = await sendGroupPacket({
@@ -613,6 +778,9 @@ export async function gameRoomRoutes(app: FastifyInstance) {
         uid: user.uid,
         nickname: user.nickname ?? user.uid,
         avatarUrl: user.avatarUrl,
+        ...(user.gameAdminAssignments.length > 0
+          ? { role: 'GAME_ADMIN' as const }
+          : {}),
       },
     });
     if (!result.duplicate) {
@@ -779,7 +947,11 @@ export async function gameRoomRoutes(app: FastifyInstance) {
     const [room, user, member] = await Promise.all([
       prisma.room.findFirst({
         where: { id, gameCode: { in: SUPPORTED_GAME_CODES } },
-        select: { id: true },
+        select: {
+          id: true,
+          chatMutedAt: true,
+          chatMuteReason: true,
+        },
       }),
       prisma.user.findUnique({
         where: { id: claims.sub },
@@ -790,6 +962,11 @@ export async function gameRoomRoutes(app: FastifyInstance) {
           avatarUrl: true,
           status: true,
           kind: true,
+          gameAdminAssignments: {
+            where: { room: { id }, status: 'ACTIVE' },
+            select: { id: true },
+            take: 1,
+          },
           device: {
             select: {
               deviceId: true,
@@ -832,6 +1009,12 @@ export async function gameRoomRoutes(app: FastifyInstance) {
       uid: user.uid,
       nickname: user.nickname ?? user.uid,
       avatarUrl: user.avatarUrl,
+      chatMutedAt: member.chatMutedAt,
+      chatMutedUntil: member.chatMutedUntil,
+      chatMuteReason: member.chatMuteReason,
+      roomChatMutedAt: room.chatMutedAt,
+      roomChatMuteReason: room.chatMuteReason,
+      isGameAdmin: user.gameAdminAssignments.length > 0,
     };
     addClient(id, client);
     let lastPresenceTouch = 0;
@@ -855,6 +1038,11 @@ export async function gameRoomRoutes(app: FastifyInstance) {
           select: {
             status: true,
             kind: true,
+            gameAdminAssignments: {
+              where: { room: { id }, status: 'ACTIVE' },
+              select: { id: true },
+              take: 1,
+            },
             device: {
               select: {
                 deviceId: true,
@@ -864,7 +1052,18 @@ export async function gameRoomRoutes(app: FastifyInstance) {
             },
             roomMemberships: {
               where: { roomId: id },
-              select: { status: true },
+              select: {
+                status: true,
+                chatMutedAt: true,
+                chatMutedUntil: true,
+                chatMuteReason: true,
+                room: {
+                  select: {
+                    chatMutedAt: true,
+                    chatMuteReason: true,
+                  },
+                },
+              },
               take: 1,
             },
           },
@@ -878,6 +1077,49 @@ export async function gameRoomRoutes(app: FastifyInstance) {
             current.device.authVersion === claims.deviceVersion,
         );
         const memberValid = current?.roomMemberships[0]?.status === 'ACTIVE';
+        const currentMember = current?.roomMemberships[0];
+        if (memberValid && currentMember) {
+          const previousModeration = activeMemberMute(client);
+          const currentModeration = activeMemberMute(currentMember);
+          const previousRoomModeration = activeRoomMute(client);
+          const currentRoomModeration = roomMuteStateOf(currentMember.room);
+          client.chatMutedAt = currentMember.chatMutedAt;
+          client.chatMutedUntil = currentMember.chatMutedUntil;
+          client.chatMuteReason = currentMember.chatMuteReason;
+          client.roomChatMutedAt = currentMember.room.chatMutedAt;
+          client.roomChatMuteReason = currentMember.room.chatMuteReason;
+          client.isGameAdmin = (current?.gameAdminAssignments.length ?? 0) > 0;
+          if (
+            socket.readyState === socket.OPEN
+            && (
+              previousModeration.active !== currentModeration.active
+              || previousModeration.mutedAt !== currentModeration.mutedAt
+              || previousModeration.mutedUntil !== currentModeration.mutedUntil
+              || previousModeration.reason !== currentModeration.reason
+            )
+          ) {
+            socket.send(JSON.stringify({
+              type: 'moderation',
+              muted: currentModeration.active,
+              mutedAt: currentModeration.mutedAt,
+              mutedUntil: currentModeration.mutedUntil,
+              reason: currentModeration.reason,
+            }));
+          }
+          if (
+            socket.readyState === socket.OPEN
+            && (
+              previousRoomModeration.active !== currentRoomModeration.muted
+              || previousRoomModeration.mutedAt !== currentRoomModeration.mutedAt
+              || previousRoomModeration.reason !== currentRoomModeration.reason
+            )
+          ) {
+            socket.send(JSON.stringify({
+              type: 'room_moderation',
+              ...currentRoomModeration,
+            }));
+          }
+        }
         invalidSessionReason = accountValid && !memberValid
           ? 'NOT_IN_ROOM'
           : 'DEVICE_SESSION_EXPIRED';
@@ -918,7 +1160,14 @@ export async function gameRoomRoutes(app: FastifyInstance) {
 
     const processSocketMessage = async (raw: Buffer) => {
         if (cleanedUp) return;
-        let payload: { type?: string; content?: string; requestId?: string };
+        let payload: {
+          type?: string;
+          content?: string;
+          requestId?: string;
+          replyToId?: string;
+          beforeId?: string;
+          beforeAt?: string;
+        };
         try {
           payload = JSON.parse(raw.toString('utf8'));
         } catch {
@@ -946,10 +1195,58 @@ export async function gameRoomRoutes(app: FastifyInstance) {
           messageTimestamps.shift();
         }
         if (messageTimestamps.length >= WS_MESSAGE_RATE_LIMIT) {
+          if (payload.type === 'chat_history_before') {
+            reply({
+              type: 'chat_history_page',
+              messages: [],
+              hasMore: true,
+              error: 'RATE_LIMITED',
+            });
+            return;
+          }
           warnRateLimit(requestId);
           return;
         }
         messageTimestamps.push(rateNow);
+        if (payload.type === 'chat_history_before') {
+          const before = validChatHistoryCursor(payload);
+          if (!before) {
+            reply({
+              type: 'chat_history_page',
+              messages: [],
+              hasMore: false,
+              error: 'INVALID_HISTORY_CURSOR',
+            });
+            return;
+          }
+          try {
+            const page = await loadChatHistoryBefore(id, before, 50);
+            reply({
+              type: 'chat_history_page',
+              messages: page.messages,
+              hasMore: page.hasMore,
+              ...(page.cursorExpired ? { error: 'HISTORY_CURSOR_EXPIRED' } : {}),
+            });
+          } catch {
+            reply({
+              type: 'chat_history_page',
+              messages: [],
+              hasMore: true,
+              error: 'HISTORY_UNAVAILABLE',
+            });
+          }
+          return;
+        }
+        if (
+          activeRoomMute(client).active
+          && ['dice', 'sticker', 'chat', 'emoji'].includes(payload.type ?? '')
+        ) {
+          reply({
+            type: 'chat_error',
+            message: GLOBAL_ROOM_MUTE_MESSAGE,
+          });
+          return;
+        }
         if (payload.type === 'dice') {
           const result = await runBankerDiceCeremony({ roomId: id, userId: user.id });
           if (result.kind === 'error') {
@@ -973,11 +1270,28 @@ export async function gameRoomRoutes(app: FastifyInstance) {
           uid: client.uid,
           nickname: client.nickname,
           avatarUrl: client.avatarUrl,
+          ...(client.isGameAdmin ? { role: 'GAME_ADMIN' as const } : {}),
         };
         if (payload.type === 'sticker') {
-          const phase = await currentRoundPhaseForRoom(id);
-          if (isChatMuted(phase)) {
-            reply({ type: 'chat_error', message: '抢红包阶段禁止发言，请专注领取' });
+          const chatPolicy = await getRoomChatPolicy(id);
+          if (chatPolicy.muted) {
+            reply({
+              type: 'chat_error',
+              message: roomChatPolicyMessage(chatPolicy),
+            });
+            return;
+          }
+          const memberMute = activeMemberMute(client);
+          if (memberMute.active) {
+            reply({
+              type: 'chat_error',
+              message: memberMute.mutedUntil
+                ? `你已被禁言至 ${new Date(memberMute.mutedUntil).toLocaleString('zh-MY', {
+                    timeZone: 'Asia/Kuala_Lumpur',
+                    hour12: false,
+                  })}`
+                : '你已被管理员永久禁言',
+            });
             return;
           }
           const stickerId = String((payload as { stickerId?: string }).stickerId ?? '');
@@ -1002,16 +1316,33 @@ export async function gameRoomRoutes(app: FastifyInstance) {
           const content = String(payload.content ?? '').trim().slice(0, 200);
           if (!content) return;
 
-          const phase = await currentRoundPhaseForRoom(id);
-          if (isChatMuted(phase)) {
+          const chatPolicy = await getRoomChatPolicy(id);
+          const memberMute = activeMemberMute(client);
+          const hasReplyTarget =
+            payload.type === 'chat' && payload.replyToId !== undefined;
+          const replyToId = hasReplyTarget
+            ? validReplyMessageId(payload.replyToId)
+            : undefined;
+          if (hasReplyTarget && !replyToId) {
+            reply({ type: 'chat_error', message: '回复的消息无效，请重新选择' });
+            return;
+          }
+          const commandCandidate =
+            payload.type === 'chat'
+            && !replyToId
+            && isRoomCommandCandidate(content);
+          const canAttemptMutedCommand =
+            commandCandidate
+            && chatPolicy.stage === 'DICE'
+            && isBankerRepostCommand(content);
+          if (chatPolicy.muted && !canAttemptMutedCommand) {
             reply({
               type: 'chat_error',
-              message: '抢红包阶段禁止发言，请专注领取',
+              message: roomChatPolicyMessage(chatPolicy),
             });
             return;
           }
-
-          if (payload.type === 'chat' && isRoomCommandCandidate(content)) {
+          if (commandCandidate) {
             const result = await handleRoomChatCommand({
               roomId: id,
               userId: user.id,
@@ -1046,7 +1377,9 @@ export async function gameRoomRoutes(app: FastifyInstance) {
                     roundId: liveRound.id,
                     roomId: id,
                     userId: user.id,
-                    amountCents: parseAmountCents(result.echo),
+                    amountCents: result.amountCents
+                      ? BigInt(result.amountCents)
+                      : parseAmountCents(result.echo),
                     extendedEndsAt: result.bidExtendedEndsAt ?? null,
                   }).catch(() => undefined);
                 }
@@ -1066,12 +1399,41 @@ export async function gameRoomRoutes(app: FastifyInstance) {
               return;
             }
           }
+          if (chatPolicy.muted) {
+            // STARTING 阶段形似指令、但未被当前阶段接受的内容仍是普通发言。
+            reply({
+              type: 'chat_error',
+              message: roomChatPolicyMessage(chatPolicy),
+            });
+            return;
+          }
 
+          if (memberMute.active) {
+            reply({
+              type: 'chat_error',
+              message: memberMute.mutedUntil
+                ? `你已被禁言至 ${new Date(memberMute.mutedUntil).toLocaleString('zh-MY', {
+                    timeZone: 'Asia/Kuala_Lumpur',
+                    hour12: false,
+                  })}`
+                : '你已被管理员永久禁言',
+            });
+            return;
+          }
+
+          const replyTo = replyToId
+            ? await resolveChatReply(id, replyToId, senderProfile.uid)
+            : null;
+          if (replyToId && !replyTo) {
+            reply({ type: 'chat_error', message: '原消息已失效，请重新选择' });
+            return;
+          }
           appendChat(id, {
             type: payload.type === 'emoji' ? 'EMOJI' : 'TEXT',
             content,
             from: senderProfile,
             requestId,
+            ...(replyTo ? { replyTo } : {}),
           });
         }
         if (Date.now() - lastPresenceTouch > 60_000) {
@@ -1087,12 +1449,33 @@ export async function gameRoomRoutes(app: FastifyInstance) {
       }
       if (queuedMessages >= WS_MESSAGE_QUEUE_LIMIT) {
         let requestId: string | undefined;
+        let messageType: string | undefined;
         try {
+          const overflowPayload = JSON.parse(raw.toString('utf8')) as {
+            type?: unknown;
+            requestId?: unknown;
+          };
           requestId = validSocketRequestId(
-            (JSON.parse(raw.toString('utf8')) as { requestId?: unknown }).requestId,
+            overflowPayload.requestId,
           );
+          messageType =
+            typeof overflowPayload.type === 'string'
+              ? overflowPayload.type
+              : undefined;
         } catch {
           requestId = undefined;
+        }
+        if (messageType === 'chat_history_before') {
+          socket.send(
+            JSON.stringify({
+              type: 'chat_history_page',
+              messages: [],
+              hasMore: true,
+              error: 'RATE_LIMITED',
+              ...(requestId ? { requestId } : {}),
+            }),
+          );
+          return;
         }
         warnRateLimit(requestId);
         return;

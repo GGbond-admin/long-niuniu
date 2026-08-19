@@ -10,16 +10,27 @@ import { withRedisLock } from '../lib/redis.js';
 import { announceBidPlaced } from './bidAuction.js';
 import { runBankerDiceCeremony } from './chatCommands.js';
 import {
+  BANKER_BID_INCREMENT_CENTS,
+  bankerContinuationFunding,
   currentRoundForRoom,
-  continueBanker,
   GameError,
   placeBankerBid,
   placeBet,
 } from './game.js';
-import { gameBus, type RoundTransitionEvent } from './gameBus.js';
+import { continueBankerWithFallback } from './bankerContinuationFlow.js';
+import {
+  gameBus,
+  type RoundAnnouncementEvent,
+  type RoundTransitionEvent,
+} from './gameBus.js';
 import { getGameSettings, parseSettingsSnapshot } from './gameSettings.js';
 import { claimGroupPacket } from './groupPacket.js';
 import { appendChat } from './roomHub.js';
+import {
+  getRoomChatPolicy,
+  ROOM_ANNOUNCED_FINISHED,
+} from './roomChatPolicy.js';
+import { getRoomMuteState } from './roomModeration.js';
 import {
   listEnabledVirtualsForRoom,
   topUpVirtualIfNeeded,
@@ -181,6 +192,8 @@ async function maybeChat(
   if (!canChat || Math.random() > 0.28) return;
   const text = pickPhrase(phrases);
   if (!text) return;
+  if ((await getRoomChatPolicy(roomId)).muted) return;
+  if ((await getRoomMuteState(roomId))?.muted) return;
   appendChat(roomId, {
     type: 'TEXT',
     content: text,
@@ -210,8 +223,12 @@ async function actOnBidPhase(roomId: string, roundId: string) {
   if (!round || round.phase !== RoundPhase.BANKER_BID) return;
   if (settings.round.assistantEnabled === false) return;
 
-  const minBid = BigInt(settings.round.bankerBidMinCents);
-  const maxBid = BigInt(settings.round.bankerBidMaxCents);
+  // 真人竞标仅接受整元；虚拟玩家也统一到 RM 1 的整数倍。
+  const configuredMinBid = BigInt(settings.round.bankerBidMinCents);
+  const configuredMaxBid = BigInt(settings.round.bankerBidMaxCents);
+  const minBid = ((configuredMinBid + 99n) / 100n) * 100n;
+  const maxBid = (configuredMaxBid / 100n) * 100n;
+  if (minBid > maxBid) return;
   const bidders = virtuals.filter(
     (profile) => profile.canBid && profile.canBanker && profile.user.roomMemberships.length,
   );
@@ -221,6 +238,7 @@ async function actOnBidPhase(roomId: string, roundId: string) {
 
     const delayMs = Math.floor(randBetween(600, 8_000));
     schedule(delayKey(roundId, profile.userId, 'bid'), delayMs, async () => {
+      if ((await getRoomMuteState(roomId))?.muted) return;
       const current = await prisma.round.findUnique({ where: { id: roundId } });
       if (!current || current.phase !== RoundPhase.BANKER_BID) return;
       const ownBid = await prisma.bankerBid.findUnique({
@@ -234,20 +252,24 @@ async function actOnBidPhase(roomId: string, roundId: string) {
         orderBy: { amountCents: 'desc' },
         select: { amountCents: true },
       });
-      let amount = high ? high.amountCents + BigInt(Math.floor(randBetween(100, 2_500))) : minBid;
+      let amount = high
+        ? high.amountCents + BANKER_BID_INCREMENT_CENTS
+        : minBid;
       if (!high) {
-        amount += BigInt(Math.floor(randBetween(0, Number(minBid))));
+        amount += BigInt(
+          Math.floor(randBetween(0, Number(minBid / 100n) + 1)),
+        ) * 100n;
       }
       if (amount < minBid) amount = minBid;
       if (amount > maxBid) amount = maxBid;
 
-      echoPlayerAmount(roomId, profile.user, amount);
       const bid = await placeBankerBid(roundId, profile.userId, amount);
+      echoPlayerAmount(roomId, profile.user, bid.amountCents);
       await announceBidPlaced({
         roomId,
         roundId,
         userId: profile.userId,
-        amountCents: amount,
+        amountCents: bid.amountCents,
         extendedEndsAt: bid?.extendedEndsAt ?? null,
       });
       await maybeChat(roomId, profile.user, profile.chatPhrases, profile.canChat);
@@ -298,6 +320,7 @@ async function actOnBetPhase(roomId: string, roundId: string) {
     index += 1;
     const delayMs = Math.floor(800 + slot * randBetween(350, 900) + randBetween(0, 1_200));
     schedule(delayKey(roundId, profile.userId, 'bet'), delayMs, async () => {
+      if ((await getRoomMuteState(roomId))?.muted) return;
       const current = await prisma.round.findUnique({ where: { id: roundId } });
       if (!current || current.phase !== RoundPhase.BETTING) return;
       if (current.bankerId === profile.userId) return;
@@ -401,7 +424,12 @@ async function planGroupPacketClaims(params: {
 
       await claimGroupPacket({ packetId, userId: profile.userId });
 
-      if (current.canChat && Math.random() < 0.3) {
+      if (
+        current.canChat
+        && Math.random() < 0.3
+        && !(await getRoomChatPolicy(roomId)).muted
+        && !(await getRoomMuteState(roomId))?.muted
+      ) {
         const text =
           PACKET_THANKS_PHRASES[Math.floor(Math.random() * PACKET_THANKS_PHRASES.length)]!;
         appendChat(roomId, {
@@ -439,6 +467,7 @@ export async function scheduleVirtualDiceForRound(roomId: string, roundId: strin
   const key = delayKey(roundId, profile.userId, 'dice');
   if (pending.has(key) || activeDiceRounds.has(roundId)) return;
   schedule(key, Math.floor(randBetween(1_500, 4_000)), async () => {
+    if ((await getRoomMuteState(roomId))?.muted) return;
     activeDiceRounds.add(roundId);
     try {
       const retryDelays = [0, 1_000, 2_000, 4_000, 8_000] as const;
@@ -463,18 +492,19 @@ export async function scheduleVirtualDiceForRound(roomId: string, roundId: strin
 }
 
 async function executeVirtualContinuation(
-  params: { roomId: string; roundId: string; userId: string; deadline: number },
+  params: {
+    roomId: string;
+    roundId: string;
+    userId: string;
+    deadline: number;
+    requiredCents: bigint;
+  },
   attempt = 0,
 ) {
   try {
-    await topUpVirtualIfNeeded(params.userId);
-    const continued = await continueBanker(params.roundId, params.userId);
-    gameBus.transition({
-      roundId: continued.id,
-      roomId: continued.roomId,
-      from: RoundPhase.WAITING,
-      to: RoundPhase.BETTING,
-    });
+    if ((await getRoomMuteState(params.roomId))?.muted) return;
+    await topUpVirtualIfNeeded(params.userId, 'SYSTEM', params.requiredCents);
+    await continueBankerWithFallback(params.roundId, params.userId);
   } catch (error) {
     const remainingMs = params.deadline - Date.now();
     // GameError 均为资格/余额/阶段等确定性拒绝；只重试数据库、网络等瞬时异常。
@@ -496,10 +526,16 @@ async function executeVirtualContinuation(
 }
 
 async function actOnContinuationPhase(roomId: string, roundId: string) {
-  const [currentSettings, round] = await Promise.all([
-    currentSettingsForRoom(roomId),
-    prisma.round.findUnique({ where: { id: roundId } }),
-  ]);
+  const round = await prisma.round.findUnique({
+    where: { id: roundId },
+    include: {
+      events: {
+        where: { type: ROOM_ANNOUNCED_FINISHED },
+        orderBy: { createdAt: 'asc' },
+        take: 1,
+      },
+    },
+  });
   if (
     !round
     || round.roomId !== roomId
@@ -510,12 +546,11 @@ async function actOnContinuationPhase(roomId: string, roundId: string) {
   ) {
     return;
   }
-  if (currentSettings.round.assistantEnabled === false) return;
   if (!round.configSnapshot) return;
 
   const settings = parseSettingsSnapshot(round.configSnapshot);
   const deadline = continuationDeadline(
-    round.finishedAt,
+    round.events[0]?.createdAt ?? null,
     settings.round.continuationWindowSeconds,
   );
   if (deadline === null || deadline <= Date.now()) return;
@@ -530,12 +565,15 @@ async function actOnContinuationPhase(roomId: string, roundId: string) {
     select: { userId: true },
   });
   if (!profile) return;
+  const continuationKey = delayKey(roundId, profile.userId, 'continue');
+  if (pending.has(continuationKey)) return;
+  const funding = await bankerContinuationFunding(round.id);
 
   // 至少预留两秒给自动补款与续庄事务；恢复较晚时立即执行。
   const latestStartMs = Math.max(0, deadline - Date.now() - 2_000);
   const delayMs = Math.min(Math.floor(randBetween(700, 1_800)), latestStartMs);
   schedule(
-    delayKey(roundId, profile.userId, 'continue'),
+    continuationKey,
     delayMs,
     () =>
       executeVirtualContinuation({
@@ -543,8 +581,16 @@ async function actOnContinuationPhase(roomId: string, roundId: string) {
         roundId,
         userId: profile.userId,
         deadline,
+        requiredCents: funding.requiredCents,
       }),
   );
+}
+
+export async function scheduleVirtualContinuationForRound(
+  roomId: string,
+  roundId: string,
+) {
+  await actOnContinuationPhase(roomId, roundId);
 }
 
 async function handleTransition(event: RoundTransitionEvent) {
@@ -555,17 +601,26 @@ async function handleTransition(event: RoundTransitionEvent) {
     await actOnBetPhase(event.roomId, event.roundId);
   } else if (event.to === RoundPhase.SENDING_PACKET) {
     await scheduleVirtualDiceForRound(event.roomId, event.roundId);
-  } else if (event.to === RoundPhase.FINISHED) {
-    await actOnContinuationPhase(event.roomId, event.roundId);
   }
 }
 
-async function handleTransitionWithRetry(event: RoundTransitionEvent, attempt = 0) {
+async function handleAnnouncement(event: RoundAnnouncementEvent) {
+  if (event.to !== RoundPhase.FINISHED) return;
+  await actOnContinuationPhase(event.roomId, event.roundId);
+}
+
+async function handleTransitionWithRetry(event: RoundTransitionEvent) {
+  await handleTransition(event);
+}
+
+async function handleAnnouncementWithRetry(
+  event: RoundAnnouncementEvent,
+  attempt = 0,
+) {
   try {
-    await handleTransition(event);
+    await handleAnnouncement(event);
   } catch (error) {
-    const delayMs =
-      event.to === RoundPhase.FINISHED ? RECOVERY_RETRY_DELAYS_MS[attempt] : undefined;
+    const delayMs = RECOVERY_RETRY_DELAYS_MS[attempt];
     if (delayMs === undefined) throw error;
     console.warn(
       '[virtual-player] continuation preparation retry',
@@ -576,7 +631,7 @@ async function handleTransitionWithRetry(event: RoundTransitionEvent, attempt = 
     schedule(
       delayKey(event.roundId, 'SYSTEM', 'continue-prepare'),
       delayMs,
-      () => handleTransitionWithRetry(event, attempt + 1),
+      () => handleAnnouncementWithRetry(event, attempt + 1),
     );
   }
 }
@@ -588,6 +643,11 @@ export function initVirtualPlayerWorker() {
   gameBus.on('round:transition', (event: RoundTransitionEvent) => {
     void handleTransitionWithRetry(event).catch((error) => {
       console.error('[virtual-player] transition failed', error);
+    });
+  });
+  gameBus.on('round:announcement', (event: RoundAnnouncementEvent) => {
+    void handleAnnouncementWithRetry(event).catch((error) => {
+      console.error('[virtual-player] announcement failed', error);
     });
   });
   recoverVirtualActions();
@@ -639,7 +699,7 @@ async function recoverInPlayRounds() {
         bankerId: { not: null },
         isContinued: false,
         continuationUsed: false,
-        finishedAt: { not: null },
+        events: { some: { type: ROOM_ANNOUNCED_FINISHED } },
       },
       orderBy: { finishedAt: 'desc' },
       select: { id: true, roomId: true },
@@ -690,11 +750,22 @@ export async function actAsVirtualPlayer(params: {
   if (!profile || !profile.enabled) throw new GameError('VIRTUAL_DISABLED');
   const round = await currentRoundForRoom(profile.roomId);
   if (!round && params.action !== 'chat') throw new GameError('ROUND_NOT_FOUND');
+  const roomMute = await getRoomMuteState(profile.roomId);
+  if (roomMute?.muted) {
+    throw new GameError('ROOM_GLOBAL_MUTED', {
+      mutedAt: roomMute.mutedAt,
+      reason: roomMute.reason,
+    });
+  }
 
   await topUpVirtualIfNeeded(profile.userId);
 
   if (params.action === 'chat') {
     if (!profile.canChat) throw new GameError('VIRTUAL_CAPABILITY_DENIED', { capability: 'chat' });
+    const chatPolicy = await getRoomChatPolicy(profile.roomId);
+    if (chatPolicy.muted) {
+      throw new GameError('ROOM_CHAT_PHASE_MUTED', { stage: chatPolicy.stage });
+    }
     const content = (params.text ?? pickPhrase(profile.chatPhrases) ?? 'hi').trim();
     appendChat(profile.roomId, {
       type: 'TEXT',
@@ -712,13 +783,13 @@ export async function actAsVirtualPlayer(params: {
 
   if (params.action === 'bid') {
     if (!params.amountCents) throw new GameError('INVALID_AMOUNT');
-    echoPlayerAmount(profile.roomId, profile.user, params.amountCents);
     const bid = await placeBankerBid(round.id, profile.userId, params.amountCents);
+    echoPlayerAmount(profile.roomId, profile.user, bid.amountCents);
     await announceBidPlaced({
       roomId: profile.roomId,
       roundId: round.id,
       userId: profile.userId,
-      amountCents: params.amountCents,
+      amountCents: bid.amountCents,
       extendedEndsAt: bid?.extendedEndsAt ?? null,
     });
     return { ok: true };

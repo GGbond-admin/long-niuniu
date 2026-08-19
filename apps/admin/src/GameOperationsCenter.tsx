@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { adminRoomWsUrl, del, patch, post, request, rm } from './api';
 import VirtualPlayers from './VirtualPlayers';
+import GameAdministratorsPanel from './GameAdministratorsPanel';
 import {
   GameLeaderboardsAdmin,
   GameRewardsAdmin,
@@ -488,7 +489,7 @@ export default function GameOperationsCenter({ admin }: { admin: Admin }) {
   /** catalog：游戏目录落地页；ops：进入某游戏唯一互动群后的三栏运营台 */
   const [screen, setScreen] = useState<'catalog' | 'ops'>('catalog');
   const [activeTab, setActiveTab] = useState<
-    'live' | 'rules' | 'rewards' | 'leaderboards' | 'virtuals'
+    'live' | 'rules' | 'rewards' | 'leaderboards' | 'virtuals' | 'admins'
   >('live');
   const [rooms, setRooms] = useState<Row[]>([]);
   const [rounds, setRounds] = useState<Row[]>([]);
@@ -553,6 +554,12 @@ export default function GameOperationsCenter({ admin }: { admin: Admin }) {
   const selectedRoom = rooms.find((room) => room.id === selectedRoomId) ?? null;
   /** 系统红包模式：至尊牛牛小助手自动发包，玩家群内直抢并即时入余额 */
   const internalPacketMode = selectedRoom?.packetChannel === 'INTERNAL';
+  const roomStartMode = String(
+    selectedRoom?.roundStartMode
+    ?? selectedRoom?.botService?.roundStartMode
+    ?? (botAutoStart ? 'AUTO' : 'MANUAL'),
+  ) as 'MANUAL' | 'AUTO' | 'STOPPED';
+  const roomGloballyMuted = Boolean(selectedRoom?.chatMutedAt);
   const frozenBets = detail?.bets?.filter((bet: Row) => bet.status === 'FROZEN') ?? [];
   const expectedClaims = (detail?.bankerId ? 1 : 0) + frozenBets.length;
   const claimReview = !!detail && ['CLAIMING', 'CLAIM_EXPIRED'].includes(detail.phase);
@@ -652,7 +659,11 @@ export default function GameOperationsCenter({ admin }: { admin: Admin }) {
     // 运营中心按「游戏目录」加载：一款游戏最多绑定一个互动群，禁止出现同游戏多牌桌。
     const response = await request<{
       items: Row[];
-      botService?: { assistantEnabled?: boolean; autoStart?: boolean };
+      botService?: {
+        assistantEnabled?: boolean;
+        autoStart?: boolean;
+        roundStartMode?: 'MANUAL' | 'AUTO' | 'STOPPED';
+      };
     }>('/api/admin/games');
     if (typeof response.botService?.assistantEnabled === 'boolean') {
       setAssistantEnabled(response.botService.assistantEnabled);
@@ -668,6 +679,12 @@ export default function GameOperationsCenter({ admin }: { admin: Admin }) {
         title: game.title as string,
         status: game.room.status as string,
         minPlayers: game.room.minPlayers as number,
+        roundStartMode:
+          game.room.roundStartMode
+          ?? game.botService?.roundStartMode
+          ?? (game.botService?.autoStart ? 'AUTO' : 'MANUAL'),
+        chatMutedAt: game.room.chatMutedAt ?? null,
+        chatMuteReason: game.room.chatMuteReason ?? null,
         botService: game.botService,
         packetChannel: (game.packetChannel as string) === 'INTERNAL' ? 'INTERNAL' : 'TNG',
         bankerBidMinCents: Number(game.bankerBidMinCents ?? 10_000),
@@ -1046,6 +1063,10 @@ export default function GameOperationsCenter({ admin }: { admin: Admin }) {
             heldByMe?: boolean;
             autoStart?: boolean;
             assistantEnabled?: boolean;
+            roundStartMode?: 'MANUAL' | 'AUTO' | 'STOPPED';
+            muted?: boolean;
+            mutedAt?: string | null;
+            reason?: string | null;
           };
           if (payload.type === 'chat_history' && payload.messages) {
             const tombstones = chatDeleteTombstonesRef.current;
@@ -1082,6 +1103,29 @@ export default function GameOperationsCenter({ admin }: { admin: Admin }) {
             if (typeof payload.autoStart === 'boolean') {
               setBotAutoStart(payload.autoStart);
             }
+            if (payload.roundStartMode) {
+              setRooms((current) =>
+                current.map((room) =>
+                  room.id === roomId
+                    ? { ...room, roundStartMode: payload.roundStartMode }
+                    : room,
+                ),
+              );
+            }
+          } else if (payload.type === 'room_moderation' && typeof payload.muted === 'boolean') {
+            setRooms((current) =>
+              current.map((room) =>
+                room.id === roomId
+                  ? {
+                      ...room,
+                      chatMutedAt: payload.muted
+                        ? payload.mutedAt ?? new Date().toISOString()
+                        : null,
+                      chatMuteReason: payload.muted ? payload.reason ?? null : null,
+                    }
+                  : room,
+              ),
+            );
           } else if (['round', 'claim', 'activity', 'reward'].includes(payload.type ?? '')) {
             void loadContext(roomId).catch(() => undefined);
           }
@@ -1644,6 +1688,7 @@ export default function GameOperationsCenter({ admin }: { admin: Admin }) {
           ['rewards', '每日奖励', '任务、配额与发放记录'],
           ['leaderboards', '排行榜', '榜型、快照与奖金'],
           ['virtuals', '虚拟玩家', '本游戏互动群假人'],
+          ['admins', '群管理员', 'TG 授权、预算与禁言'],
         ].map(([value, label, hint]) => (
           <button
             type="button"
@@ -1679,95 +1724,148 @@ export default function GameOperationsCenter({ admin }: { admin: Admin }) {
                 {selectedRoom.status === 'ACTIVE' ? '关闭游戏入口' : '打开游戏入口'}
               </button>
 
-              <p className="ops-control-layer">② 小助手（群内是否自动播报）</p>
-              {assistantEnabled ? (
-                <button
-                  type="button"
-                  className="danger-action"
-                  disabled={!!busy}
-                  title="关闭后群内小助手不再发消息，也不会自动开局"
-                  onClick={() => {
-                    if (!window.confirm('确认暂停小助手？群内将停止自动播报，也不会自动开局。入口仍可保持开放。')) {
-                      return;
-                    }
-                    void run('pause-assistant', async () => {
-                      await post(`/api/admin/rooms/${selectedRoom.id}/end`, {
-                        reason: '运营暂停小助手',
-                      });
-                      setAssistantEnabled(false);
-                      setBotAutoStart(false);
-                    });
-                  }}
-                >
-                  暂停小助手
-                </button>
-              ) : (
+              <p className="ops-control-layer">② 游戏运行</p>
+              <div className={`ops-mode-status ${roomStartMode.toLowerCase()}`}>
+                <i />
+                <span>
+                  <strong>
+                    {roomStartMode === 'AUTO'
+                      ? '自动连续运行'
+                      : roomStartMode === 'STOPPED'
+                        ? hasActiveRound
+                          ? '本局结束后停局'
+                          : '游戏已结束'
+                        : hasActiveRound
+                          ? '手动单局进行中'
+                          : '等待正常开局'}
+                  </strong>
+                  <small>
+                    {roomStartMode === 'AUTO'
+                      ? '每局结束后自动进入下一局'
+                      : roomStartMode === 'STOPPED'
+                        ? hasActiveRound
+                          ? '当前局照常完成，下一局不会启动'
+                          : '需正常开局或打开自动开局'
+                        : '本局结束后停在等待区'}
+                  </small>
+                </span>
+              </div>
+              <div className="ops-lifecycle-actions">
                 <button
                   type="button"
                   className="primary-action"
-                  disabled={!!busy}
-                  title="开启播报；默认不会自动开局"
+                  disabled={!!busy || !canStartRound || roomGloballyMuted}
+                  title={
+                    roomGloballyMuted
+                      ? '请先解除全群禁言'
+                      : !canStartRound
+                        ? '需打开入口且当前无进行中牌局'
+                        : '只开当前一局；结束后需再次手动开局'
+                  }
+                  onClick={() => void run('start', async () => {
+                    const next = await post<{
+                      botService: {
+                        autoStart: boolean;
+                        assistantEnabled: boolean;
+                        roundStartMode: 'MANUAL';
+                      };
+                    }>(`/api/admin/rooms/${selectedRoom.id}/start`, { force: false });
+                    setAssistantEnabled(next.botService.assistantEnabled);
+                    setBotAutoStart(next.botService.autoStart);
+                  })}
+                >
+                  正常开局
+                  <small>仅当前一局</small>
+                </button>
+                <button
+                  type="button"
+                  disabled={
+                    !!busy
+                    || selectedRoom.status !== 'ACTIVE'
+                    || roomStartMode === 'AUTO'
+                    || roomGloballyMuted
+                  }
+                  title={
+                    roomGloballyMuted
+                      ? '请先解除全群禁言'
+                      : roomStartMode === 'AUTO'
+                        ? '当前已在自动连续运行'
+                        : '开启后每局结束会自动进入下一局'
+                  }
                   onClick={() => {
-                    void run('resume-assistant', async () => {
-                      await post(`/api/admin/rooms/${selectedRoom.id}/resume-bot`, {});
-                      setAssistantEnabled(true);
-                      setBotAutoStart(false);
+                    if (!window.confirm('打开自动开局后，牌局会连续运行，直到点击“结束游戏”。确认打开？')) return;
+                    void run('auto-start', async () => {
+                      const next = await post<{
+                        botService: {
+                          autoStart: boolean;
+                          assistantEnabled: boolean;
+                          roundStartMode: 'AUTO';
+                        };
+                      }>(`/api/admin/rooms/${selectedRoom.id}/auto-start`, { enabled: true });
+                      setAssistantEnabled(next.botService.assistantEnabled);
+                      setBotAutoStart(next.botService.autoStart);
                     });
                   }}
                 >
-                  开启小助手
+                  {roomStartMode === 'AUTO' ? '自动开局中' : '打开自动开局'}
+                  <small>连续运行</small>
                 </button>
-              )}
+                <button
+                  type="button"
+                  className="danger-action ops-end-game"
+                  disabled={!!busy || roomStartMode === 'STOPPED'}
+                  onClick={() => {
+                    const message = hasActiveRound
+                      ? '确认结束游戏？当前局会照常完成并结算，但下一局不会启动。'
+                      : '确认结束游戏？系统将保持待机，直到正常开局或打开自动开局。';
+                    if (!window.confirm(message)) return;
+                    void run('end-game', async () => {
+                      const next = await post<{
+                        botService: {
+                          autoStart: boolean;
+                          assistantEnabled: boolean;
+                          roundStartMode: 'STOPPED';
+                        };
+                      }>(`/api/admin/rooms/${selectedRoom.id}/end`, {
+                        reason: '运营结束游戏',
+                      });
+                      setAssistantEnabled(next.botService.assistantEnabled);
+                      setBotAutoStart(next.botService.autoStart);
+                    });
+                  }}
+                >
+                  结束游戏
+                  <small>{hasActiveRound ? '本局完成后停止' : '停止后续开局'}</small>
+                </button>
+              </div>
 
-              <p className="ops-control-layer">③ 开局方式</p>
+              <p className="ops-control-layer">③ 互动群禁言</p>
               <button
                 type="button"
-                disabled={!!busy || !assistantEnabled}
-                title={!assistantEnabled ? '请先开启小助手' : undefined}
+                className={roomGloballyMuted ? 'primary-action ops-mute-toggle' : 'danger-action ops-mute-toggle'}
+                disabled={!!busy}
                 onClick={() => {
-                  void run('auto-start', async () => {
-                    const next = await post<{ botService: { autoStart: boolean } }>(
-                      `/api/admin/rooms/${selectedRoom.id}/auto-start`,
-                      { enabled: !botAutoStart },
-                    );
-                    setBotAutoStart(next.botService.autoStart);
+                  if (
+                    !roomGloballyMuted
+                    && !window.confirm('确认全群禁言？玩家的聊天、竞标、下注、投骰等全部输入都会立即关闭。')
+                  ) {
+                    return;
+                  }
+                  void run('room-chat-mute', async () => {
+                    await post(`/api/admin/rooms/${selectedRoom.id}/chat-mute`, {
+                      muted: !roomGloballyMuted,
+                      ...(!roomGloballyMuted ? { reason: '运营全群禁言' } : {}),
+                    });
                   });
                 }}
               >
-                {botAutoStart ? '关闭自动开局' : '打开自动开局'}
+                {roomGloballyMuted ? '解除全群禁言' : '开启全群禁言'}
               </button>
-              <button
-                type="button"
-                className="primary-action"
-                disabled={!!busy || !canStartRound || !assistantEnabled}
-                title={
-                  !assistantEnabled
-                    ? '请先开启小助手'
-                    : !canStartRound
-                      ? '需打开入口且当前无进行中牌局'
-                      : undefined
-                }
-                onClick={() => void run('start', async () => {
-                  await post(`/api/admin/rooms/${selectedRoom.id}/start`, { force: false });
-                })}
-              >
-                正常开局
-              </button>
-              <button
-                type="button"
-                className="danger-text"
-                disabled={!!busy || selectedRoom.status !== 'ACTIVE' || hasActiveRound || !assistantEnabled}
-                title={!assistantEnabled ? '请先开启小助手' : hasActiveRound ? '当前已有进行中的牌局' : undefined}
-                onClick={() => {
-                  if (window.confirm('强制开局将跳过最低人数校验，确认继续？')) {
-                    void run('force-start', async () => {
-                      await post(`/api/admin/rooms/${selectedRoom.id}/start`, { force: true });
-                    });
-                  }
-                }}
-              >
-                强制开局
-              </button>
+              <p className="ops-control-note">
+                {roomGloballyMuted
+                  ? `所有玩家输入已关闭${selectedRoom.chatMuteReason ? ` · ${selectedRoom.chatMuteReason}` : ''}`
+                  : '开启后，玩家端仅显示“互动群已禁言”'}
+              </p>
               <p className="ops-control-layer">④ 发包方式（切换后下一局生效）</p>
               <div className="ops-packet-channel-switch">
                 <button
@@ -1808,9 +1906,9 @@ export default function GameOperationsCenter({ admin }: { admin: Admin }) {
               <p className="ops-bot-hint">
                 入口 {selectedRoom.status === 'ACTIVE' ? '开' : '关'}
                 {' · '}
-                小助手 {assistantEnabled ? '播报中' : '已暂停（不发消息）'}
+                运行 {roomStartMode === 'AUTO' ? '自动连续' : roomStartMode === 'STOPPED' ? '已结束' : '手动单局'}
                 {' · '}
-                自动开局 {botAutoStart && assistantEnabled ? '开' : '关'}
+                群聊 {roomGloballyMuted ? '全群禁言' : '正常'}
                 {' · '}
                 发包 {internalPacketMode ? '系统红包' : 'TNG 链接'}
               </p>
@@ -1851,6 +1949,28 @@ export default function GameOperationsCenter({ admin }: { admin: Admin }) {
                   })}
                 >
                   保存运行设置
+                </button>
+                <button
+                  type="button"
+                  className="danger-text"
+                  disabled={
+                    !!busy
+                    || selectedRoom.status !== 'ACTIVE'
+                    || hasActiveRound
+                    || roomGloballyMuted
+                  }
+                  title={hasActiveRound ? '当前已有进行中的牌局' : '跳过最低人数，仅开当前一局'}
+                  onClick={() => {
+                    if (window.confirm('强制开局将跳过最低人数校验，且只运行当前一局。确认继续？')) {
+                      void run('force-start', async () => {
+                        await post(`/api/admin/rooms/${selectedRoom.id}/start`, { force: true });
+                        setAssistantEnabled(true);
+                        setBotAutoStart(false);
+                      });
+                    }
+                  }}
+                >
+                  强制开一局（跳过人数）
                 </button>
               </details>
             </div>
@@ -2478,6 +2598,12 @@ export default function GameOperationsCenter({ admin }: { admin: Admin }) {
               embedded
               canManageFunds={admin.role === 'SUPER' || admin.role === 'FINANCE'}
               canOperate={admin.role === 'SUPER' || admin.role === 'OPERATOR'}
+            />
+          )}
+          {activeTab === 'admins' && (
+            <GameAdministratorsPanel
+              gameCode={selectedRoom.gameCode}
+              role={admin.role}
             />
           )}
         </div>

@@ -79,12 +79,38 @@ export async function post(tx: Tx, input: PostingInput): Promise<void> {
     balanceAfter = wallet[field] as bigint;
   } else {
     if (input.userId) throw new WalletError('PLATFORM_ACCOUNT_CANNOT_HAVE_USER');
-    const delta = input.direction === LedgerDirection.CREDIT ? input.amountCents : -input.amountCents;
-    const account = await tx.platformAccount.upsert({
-      where: { accountType: input.accountType },
-      create: { accountType: input.accountType, balanceCents: delta },
-      update: { balanceCents: { increment: delta } },
-    });
+    let account: { balanceCents: bigint };
+    if (
+      input.accountType === AccountType.PLATFORM_RESERVE
+      && input.direction === LedgerDirection.DEBIT
+    ) {
+      await tx.platformAccount.upsert({
+        where: { accountType: input.accountType },
+        create: { accountType: input.accountType, balanceCents: 0n },
+        update: {},
+      });
+      const updated = await tx.platformAccount.updateMany({
+        where: {
+          accountType: input.accountType,
+          balanceCents: { gte: input.amountCents },
+        },
+        data: { balanceCents: { decrement: input.amountCents } },
+      });
+      if (updated.count !== 1) throw new WalletError('INSUFFICIENT_BALANCE');
+      account = await tx.platformAccount.findUniqueOrThrow({
+        where: { accountType: input.accountType },
+      });
+    } else {
+      const delta =
+        input.direction === LedgerDirection.CREDIT
+          ? input.amountCents
+          : -input.amountCents;
+      account = await tx.platformAccount.upsert({
+        where: { accountType: input.accountType },
+        create: { accountType: input.accountType, balanceCents: delta },
+        update: { balanceCents: { increment: delta } },
+      });
+    }
     balanceAfter = account.balanceCents;
   }
 

@@ -2,9 +2,9 @@
  * 网页互动群「小助手」播报文案：按对局阶段渲染可配置模板。
  * 对齐竞品体验：开局竞标 → 开注 → 封盘等发包 → 开始抢包 → 认额/成绩单。
  */
-import { BetStatus, RoundPhase } from '@prisma/client';
+import { BetStatus, RoundPhase, UserKind } from '@prisma/client';
 import { bettingRange, fromCents } from '../engine/betting.js';
-import { DEFAULT_FEE_CONFIG, rakeRatioFor } from '../engine/fees.js';
+import { bankerSeatFee, DEFAULT_FEE_CONFIG, rakeRatioFor } from '../engine/fees.js';
 import {
   formatScoreboard,
   type ScoreboardPresentation,
@@ -60,6 +60,11 @@ async function loadRound(roundId: string) {
       },
       packet: true,
       scoreboard: true,
+      events: {
+        where: { type: 'BANKER_REPOST_WINDOW' },
+        select: { type: true, payload: true },
+        take: 1,
+      },
     },
   });
 }
@@ -109,9 +114,10 @@ export type AnnounceMessage = (
   | { kind: 'banner'; banner: AnnounceBanner }
   | {
       kind: 'countdown';
-      mode: 'bid' | 'bet' | 'claim';
+      mode: 'bid' | 'bet' | 'claim' | 'repost';
       endsAt: string;
       template: string;
+      afterTemplate?: string;
     }
 ) & {
   /** 发送本条前等待的毫秒数：给红包卡片留出停留时间，避免立刻被顶出屏幕 */
@@ -132,10 +138,21 @@ function banner(key: AnnounceBanner): AnnounceMessage {
   return { kind: 'banner', banner: key };
 }
 
+function minimumWholeBid(cents: string | number | bigint): string {
+  const normalized =
+    typeof cents === 'bigint'
+      ? cents
+      : typeof cents === 'number'
+        ? BigInt(Math.round(cents))
+        : BigInt(cents);
+  return ((normalized + 99n) / 100n).toString();
+}
+
 function countdown(
-  mode: 'bid' | 'bet' | 'claim',
+  mode: 'bid' | 'bet' | 'claim' | 'repost',
   endsAt: Date | null | undefined,
   template: string,
+  afterTemplate?: string,
 ): AnnounceMessage | null {
   if (!endsAt) return null;
   return {
@@ -143,7 +160,16 @@ function countdown(
     mode,
     endsAt: endsAt.toISOString(),
     template: stripHtml(template),
+    afterTemplate: afterTemplate ? stripHtml(afterTemplate) : undefined,
   };
+}
+
+function eventEndsAt(payload: unknown): Date | null {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null;
+  const value = (payload as { endsAt?: unknown }).endsAt;
+  if (typeof value !== 'string') return null;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
 }
 
 /** 返回本阶段应推送到互动群的小助手消息列表（文本 + 阶段横幅图） */
@@ -158,7 +184,16 @@ export async function buildRoundAnnounceMessages(params: {
   const banker = round.bankerId
     ? await prisma.user.findUnique({
         where: { id: round.bankerId },
-        select: { uid: true, nickname: true, tgUsername: true },
+        select: {
+          uid: true,
+          nickname: true,
+          tgUsername: true,
+          kind: true,
+          wallet: { select: { availableCents: true } },
+          virtualPlayer: {
+            select: { enabled: true, canContinue: true },
+          },
+        },
       })
     : null;
 
@@ -174,7 +209,7 @@ export async function buildRoundAnnounceMessages(params: {
           renderMessage(templates.bidStart, {
             seqNo: round.seqNo,
             bidSeconds,
-            minBid: fromCents(settings?.round.bankerBidMinCents ?? 10_000),
+            minBid: minimumWholeBid(settings?.round.bankerBidMinCents ?? 10_000),
           }),
         ),
       ),
@@ -182,7 +217,7 @@ export async function buildRoundAnnounceMessages(params: {
     const live = countdown(
       'bid',
       round.bidEndsAt,
-      '竞标倒计时 · 还剩 {{remaining}} 秒\n直接发送金额出价，时间到进入最终确认！',
+      '竞标倒计时 · 还剩 {{remaining}} 秒\n首次报整数，后续每次固定加 RM 100。',
     );
     if (live) messages.push(live);
     return messages;
@@ -228,17 +263,35 @@ export async function buildRoundAnnounceMessages(params: {
   }
 
   if (params.to === RoundPhase.SENDING_PACKET) {
+    const repostSeconds = settings?.round.repostWindowSeconds ?? 5;
+    const diceSeconds = settings?.round.bankerDiceTimeoutSeconds ?? 15;
+    let prompt = stripHtml(
+      renderMessage(templates.dicePrompt, {
+        banker: banker ? mention(banker) : '庄家',
+        repostWindow: repostSeconds,
+        remaining: '{{remaining}}',
+        diceSeconds,
+      }),
+    );
+    if (!prompt.includes('{{remaining}}')) {
+      const staticTitle = /【封盘确认\s*·\s*\d+\s*秒】/;
+      prompt = staticTitle.test(prompt)
+        ? prompt.replace(staticTitle, '【封盘确认 · {{remaining}} 秒】')
+        : `【封盘确认 · {{remaining}} 秒】\n${prompt}`;
+    }
+    const repostEndsAt = eventEndsAt(
+      round.events.find((item) => item.type === 'BANKER_REPOST_WINDOW')?.payload,
+    );
+    const live = countdown(
+      'repost',
+      repostEndsAt,
+      prompt,
+      `【封盘确认已结束】\n请庄家在 ${diceSeconds} 秒内完成投骰，超时自动取消并退款`,
+    );
     return [
       banner('bet-stop'),
       text(buildSealedSummary(templates, round, banker)),
-      text(
-        stripHtml(
-          renderMessage(templates.dicePrompt, {
-            banker: banker ? mention(banker) : '庄家',
-            repostWindow: settings?.round.repostWindowSeconds ?? 8,
-          }),
-        ),
-      ),
+      live ?? text(prompt.replace(/\{\{\s*remaining\s*\}\}/g, String(repostSeconds))),
     ];
   }
 
@@ -312,12 +365,31 @@ export async function buildRoundAnnounceMessages(params: {
         }),
       );
     }
-    // 局末询问庄家是否续庄（按钮由前端续庄窗展示）
+    const continuationReserve =
+      settings
+        ? round.potCents
+          + BigInt(
+            bankerSeatFee(Number(round.potCents), settings.fees)
+            + settings.fees.serviceFeeCents,
+          )
+        : null;
+    const continuationFundingInsufficient =
+      continuationReserve !== null
+      && banker?.wallet
+      && banker.wallet.availableCents < continuationReserve
+      && !(
+        banker.kind === UserKind.VIRTUAL
+        && banker.virtualPlayer?.enabled === true
+        && banker.virtualPlayer.canContinue
+      );
+    // 局末询问庄家是否续庄（按钮由前端续庄窗展示）。
+    // 已知余额不足时不展示无效按钮，完成事件落库后由 scheduler 发幂等提示并开竞标。
     if (
       banker &&
       settings &&
       !round.continuationUsed &&
       !round.isContinued
+      && !continuationFundingInsufficient
     ) {
       messages.push(
         text(

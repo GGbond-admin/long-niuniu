@@ -12,6 +12,9 @@ const memory = vi.hoisted(() => {
     gameCode: 'SUPREME_NIUNIU',
     status: 'ACTIVE',
     minPlayers: 2,
+    roundStartMode: 'AUTO',
+    chatMutedAt: null as Date | null,
+    chatMuteReason: null as string | null,
   };
   let roundCounter = 1;
   let bidCounter = 0;
@@ -182,6 +185,12 @@ const memory = vi.hoisted(() => {
       count: async () => 2,
     },
     roundEvent: {
+      findFirst: async ({ where }: any) =>
+        events.find(
+          (item) =>
+            item.roundId === where.roundId
+            && (typeof where.type !== 'string' || item.type === where.type),
+        ) ?? null,
       create: async ({ data }: any) => {
         events.push(data);
         return data;
@@ -237,6 +246,7 @@ const memory = vi.hoisted(() => {
     events,
     prisma,
     reset,
+    room,
     rounds,
     settings: JSON.parse(JSON.stringify(baseSettings)),
     users,
@@ -269,7 +279,6 @@ vi.mock('./wallet.js', () => ({
 import {
   closeBidding,
   continueBanker,
-  GameError,
   placeBankerBid,
   startRound,
 } from './game.js';
@@ -280,6 +289,12 @@ function finishRound(roundId: string, finishedAt = new Date()) {
   round.finishedAt = finishedAt;
   round.betEndsAt = null;
   round.bankerReservedCents = 0n;
+  memory.events.push({
+    roundId,
+    type: 'ROOM_ANNOUNCED_FINISHED',
+    payload: { at: finishedAt.toISOString() },
+    createdAt: finishedAt,
+  });
 }
 
 describe('庄家竞拍与续庄完整循环', () => {
@@ -287,7 +302,37 @@ describe('庄家竞拍与续庄完整循环', () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-08-07T07:00:00.000Z'));
     memory.reset();
+    memory.room.roundStartMode = 'AUTO';
+    memory.room.chatMutedAt = null;
+    memory.room.chatMuteReason = null;
     memory.settings = JSON.parse(JSON.stringify(memory.baseSettings));
+  });
+
+  it('手动单局只接受运营显式开局，不接受自动来源绕过', async () => {
+    const waiting = memory.rounds.get('round-1');
+    waiting.phase = RoundPhase.WAITING;
+    memory.room.roundStartMode = 'MANUAL';
+
+    await expect(
+      startRound(waiting.id, false, undefined, 'AUTO'),
+    ).rejects.toMatchObject({ code: 'ROUND_START_DISABLED' });
+
+    await expect(
+      startRound(waiting.id, false, undefined, 'MANUAL'),
+    ).resolves.toMatchObject({ phase: RoundPhase.BANKER_BID });
+  });
+
+  it('全群禁言时任何来源都不能开启新一局', async () => {
+    const waiting = memory.rounds.get('round-1');
+    waiting.phase = RoundPhase.WAITING;
+    memory.room.roundStartMode = 'AUTO';
+    memory.room.chatMutedAt = new Date('2026-08-07T07:00:00.000Z');
+    memory.room.chatMuteReason = '运营全群禁言';
+
+    await expect(
+      startRound(waiting.id, false, undefined, 'AUTO'),
+    ).rejects.toMatchObject({ code: 'ROOM_GLOBAL_MUTED' });
+    expect(waiting.phase).toBe(RoundPhase.WAITING);
   });
 
   it('最高价中标，续一次后强制重拍，原庄可再次中标并重新获得续庄资格', async () => {
@@ -324,19 +369,17 @@ describe('庄家竞拍与续庄完整循环', () => {
       continuationUsed: true,
       bankerReservedCents: 50_600n,
     });
-    expect(second.betEndsAt?.getTime() - Date.now()).toBe(7_000);
+    expect(second.betEndsAt?.getTime()).toBe(Date.now() + 7_000);
     expect(second.configSnapshot).toEqual(memory.baseSettings);
 
     finishRound(second.id);
-    await expect(continueBanker(second.id, 'banker-a')).rejects.toMatchObject<
-      Partial<GameError>
-    >({
+    await expect(continueBanker(second.id, 'banker-a')).rejects.toMatchObject({
       code: 'CONTINUATION_ALREADY_USED',
     });
 
     const thirdWaiting = [...memory.rounds.values()].find((round) => round.seqNo === 3);
     expect(thirdWaiting?.phase).toBe(RoundPhase.WAITING);
-    await startRound(thirdWaiting.id, true);
+    await startRound(thirdWaiting.id, true, undefined, 'AUTO');
     await placeBankerBid(thirdWaiting.id, 'player-b', 60_000n);
     await placeBankerBid(thirdWaiting.id, 'banker-a', 70_000n);
     const third = await closeBidding(thirdWaiting.id);
@@ -359,25 +402,102 @@ describe('庄家竞拍与续庄完整循环', () => {
     });
   });
 
-  it('最后 5 秒内出现新高价时倒计时重置为 5 秒，非新高或时间充裕则不延长', async () => {
+  it('庄家竞标只接受整元金额', async () => {
+    await expect(
+      placeBankerBid('round-1', 'player-b', 40_050n),
+    ).rejects.toMatchObject({
+      code: 'BID_MUST_BE_INTEGER',
+    });
+    expect(memory.bids.size).toBe(0);
+  });
+
+  it('首口保留用户出价，后续至少比当前最高价高 RM100', async () => {
+    const first = await placeBankerBid('round-1', 'player-b', 40_000n);
+    expect(first.amountCents).toBe(40_000n);
+
+    await expect(
+      placeBankerBid('round-1', 'banker-a', 49_000n),
+    ).rejects.toMatchObject({
+      code: 'BID_INCREMENT_TOO_LOW',
+      details: {
+        currentCents: 40_000n,
+        minimumCents: 50_000n,
+      },
+    });
+
+    const jumped = await placeBankerBid('round-1', 'banker-a', 900_000n);
+    expect(jumped.amountCents).toBe(900_000n);
+
+    await expect(
+      placeBankerBid('round-1', 'player-b', 909_900n),
+    ).rejects.toMatchObject({
+      code: 'BID_INCREMENT_TOO_LOW',
+      details: {
+        currentCents: 900_000n,
+        minimumCents: 910_000n,
+      },
+    });
+
+    const higher = await placeBankerBid('round-1', 'player-b', 950_000n);
+    expect(higher.amountCents).toBe(950_000n);
+  });
+
+  it('名义截止后到 3/2/1 播报结束前仍可竞价，最终名单发出后拒绝', async () => {
+    await placeBankerBid('round-1', 'player-b', 40_000n);
+    const round = memory.rounds.get('round-1');
+    round.bidEndsAt = new Date(Date.now() - 1_000);
+    memory.events.push({
+      roundId: 'round-1',
+      type: 'BID_COUNTDOWN_3',
+      payload: { digit: '3' },
+    });
+
+    const duringThree = await placeBankerBid('round-1', 'banker-a', 90_000n);
+    expect(duringThree.amountCents).toBe(90_000n);
+    expect(duringThree.extendedEndsAt).toBeNull();
+
+    memory.events.push({
+      roundId: 'round-1',
+      type: 'BID_COUNTDOWN_1',
+      payload: { digit: '1' },
+    });
+    const duringOne = await placeBankerBid('round-1', 'player-b', 120_000n);
+    expect(duringOne.amountCents).toBe(120_000n);
+
+    memory.events.push({
+      roundId: 'round-1',
+      type: 'BID_FINAL_LIST',
+      payload: { at: new Date().toISOString() },
+    });
+    await expect(
+      placeBankerBid('round-1', 'banker-a', 70_000n),
+    ).rejects.toMatchObject({
+      code: 'PHASE_ENDED',
+    });
+  });
+
+  it('最后 5 秒内每次有效加价都重置为 5 秒，时间充裕时不延长', async () => {
     const round = memory.rounds.get('round-1');
     await placeBankerBid('round-1', 'player-b', 40_000n);
 
     // 剩 3 秒时出现新高价 → 截止时间重置为 now + 5 秒
     round.bidEndsAt = new Date(Date.now() + 3_000);
     const higher = await placeBankerBid('round-1', 'banker-a', 90_000n);
+    expect(higher.amountCents).toBe(90_000n);
     expect(higher.extendedEndsAt?.getTime()).toBe(Date.now() + 5_000);
     expect(memory.rounds.get('round-1').bidEndsAt.getTime()).toBe(Date.now() + 5_000);
 
-    // 剩 3 秒时出价但不是新高 → 不延长
+    // 下一口只要求至少高 RM100，也可以主动加更多
     round.bidEndsAt = new Date(Date.now() + 3_000);
-    const lower = await placeBankerBid('round-1', 'player-b', 50_000n);
-    expect(lower.extendedEndsAt).toBeNull();
-    expect(memory.rounds.get('round-1').bidEndsAt.getTime()).toBe(Date.now() + 3_000);
+    const next = await placeBankerBid('round-1', 'player-b', 120_000n);
+    expect(next.amountCents).toBe(120_000n);
+    expect(next.extendedEndsAt?.getTime()).toBe(Date.now() + 5_000);
+    expect(memory.rounds.get('round-1').bidEndsAt.getTime()).toBe(Date.now() + 5_000);
 
     // 剩余时间超过 5 秒时的新高价 → 不延长
     round.bidEndsAt = new Date(Date.now() + 20_000);
-    const early = await placeBankerBid('round-1', 'player-b', 120_000n);
+    const early = await placeBankerBid('round-1', 'player-b', 150_000n);
+    expect(early.amountCents).toBe(150_000n);
     expect(early.extendedEndsAt).toBeNull();
     expect(memory.rounds.get('round-1').bidEndsAt.getTime()).toBe(Date.now() + 20_000);
   });
@@ -404,10 +524,20 @@ describe('庄家竞拍与续庄完整循环', () => {
     first.finishedAt = new Date();
     first.configSnapshot = null;
 
-    await expect(continueBanker(first.id, 'banker-a')).rejects.toMatchObject<
-      Partial<GameError>
-    >({
+    await expect(continueBanker(first.id, 'banker-a')).rejects.toMatchObject({
       code: 'ROUND_CONFIG_SNAPSHOT_MISSING',
+    });
+  });
+
+  it('成绩单完成事件落库前禁止按钮续庄', async () => {
+    const first = memory.rounds.get('round-1');
+    first.phase = RoundPhase.FINISHED;
+    first.bankerId = 'banker-a';
+    first.potCents = 50_000n;
+    first.finishedAt = new Date(Date.now() - 20_000);
+
+    await expect(continueBanker(first.id, 'banker-a')).rejects.toMatchObject({
+      code: 'CONTINUATION_NOT_STARTED',
     });
   });
 });

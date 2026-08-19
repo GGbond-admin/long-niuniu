@@ -19,6 +19,12 @@ export interface RewardGrantedEvent {
   amountCents: string;
 }
 
+export interface RoundAnnouncementEvent {
+  roundId: string;
+  roomId: string;
+  to: string;
+}
+
 class GameBus extends EventEmitter {
   transition(payload: RoundTransitionEvent) {
     this.emit('round:transition', payload);
@@ -30,6 +36,10 @@ class GameBus extends EventEmitter {
 
   rewardGranted(payload: RewardGrantedEvent) {
     this.emit('reward:granted', payload);
+  }
+
+  announcementCompleted(payload: RoundAnnouncementEvent) {
+    this.emit('round:announcement', payload);
   }
 }
 

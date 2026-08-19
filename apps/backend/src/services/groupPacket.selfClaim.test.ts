@@ -38,7 +38,10 @@ describe('普通红包发送者领取', () => {
       status: 'ACTIVE',
       kyc: { status: 'APPROVED' },
       wallet: {},
-      roomMemberships: [{ status: 'ACTIVE' }],
+      roomMemberships: [{
+        status: 'ACTIVE',
+        room: { chatMutedAt: null, chatMuteReason: null },
+      }],
     });
     mocks.tx.groupPacketClaim.findUnique.mockResolvedValue(null);
     mocks.tx.groupPacketClaim.create.mockResolvedValue({
@@ -70,6 +73,41 @@ describe('普通红包发送者领取', () => {
         to: { userId: 'sender-1', accountType: 'USER_AVAILABLE' },
       }),
     );
+  });
+
+  it('托管账户异常时返回红包资金错误，而不是误报领取者余额不足', async () => {
+    mocks.transfer.mockRejectedValue(
+      Object.assign(new Error('INSUFFICIENT_BALANCE'), {
+        code: 'INSUFFICIENT_BALANCE',
+      }),
+    );
+
+    await expect(
+      claimGroupPacket({ packetId: 'packet-1', userId: 'sender-1' }),
+    ).rejects.toMatchObject({ code: 'PACKET_ESCROW_UNAVAILABLE' });
+  });
+
+  it('全群禁言时拒绝抢包且不触碰红包资金', async () => {
+    mocks.tx.user.findUnique.mockResolvedValue({
+      id: 'sender-1',
+      status: 'ACTIVE',
+      kyc: { status: 'APPROVED' },
+      wallet: {},
+      roomMemberships: [{
+        status: 'ACTIVE',
+        room: {
+          chatMutedAt: new Date('2026-08-19T12:00:00.000Z'),
+          chatMuteReason: '运营全群禁言',
+        },
+      }],
+    });
+
+    await expect(
+      claimGroupPacket({ packetId: 'packet-1', userId: 'sender-1' }),
+    ).rejects.toMatchObject({ code: 'ROOM_GLOBAL_MUTED' });
+    expect(mocks.tx.groupPacketClaim.create).not.toHaveBeenCalled();
+    expect(mocks.tx.groupPacket.update).not.toHaveBeenCalled();
+    expect(mocks.transfer).not.toHaveBeenCalled();
   });
 
   it('普通红包有效期为 24 小时', () => {

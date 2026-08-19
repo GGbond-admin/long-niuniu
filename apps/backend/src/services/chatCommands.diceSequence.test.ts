@@ -117,6 +117,7 @@ vi.mock('./roomHub.js', () => ({
 }));
 
 import {
+  cancelBankerDiceTimeout,
   confirmedChatGameAction,
   handleRoomChatCommand,
   runBankerDiceCeremony,
@@ -133,7 +134,17 @@ function repostWindow(endsAt: Date) {
     id: 'repost-window',
     roundId: 'round-1',
     type: 'BANKER_REPOST_WINDOW',
-    payload: { endsAt: endsAt.toISOString(), seconds: 8 },
+    payload: { endsAt: endsAt.toISOString(), seconds: 5 },
+    createdAt: new Date(),
+  });
+}
+
+function diceDeadline(endsAt: Date) {
+  memory.events.push({
+    id: 'dice-deadline',
+    roundId: 'round-1',
+    type: 'BANKER_DICE_DEADLINE',
+    payload: { endsAt: endsAt.toISOString(), seconds: 15 },
     createdAt: new Date(),
   });
 }
@@ -146,6 +157,7 @@ describe('庄家投骰与整局重推', () => {
     memory.chats.length = 0;
     memory.events.length = 0;
     repostWindow(new Date(Date.now() - 1));
+    diceDeadline(new Date(Date.now() + 15_000));
     memory.cancelRound.mockReset();
     memory.cancelRound.mockResolvedValue({ phase: 'CANCELLED' });
     memory.ensureWaitingRound.mockReset();
@@ -226,18 +238,20 @@ describe('庄家投骰与整局重推', () => {
 
   it('封盘确认窗口内禁止提前投骰', async () => {
     memory.events.length = 0;
-    repostWindow(new Date(Date.now() + 8_000));
+    repostWindow(new Date(Date.now() + 5_000));
+    diceDeadline(new Date(Date.now() + 20_000));
 
     await expect(runCeremony()).resolves.toEqual({
       kind: 'error',
-      message: '封盘确认中，还剩 8 秒；如需取消退款并重开，请发送 /重推',
+      message: '封盘确认中，还剩 5 秒；如需取消退款并重开，请发送 /重推',
     });
     expect(memory.events.some((event) => event.type === 'BANKER_DICE')).toBe(false);
   });
 
   it('/重推会取消退款并立即开启下一局，不会重新投骰', async () => {
     memory.events.length = 0;
-    repostWindow(new Date(Date.now() + 8_000));
+    repostWindow(new Date(Date.now() + 5_000));
+    diceDeadline(new Date(Date.now() + 20_000));
 
     const result = await handleRoomChatCommand({
       roomId: 'room-1',
@@ -249,7 +263,12 @@ describe('庄家投骰与整局重推', () => {
     expect(confirmedChatGameAction(result)).toBeUndefined();
     expect(memory.cancelRound).toHaveBeenCalledWith('round-1', '庄家重推', 'banker-1');
     expect(memory.ensureWaitingRound).toHaveBeenCalledWith('room-1');
-    expect(memory.startRound).toHaveBeenCalledWith('round-2');
+    expect(memory.startRound).toHaveBeenCalledWith(
+      'round-2',
+      false,
+      undefined,
+      'REPLACEMENT',
+    );
     expect(memory.transition).toHaveBeenNthCalledWith(1, {
       roundId: 'round-1',
       roomId: 'room-1',
@@ -281,7 +300,8 @@ describe('庄家投骰与整局重推', () => {
 
   it('已经开始投骰后不能再重推', async () => {
     memory.events.length = 0;
-    repostWindow(new Date(Date.now() + 8_000));
+    repostWindow(new Date(Date.now() + 5_000));
+    diceDeadline(new Date(Date.now() + 20_000));
     memory.events.push({
       id: 'started-dice',
       roundId: 'round-1',
@@ -301,5 +321,42 @@ describe('庄家投骰与整局重推', () => {
       message: '本局已经开始投骰，不能再重推',
     });
     expect(memory.cancelRound).not.toHaveBeenCalled();
+  });
+
+  it('15 秒投骰时间结束后拒绝再投骰', async () => {
+    memory.events.length = 0;
+    repostWindow(new Date(Date.now() - 15_000));
+    diceDeadline(new Date(Date.now() - 1));
+
+    await expect(runCeremony()).resolves.toEqual({
+      kind: 'error',
+      message: '庄家投骰时间已结束，本局正在自动取消',
+    });
+    expect(memory.events.some((event) => event.type === 'BANKER_DICE')).toBe(false);
+  });
+
+  it('15 秒未投骰时自动取消并退款', async () => {
+    memory.events.length = 0;
+    repostWindow(new Date(Date.now() - 15_000));
+
+    await expect(
+      cancelBankerDiceTimeout({
+        roundId: 'round-1',
+        roomId: 'room-1',
+        now: new Date(),
+      }),
+    ).resolves.toBe(true);
+
+    expect(memory.cancelRound).toHaveBeenCalledWith(
+      'round-1',
+      '庄家投骰超时',
+      'SYSTEM',
+    );
+    expect(memory.transition).toHaveBeenCalledWith({
+      roundId: 'round-1',
+      roomId: 'room-1',
+      from: 'SENDING_PACKET',
+      to: 'CANCELLED',
+    });
   });
 });

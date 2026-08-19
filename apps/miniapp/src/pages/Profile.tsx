@@ -2,6 +2,10 @@ import { useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../api';
+import {
+  getCachedGameAdminAssignments,
+  setCachedGameAdminAssignments,
+} from '../sessionStore';
 import type { Session } from '../App';
 import {
   IconChevronRight,
@@ -44,6 +48,9 @@ export default function Profile({
   const [avatarError, setAvatarError] = useState('');
   const [bankText, setBankText] = useState('未添加');
   const [agent, setAgent] = useState<Awaited<ReturnType<typeof api.agentMe>>['agent']>(null);
+  const [gameAdminAssignments, setGameAdminAssignments] = useState(
+    () => getCachedGameAdminAssignments() ?? [],
+  );
   const kyc = session.onboarding.kycStatus;
 
   useEffect(() => {
@@ -54,6 +61,16 @@ export default function Profile({
       .agentMe()
       .then((result) => setAgent(result.agent))
       .catch(() => setAgent(null));
+    api
+      .gameAdminMe()
+      .then((result) => {
+        setGameAdminAssignments(result.items);
+        setCachedGameAdminAssignments(result.items);
+      })
+      .catch(() => {
+        setGameAdminAssignments([]);
+        setCachedGameAdminAssignments([]);
+      });
   }, [active]);
 
   useEffect(() => {
@@ -238,6 +255,23 @@ export default function Profile({
           </button>
         </div>
       </section>
+
+      {gameAdminAssignments.length > 0 && (
+        <section className="profile-section gam-profile-entry">
+          <button type="button" onClick={() => navigate('/game-admin')}>
+            <span className="gam-profile-icon">盾</span>
+            <span>
+              <small>GAME OPERATIONS</small>
+              <strong>游戏管理员中心</strong>
+              <p>
+                已授权 {gameAdminAssignments.length} 个游戏 · 管理成员、预算与管理员红包
+              </p>
+            </span>
+            <em>进入控制台</em>
+            <IconChevronRight size={17} />
+          </button>
+        </section>
+      )}
 
       {agent && (
         <section className="profile-section ag-exclusive">

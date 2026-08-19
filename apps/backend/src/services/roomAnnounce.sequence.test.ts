@@ -4,12 +4,17 @@ import { describe, expect, it, vi } from 'vitest';
 const fixture = vi.hoisted(() => {
   const settings = {
     betting: {},
-    fees: { rakeRatio: 0.05 },
+    fees: {
+      rakeRatio: 0.05,
+      bankerSeatFeeRatio: 0.01,
+      serviceFeeCents: 100,
+    },
     round: {
       bidDurationSeconds: 30,
       betDurationSeconds: 50,
       claimDurationSeconds: 30,
-      repostWindowSeconds: 8,
+      repostWindowSeconds: 5,
+      bankerDiceTimeoutSeconds: 15,
       tailPackerBankerName: '庄家尾包',
       tailPackerPlayerName: '闲家尾包',
     },
@@ -34,6 +39,12 @@ const fixture = vi.hoisted(() => {
     packet: { totalCents: 208n, participantCount: 2 },
     scoreboard: null,
     continuationUsed: false,
+    events: [
+      {
+        type: 'BANKER_REPOST_WINDOW',
+        payload: { endsAt: '2026-08-07T07:01:25.000Z', seconds: 5 },
+      },
+    ],
   };
   const templates = {
     bidStart: 'bid-start',
@@ -41,7 +52,7 @@ const fixture = vi.hoisted(() => {
     betStart: 'bet-start {{banker}} {{pot}} {{betSeconds}}',
     betCountdown: 'bet-countdown {{remaining}}',
     sealedSummary: 'sealed-summary {{banker}} {{betList}}',
-    dicePrompt: 'dice-prompt {{banker}} {{repostWindow}}',
+    dicePrompt: 'dice-prompt {{banker}} {{remaining}} {{diceSeconds}}',
     sealed: 'sealed-wait',
     claimStart: 'claim-start {{claimSeconds}}',
     claimWarning: 'claim-warning {{claimSeconds}}',
@@ -70,6 +81,7 @@ vi.mock('../lib/prisma.js', () => ({
         uid: 'banker',
         nickname: '庄家',
         tgUsername: null,
+        wallet: { availableCents: 1_000_000n },
       })),
     },
   },
@@ -118,11 +130,14 @@ describe('阶段机器人播报顺序', () => {
     expect(shape(messages)).toEqual([
       'banner:bet-stop',
       'sealed-summary',
-      'dice-prompt',
+      'countdown:repost',
     ]);
     expect(messages[2]).toMatchObject({
-      kind: 'text',
-      content: 'dice-prompt @庄家 8',
+      kind: 'countdown',
+      mode: 'repost',
+      endsAt: '2026-08-07T07:01:25.000Z',
+      template: 'dice-prompt @庄家 {{remaining}} 15',
+      afterTemplate: '【封盘确认已结束】\n请庄家在 15 秒内完成投骰，超时自动取消并退款',
     });
   });
 

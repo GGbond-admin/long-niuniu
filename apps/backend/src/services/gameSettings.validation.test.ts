@@ -63,7 +63,19 @@ describe('游戏配置跨字段校验', () => {
       validateGameConfig('round', { repostWindowSeconds: 31 }),
     ).toThrow();
     expect(
-      validateGameConfig('round', { repostWindowSeconds: 8 }),
+      validateGameConfig('round', { repostWindowSeconds: 5 }),
+    ).toBeTruthy();
+  });
+
+  it('庄家投骰时限只允许 5 至 120 秒', () => {
+    expect(() =>
+      validateGameConfig('round', { bankerDiceTimeoutSeconds: 4 }),
+    ).toThrow();
+    expect(() =>
+      validateGameConfig('round', { bankerDiceTimeoutSeconds: 121 }),
+    ).toThrow();
+    expect(
+      validateGameConfig('round', { bankerDiceTimeoutSeconds: 15 }),
     ).toBeTruthy();
   });
 });

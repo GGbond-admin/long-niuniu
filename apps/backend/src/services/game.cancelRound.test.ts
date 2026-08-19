@@ -5,6 +5,8 @@ const memory = vi.hoisted(() => ({
   betStatus: 'FROZEN',
   packetUpdate: null as Record<string, unknown> | null,
   roundUpdate: null as Record<string, unknown> | null,
+  packetSentAt: null as Date | null,
+  packetFeePrepaid: false,
   events: [] as Array<{ type: string; payload?: unknown; actorId?: string }>,
 }));
 
@@ -29,7 +31,7 @@ const tx = vi.hoisted(() => ({
         id: 'packet-1',
         channel: 'TNG',
         totalCents: 200n,
-        sentAt: null,
+        sentAt: memory.packetSentAt,
       },
       _count: { claims: 0 },
     })),
@@ -62,9 +64,25 @@ const tx = vi.hoisted(() => ({
       return { id: `event-${memory.events.length}`, ...data };
     }),
   },
+  ledgerEntry: {
+    findUnique: vi.fn(async () =>
+      memory.packetFeePrepaid
+        ? {
+            userId: 'banker-1',
+            accountType: 'USER_FREEZE_BANKER',
+            direction: 'DEBIT',
+            amountCents: 200n,
+            refType: 'fee_packet_agent',
+            refId: 'round-1',
+            roundId: 'round-1',
+          }
+        : null,
+    ),
+  },
 }));
 
 const unfreeze = vi.hoisted(() => vi.fn(async () => undefined));
+const transfer = vi.hoisted(() => vi.fn(async () => undefined));
 
 vi.mock('../config.js', () => ({
   env: { sensitiveDataKey: 'test-key', tngPacketHosts: [] },
@@ -81,7 +99,7 @@ vi.mock('./gameSettings.js', () => ({
 }));
 vi.mock('./wallet.js', () => ({
   freezeBanker: vi.fn(),
-  transfer: vi.fn(),
+  transfer,
   unfreeze,
 }));
 
@@ -92,8 +110,11 @@ describe('整局重推退款', () => {
     memory.betStatus = 'FROZEN';
     memory.packetUpdate = null;
     memory.roundUpdate = null;
+    memory.packetSentAt = null;
+    memory.packetFeePrepaid = false;
     memory.events.length = 0;
     unfreeze.mockClear();
+    transfer.mockClear();
   });
 
   it('取消局会退回闲家责任金、庄家冻结金并关闭未发红包', async () => {
@@ -136,5 +157,36 @@ describe('整局重推退款', () => {
       actorId: 'banker-1',
       roundId: 'round-1',
     });
+  });
+
+  it('已预付的 TNG 代包费在取消局时通过调账科目全额退回庄家', async () => {
+    memory.packetSentAt = new Date();
+    memory.packetFeePrepaid = true;
+
+    await cancelRound('round-1', 'TNG 发包后取消', 'admin-1');
+
+    expect(unfreeze).toHaveBeenNthCalledWith(
+      2,
+      tx,
+      'banker-1',
+      AccountType.USER_FREEZE_BANKER,
+      4_800n,
+      'round-1',
+      'round_cancel_refund',
+      'cancel:banker:round-1',
+    );
+    expect(transfer).toHaveBeenCalledWith(
+      tx,
+      expect.objectContaining({
+        amountCents: 200n,
+        from: { accountType: AccountType.ADJUST_CLEARING },
+        to: {
+          userId: 'banker-1',
+          accountType: AccountType.USER_AVAILABLE,
+        },
+        refType: 'cancelled_packet_fee_refund',
+        idempotencyKey: 'cancelled-packet-fee-refund:packet-1',
+      }),
+    );
   });
 });

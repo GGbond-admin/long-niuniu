@@ -16,6 +16,7 @@
 import {
   CompareResult,
   DEFAULT_HAND_CONFIG,
+  HAND_LABEL,
   HAND_RANK,
   HandConfig,
   HandResult,
@@ -135,14 +136,25 @@ export function compareScoreboardHandOrder(
   return 0;
 }
 
-export function trendFromBankerSummary(summary: unknown): string[] {
-  if (!summary || typeof summary !== 'object') return [];
-  const trend = (summary as { trend?: unknown }).trend;
-  return Array.isArray(trend) ? trend.map((item) => String(item)).filter(Boolean) : [];
+/** 从一局不可变成绩单中还原该局庄家的走势标签。 */
+export function bankerTrendLabelFromSummary(summary: unknown): string | null {
+  if (!summary || typeof summary !== 'object') return null;
+  const snapshot = summary as { handType?: unknown; points?: unknown };
+  if (
+    typeof snapshot.handType !== 'string'
+    || !Object.values(HandType).includes(snapshot.handType as HandType)
+  ) {
+    return null;
+  }
+  const handType = snapshot.handType as HandType;
+  if (handType !== HandType.NORMAL) return HAND_LABEL[handType];
+  if (typeof snapshot.points !== 'number' && typeof snapshot.points !== 'string') return null;
+  const points = Number(snapshot.points);
+  return Number.isInteger(points) && points >= 1 && points <= 10 ? `${points}点` : null;
 }
 
-/** 房间级庄家走势：换庄不重置，接着上一局成绩单继续往后记。 */
-export function continueRoomBankerTrend(
+/** 单个庄家在单个房间内的走势；调用方只传入该庄家自己的历史。 */
+export function continueBankerTrend(
   previousTrend: unknown,
   bankerLabel: string,
   trendLength: number,
@@ -178,6 +190,8 @@ export function settleRound(params: {
   potCents: number;
   players: PlayerInput[];
   participantCount?: number; // 默认 = 闲家数 + 1
+  /** 已创建红包的实际总额；有人弃权时仍保持原代包费不变。 */
+  packetFeeCents?: number;
   handConfig?: HandConfig;
   feeConfig?: FeeConfig;
 }): RoundSettlementResult {
@@ -299,7 +313,18 @@ export function settleRound(params: {
     );
 
   const participantCount = params.participantCount ?? params.players.length + 1;
-  const fees = bankerFees(params.potCents, participantCount, feeConfig);
+  const calculatedFees = bankerFees(params.potCents, participantCount, feeConfig);
+  const fees =
+    params.packetFeeCents === undefined
+      ? calculatedFees
+      : {
+          ...calculatedFees,
+          packetFeeCents: params.packetFeeCents,
+          totalCents:
+            calculatedFees.seatFeeCents
+            + calculatedFees.serviceFeeCents
+            + params.packetFeeCents,
+        };
   const bankerNet = bankerGross - fees.totalCents;
 
   return {

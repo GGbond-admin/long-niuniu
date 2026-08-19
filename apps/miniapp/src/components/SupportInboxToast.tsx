@@ -56,10 +56,14 @@ export default function SupportInboxToast() {
       }
     }
 
-    void poll();
-    const timer = window.setInterval(() => void poll(), 5_000);
+    let timer = 0;
+    const start = window.setTimeout(() => {
+      void poll();
+      timer = window.setInterval(() => void poll(), 5_000);
+    }, 2_800);
     return () => {
       cancelled = true;
+      window.clearTimeout(start);
       window.clearInterval(timer);
       if (hideTimer.current) window.clearTimeout(hideTimer.current);
     };

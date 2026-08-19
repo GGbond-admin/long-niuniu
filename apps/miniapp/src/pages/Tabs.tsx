@@ -1,12 +1,13 @@
-import { useEffect, useState, type ComponentType } from 'react';
+import { lazy, Suspense, useEffect, useState, type ComponentType } from 'react';
 import { useNavigate } from 'react-router-dom';
 import type { Session } from '../App';
 import { api } from '../api';
 import { IconHome, IconMessage, IconUser, IconWallet } from '../components/Icons';
-import ChatHub from './ChatHub';
 import Lobby from './Lobby';
-import Profile from './Profile';
-import Wallet from './Wallet';
+
+const ChatHub = lazy(() => import('./ChatHub'));
+const Profile = lazy(() => import('./Profile'));
+const Wallet = lazy(() => import('./Wallet'));
 
 type TabKey = 'lobby' | 'wallet' | 'chat' | 'me';
 type TabIcon = ComponentType<{ size?: number; className?: string }>;
@@ -84,10 +85,14 @@ export default function Tabs({
         if (cancelled) return;
         setInboxUnread(Number(chat.unread ?? 0) + Number(notices.unread ?? 0));
       });
-    void load();
-    const timer = window.setInterval(load, 8_000);
+    let timer = 0;
+    const start = window.setTimeout(() => {
+      void load();
+      timer = window.setInterval(load, 8_000);
+    }, 2_400);
     return () => {
       cancelled = true;
+      window.clearTimeout(start);
       window.clearInterval(timer);
     };
   }, []);
@@ -102,21 +107,27 @@ export default function Tabs({
       )}
       {visited.wallet && (
         <div className="tab-panel" hidden={tab !== 'wallet'} aria-hidden={tab !== 'wallet'}>
-          <Wallet
-            kycStatus={kyc}
-            active={tab === 'wallet'}
-            onGoLobby={() => selectTab('lobby')}
-          />
+          <Suspense fallback={<div className="loading">加载中…</div>}>
+            <Wallet
+              kycStatus={kyc}
+              active={tab === 'wallet'}
+              onGoLobby={() => selectTab('lobby')}
+            />
+          </Suspense>
         </div>
       )}
       {visited.chat && (
         <div className="tab-panel" hidden={tab !== 'chat'} aria-hidden={tab !== 'chat'}>
-          <ChatHub active={tab === 'chat'} />
+          <Suspense fallback={<div className="loading">加载中…</div>}>
+            <ChatHub active={tab === 'chat'} />
+          </Suspense>
         </div>
       )}
       {visited.me && (
         <div className="tab-panel" hidden={tab !== 'me'} aria-hidden={tab !== 'me'}>
-          <Profile session={session} onAvatarChange={onAvatarChange} active={tab === 'me'} />
+          <Suspense fallback={<div className="loading">加载中…</div>}>
+            <Profile session={session} onAvatarChange={onAvatarChange} active={tab === 'me'} />
+          </Suspense>
         </div>
       )}
       <nav className="tabbar" aria-label="主导航">

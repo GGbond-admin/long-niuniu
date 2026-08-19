@@ -3,6 +3,7 @@ import { RoundPhase } from '@prisma/client';
 export type BankerContinuationErrorCode =
   | 'INVALID_PHASE'
   | 'NOT_ROUND_BANKER'
+  | 'CONTINUATION_NOT_STARTED'
   | 'CONTINUATION_ALREADY_USED'
   | 'CONTINUATION_WINDOW_EXPIRED'
   | 'NEXT_ROUND_UNAVAILABLE';
@@ -14,7 +15,8 @@ export interface ContinuationSourceRound {
   bankerId: string | null;
   continuationUsed: boolean;
   isContinued: boolean;
-  finishedAt: Date | null;
+  /** 成绩单与续庄询问话术全部发布后落库的事件时间。 */
+  continuationStartedAt: Date | null;
 }
 
 export interface ContinuationDestinationRound {
@@ -31,7 +33,12 @@ export function shouldStartWaitingRound(params: {
   autoStart: boolean;
   continuationError: BankerContinuationErrorCode | null | undefined;
 }): boolean {
-  if (params.continuationError === null) return false;
+  if (
+    params.continuationError === null
+    || params.continuationError === 'CONTINUATION_NOT_STARTED'
+  ) {
+    return false;
+  }
   return (
     params.autoStart
     || params.continuationError === 'CONTINUATION_WINDOW_EXPIRED'
@@ -40,11 +47,11 @@ export function shouldStartWaitingRound(params: {
 }
 
 export function continuationDeadline(
-  finishedAt: Date | null,
+  continuationStartedAt: Date | null,
   windowSeconds: number,
 ): number | null {
-  if (!finishedAt) return null;
-  return finishedAt.getTime() + windowSeconds * 1_000;
+  if (!continuationStartedAt) return null;
+  return continuationStartedAt.getTime() + windowSeconds * 1_000;
 }
 
 /**
@@ -63,11 +70,12 @@ export function bankerContinuationError(params: {
 
   if (previous.phase !== RoundPhase.FINISHED) return 'INVALID_PHASE';
   if (previous.bankerId !== userId) return 'NOT_ROUND_BANKER';
+  if (!previous.continuationStartedAt) return 'CONTINUATION_NOT_STARTED';
   if (previous.continuationUsed || previous.isContinued) {
     return 'CONTINUATION_ALREADY_USED';
   }
 
-  const deadline = continuationDeadline(previous.finishedAt, windowSeconds);
+  const deadline = continuationDeadline(previous.continuationStartedAt, windowSeconds);
   if (deadline === null || deadline <= now.getTime()) {
     return 'CONTINUATION_WINDOW_EXPIRED';
   }

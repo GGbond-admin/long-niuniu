@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
+  bankerTrendLabelFromSummary,
   compareScoreboardHandOrder,
-  continueRoomBankerTrend,
+  continueBankerTrend,
   settleRound,
 } from './settlement.js';
 import { toCents } from './betting.js';
@@ -117,18 +118,32 @@ describe('单局结算（06 文档 §6 / 04 文档 T01–T08）', () => {
     expect(order[3]?.points).toBe(5);
   });
 
-  it('换庄后走势成绩延续上一局，不重置', () => {
-    expect(continueRoomBankerTrend(['9点', '反顺', '对子'], '豹子', 10)).toEqual([
+  it('庄家走势只续写该庄家自己的历史，同一庄家再次上庄时继续', () => {
+    const bankerATrend = continueBankerTrend(['9点', '反顺', '对子'], '豹子', 10);
+    const bankerBTrend = continueBankerTrend([], '5点', 10);
+
+    expect(bankerATrend).toEqual([
       '9点',
       '反顺',
       '对子',
       '豹子',
     ]);
-    expect(continueRoomBankerTrend(['9点', '反顺', '对子'], '1点', 3)).toEqual([
-      '反顺',
+    expect(bankerBTrend).toEqual(['5点']);
+    expect(continueBankerTrend(bankerATrend, '1点', 3)).toEqual([
       '对子',
+      '豹子',
       '1点',
     ]);
+  });
+
+  it('从单局成绩单快照提取庄家走势标签', () => {
+    expect(bankerTrendLabelFromSummary({ handType: 'NORMAL', points: 9 })).toBe('9点');
+    expect(bankerTrendLabelFromSummary({ handType: 'BAOZI', points: 10 })).toBe('豹子');
+    expect(bankerTrendLabelFromSummary({ handType: 'NORMAL', points: null })).toBeNull();
+    expect(bankerTrendLabelFromSummary({ handType: 'NORMAL', points: 2.5 })).toBeNull();
+    expect(bankerTrendLabelFromSummary({ handType: 'NORMAL', points: 99 })).toBeNull();
+    expect(bankerTrendLabelFromSummary({ handType: 'UNKNOWN', points: 3 })).toBeNull();
+    expect(bankerTrendLabelFromSummary(null)).toBeNull();
   });
 
   it('同倍数同点数：红包金额大者先赔（2.35 优先于 1.18）', () => {
@@ -477,6 +492,23 @@ describe('单局结算（06 文档 §6 / 04 文档 T01–T08）', () => {
     expect(r.fees.seatFeeCents).toBe(toCents('50'));
     expect(r.fees.serviceFeeCents).toBe(toCents('38'));
     expect(r.fees.packetFeeCents).toBe(toCents('31.2'));
+  });
+
+  it('有人弃权后仍按已经创建并托管的红包总额收取代包费', () => {
+    const r = settleRound({
+      bankerUserId: 'banker',
+      bankerClaimCents: toCents('3.42'),
+      potCents: toCents('5000'),
+      players: [{ userId: 'p1', betCents: toCents('10'), claimCents: toCents('3.42') }],
+      participantCount: 2,
+      packetFeeCents: toCents('3.12'),
+      handConfig,
+    });
+
+    expect(r.fees.packetFeeCents).toBe(toCents('3.12'));
+    expect(r.fees.totalCents).toBe(
+      r.fees.seatFeeCents + r.fees.serviceFeeCents + toCents('3.12'),
+    );
   });
 
   it('庄家净结果 = 盈亏 − 三费（成绩单口径）', () => {

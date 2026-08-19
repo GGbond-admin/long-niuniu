@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import {
   Navigate,
   Route,
@@ -23,37 +23,41 @@ import {
   tg,
 } from './telegram';
 import { getCachedSession, setCachedSession, type Session } from './sessionStore';
-import BindInviter from './pages/BindInviter';
-import BindDevice from './pages/BindDevice';
-import KycForm from './pages/KycForm';
 import Tabs from './pages/Tabs';
-import Promotion from './pages/Promotion';
-import InviteFriends from './pages/InviteFriends';
-import AgentReport from './pages/AgentReport';
-import AgentPlayers from './pages/AgentPlayers';
-import AgentSubagents from './pages/AgentSubagents';
-import GameDetail from './pages/GameDetail';
-import GameRoom from './pages/GameRoom';
-import PacketDetail from './pages/PacketDetail';
-import SendRedPacket from './pages/SendRedPacket';
-import TipSupport from './pages/TipSupport';
-import Leaderboards from './pages/Leaderboards';
-import Rewards from './pages/Rewards';
-import SupportChat from './pages/SupportChat';
-import WalletOrders from './pages/WalletOrders';
-import FundDetails from './pages/FundDetails';
-import Deposit from './pages/Deposit';
-import Withdraw from './pages/Withdraw';
-import WithdrawAccounts from './pages/WithdrawAccounts';
-import LegalDoc from './pages/LegalDoc';
-import SystemNotices from './pages/SystemNotices';
-import ProfileDetail from './pages/ProfileDetail';
-import ProfileTelegram from './pages/ProfileTelegram';
-import Settings from './pages/Settings';
-import PaymentPinSettings from './pages/PaymentPinSettings';
-import DeviceManagement from './pages/DeviceManagement';
-import LegalCenter from './pages/LegalCenter';
 import SupportInboxToast from './components/SupportInboxToast';
+
+const BindInviter = lazy(() => import('./pages/BindInviter'));
+const BindDevice = lazy(() => import('./pages/BindDevice'));
+const KycForm = lazy(() => import('./pages/KycForm'));
+const Promotion = lazy(() => import('./pages/Promotion'));
+const InviteFriends = lazy(() => import('./pages/InviteFriends'));
+const AgentReport = lazy(() => import('./pages/AgentReport'));
+const AgentPlayers = lazy(() => import('./pages/AgentPlayers'));
+const AgentSubagents = lazy(() => import('./pages/AgentSubagents'));
+const GameDetail = lazy(() => import('./pages/GameDetail'));
+const GameRoom = lazy(() => import('./pages/GameRoom'));
+const PacketDetail = lazy(() => import('./pages/PacketDetail'));
+const SendRedPacket = lazy(() => import('./pages/SendRedPacket'));
+const TipSupport = lazy(() => import('./pages/TipSupport'));
+const Leaderboards = lazy(() => import('./pages/Leaderboards'));
+const Rewards = lazy(() => import('./pages/Rewards'));
+const SupportChat = lazy(() => import('./pages/SupportChat'));
+const WalletOrders = lazy(() => import('./pages/WalletOrders'));
+const FundDetails = lazy(() => import('./pages/FundDetails'));
+const Deposit = lazy(() => import('./pages/Deposit'));
+const Withdraw = lazy(() => import('./pages/Withdraw'));
+const WithdrawAccounts = lazy(() => import('./pages/WithdrawAccounts'));
+const LegalDoc = lazy(() => import('./pages/LegalDoc'));
+const SystemNotices = lazy(() => import('./pages/SystemNotices'));
+const ProfileDetail = lazy(() => import('./pages/ProfileDetail'));
+const ProfileTelegram = lazy(() => import('./pages/ProfileTelegram'));
+const Settings = lazy(() => import('./pages/Settings'));
+const PaymentPinSettings = lazy(() => import('./pages/PaymentPinSettings'));
+const DeviceManagement = lazy(() => import('./pages/DeviceManagement'));
+const LegalCenter = lazy(() => import('./pages/LegalCenter'));
+const GameAdminHome = lazy(() => import('./pages/GameAdminHome'));
+const GameAdminConsole = lazy(() => import('./pages/GameAdminConsole'));
+const GameAdminSendPacket = lazy(() => import('./pages/GameAdminSendPacket'));
 
 export type { Session } from './sessionStore';
 
@@ -163,7 +167,9 @@ function RoomFullscreenOverlay({
 }
 
 export default function App() {
-  const [session, setSession] = useState<Session | null>(() => getCachedSession());
+  const [session, setSession] = useState<Session | null>(() =>
+    getToken() ? getCachedSession() : null,
+  );
   const [error, setError] = useState('');
   // 设备不匹配时被挡在登录外，进不了站内客服，需要给出 Bot 私聊出口
   const [errorNeedsSupport, setErrorNeedsSupport] = useState(false);
@@ -227,8 +233,74 @@ export default function App() {
     app?.ready();
     app?.expand();
     app?.disableVerticalSwipes?.();
-    initTelegramFullscreen();
+    initTelegramFullscreen({ preserveTelegramHeader: true });
   }, []);
+
+  useEffect(() => {
+    const app = tg();
+    const nativeBack = app?.BackButton;
+    const nativeClass = 'tg-native-back-visible';
+    if (!app || !nativeBack) {
+      document.body.classList.remove(nativeClass);
+      return;
+    }
+
+    const onNativeBack = () => {
+      // 每个页面现有的返回函数包含确认、离房、目标 Tab 等业务语义；
+      // Telegram 原生按钮只接管视觉入口，实际复用当前最上层页面的返回行为。
+      const pageBack = Array.from(
+        document.querySelectorAll<HTMLButtonElement>('button[aria-label="返回"]'),
+      )
+        .reverse()
+        .find(
+          (button) =>
+            button.isConnected
+            && !button.disabled
+            && !button.closest('[inert], [aria-hidden="true"]'),
+        );
+      if (pageBack) {
+        pageBack.click();
+        return;
+      }
+      if (location.key !== 'default') navigate(-1);
+      else navigate('/', { replace: true });
+    };
+
+    const syncNativeBack = () => {
+      const shouldShow =
+        location.pathname !== '/'
+        && app.isFullscreen !== true;
+      if (!shouldShow) {
+        document.body.classList.remove(nativeClass);
+        try {
+          nativeBack.hide();
+        } catch {
+          // 老客户端保留页面内返回键兜底
+        }
+        return;
+      }
+      try {
+        nativeBack.show();
+        document.body.classList.add(nativeClass);
+      } catch {
+        document.body.classList.remove(nativeClass);
+      }
+    };
+
+    nativeBack.onClick(onNativeBack);
+    app.onEvent?.('fullscreenChanged', syncNativeBack);
+    syncNativeBack();
+    return () => {
+      nativeBack.offClick(onNativeBack);
+      app.offEvent?.('fullscreenChanged', syncNativeBack);
+      document.body.classList.remove(nativeClass);
+      try {
+        nativeBack.hide();
+      } catch {
+        // ignore
+      }
+    };
+  }, [location.key, location.pathname, navigate]);
 
   useEffect(() => {
     // Fast Refresh / 严格模式重挂载时不要重复打登录并把界面打回「加载中…」
@@ -267,6 +339,9 @@ export default function App() {
         const code = (e as { code?: string }).code;
         if (code === 'DEVICE_MISMATCH') {
           // 也可能是本机缓存被清导致设备标识变化；提供支付密码自助换绑 + 客服兜底
+          setToken(null);
+          setCachedSession(null);
+          setSession(null);
           setError(
             '此账号已绑定其他设备。若您正在使用原设备，可能是本机缓存被清除',
           );
@@ -339,6 +414,14 @@ export default function App() {
 
   useEffect(() => {
     if (!session) return;
+    const idle = window.setTimeout(() => {
+      void import('./pages/GameRoom');
+    }, 3_500);
+    return () => window.clearTimeout(idle);
+  }, [session]);
+
+  useEffect(() => {
+    if (!session) return;
     if (!session.onboarding.inviterBound) {
       if (location.pathname !== '/bind-inviter') navigate('/bind-inviter', { replace: true });
       return;
@@ -397,7 +480,7 @@ export default function App() {
   if (!session) return <div className="loading">加载中…</div>;
 
   return (
-    <>
+    <Suspense fallback={<div className="loading">加载中…</div>}>
       <Routes location={backgroundLocation ?? location}>
         <Route path="/bind-inviter" element={<BindInviter session={session} onDone={refresh} />} />
         <Route path="/bind-device" element={<BindDevice onDone={refresh} />} />
@@ -407,6 +490,17 @@ export default function App() {
         <Route path="/agent/report" element={<AgentReport />} />
         <Route path="/agent/players" element={<AgentPlayers />} />
         <Route path="/agent/sharing" element={<AgentSubagents />} />
+        <Route path="/game-admin" element={<GameAdminHome />} />
+        <Route path="/game-admin/:gameCode" element={<GameAdminConsole />} />
+        <Route
+          path="/game-admin/:gameCode/send-packet"
+          element={
+            <GameAdminSendPacket
+              paymentPinSet={session.security.paymentPinSet}
+              ownerUid={session.uid}
+            />
+          }
+        />
         <Route path="/game/:roomId" element={<GameDetail kycStatus={session.onboarding.kycStatus} />} />
         <Route
           path="/game/:roomId/play"
@@ -429,8 +523,6 @@ export default function App() {
             <TipSupport
               ownerUid={session.uid}
               paymentPinSet={session.security.paymentPinSet}
-              nickname={session.nickname}
-              avatarUrl={session.avatarUrl}
             />
           }
         />
@@ -555,8 +647,6 @@ export default function App() {
                 <TipSupport
                   ownerUid={session.uid}
                   paymentPinSet={session.security.paymentPinSet}
-                  nickname={session.nickname}
-                  avatarUrl={session.avatarUrl}
                 />
               </RoomFullscreenOverlay>
             }
@@ -564,7 +654,7 @@ export default function App() {
         </Routes>
       )}
       {!backgroundLocation && <SupportInboxToast />}
-    </>
+    </Suspense>
   );
 }
 

@@ -1,6 +1,26 @@
-let token: string | null = null;
+const TOKEN_STORAGE_KEY = 'nn_token_v1';
+
+function readPersistedToken(): string | null {
+  try {
+    return localStorage.getItem(TOKEN_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function persistToken(value: string | null) {
+  try {
+    if (value) localStorage.setItem(TOKEN_STORAGE_KEY, value);
+    else localStorage.removeItem(TOKEN_STORAGE_KEY);
+  } catch {
+    // 隐私模式 / 配额不足时仍保留内存 token
+  }
+}
+
+let token: string | null = readPersistedToken();
 
 export const DEVICE_SESSION_INVALID_EVENT = 'miniapp:device-session-invalid';
+export const AUTH_READY_EVENT = 'miniapp:auth-ready';
 const DEVICE_SESSION_ERRORS = new Set([
   'DEVICE_SESSION_EXPIRED',
   'DEVICE_REBIND_REQUIRED',
@@ -8,7 +28,12 @@ const DEVICE_SESSION_ERRORS = new Set([
 ]);
 
 export function setToken(t: string | null) {
+  const changed = token !== t;
   token = t;
+  persistToken(t);
+  if (t && changed && typeof window !== 'undefined') {
+    window.dispatchEvent(new Event(AUTH_READY_EVENT));
+  }
 }
 
 export function getToken(): string | null {
@@ -17,7 +42,7 @@ export function getToken(): string | null {
 
 export function invalidateDeviceSession(code = 'DEVICE_SESSION_EXPIRED'): void {
   // 设备待重绑时 token 对绑定流程仍有效，保留它让用户直接去绑定页，而不是刷新重登
-  if (code !== 'DEVICE_REBIND_REQUIRED') token = null;
+  if (code !== 'DEVICE_REBIND_REQUIRED') setToken(null);
   if (typeof window !== 'undefined') {
     window.dispatchEvent(
       new CustomEvent(DEVICE_SESSION_INVALID_EVENT, {
@@ -554,6 +579,8 @@ export const api = {
       channel: 'TNG' | 'INTERNAL';
       status: string;
       phase: string;
+      expiresAt: string | null;
+      canClaim: boolean;
       totalCents: string;
       participantCount: number;
       banker: {
@@ -999,7 +1026,155 @@ export const api = {
     request<{ ok: boolean }>(`/api/notices/${id}/read`, { method: 'POST', body: '{}' }),
   readAllNotices: () =>
     request<{ ok: boolean }>('/api/notices/read-all', { method: 'POST', body: '{}' }),
+
+  gameAdminMe: () =>
+    request<{ items: GameAdminAssignmentSummary[] }>('/api/game-admin/me'),
+  gameAdminConsole: (gameCode: string) =>
+    request<GameAdminConsole>(
+      `/api/game-admin/games/${encodeURIComponent(gameCode)}`,
+    ),
+  gameAdminMembers: (
+    gameCode: string,
+    options: { q?: string; cursor?: string; limit?: number } = {},
+  ) => {
+    const params = new URLSearchParams({
+      limit: String(options.limit ?? 30),
+    });
+    if (options.q) params.set('q', options.q);
+    if (options.cursor) params.set('cursor', options.cursor);
+    return request<{
+      items: GameAdminMember[];
+      nextCursor: string | null;
+    }>(
+      `/api/game-admin/games/${encodeURIComponent(gameCode)}/members?${params}`,
+    );
+  },
+  gameAdminActions: (gameCode: string, cursor?: string) => {
+    const params = new URLSearchParams({ limit: '30' });
+    if (cursor) params.set('cursor', cursor);
+    return request<{
+      items: GameAdminAction[];
+      nextCursor: string | null;
+    }>(
+      `/api/game-admin/games/${encodeURIComponent(gameCode)}/actions?${params}`,
+    );
+  },
+  gameAdminMute: (
+    gameCode: string,
+    userId: string,
+    input: {
+      durationMinutes: number | null;
+      reason: string;
+      requestId: string;
+    },
+  ) =>
+    request<{
+      ok: boolean;
+      duplicate: boolean;
+      moderation: GameAdminMember['mute'];
+    }>(
+      `/api/game-admin/games/${encodeURIComponent(gameCode)}/members/${encodeURIComponent(userId)}/mute`,
+      { method: 'POST', body: JSON.stringify(input) },
+    ),
+  gameAdminUnmute: (
+    gameCode: string,
+    userId: string,
+    input: { reason: string; requestId: string },
+  ) =>
+    request<{ ok: boolean; duplicate: boolean }>(
+      `/api/game-admin/games/${encodeURIComponent(gameCode)}/members/${encodeURIComponent(userId)}/unmute`,
+      { method: 'POST', body: JSON.stringify(input) },
+    ),
+  gameAdminSendPacket: (
+    gameCode: string,
+    input: {
+      amount: string;
+      count: number;
+      mode: 'RANDOM' | 'EQUAL';
+      greeting: string;
+      requestId: string;
+      paymentPin: string;
+    },
+  ) =>
+    request<{ ok: boolean; packetId: string; duplicate: boolean }>(
+      `/api/game-admin/games/${encodeURIComponent(gameCode)}/packets`,
+      { method: 'POST', body: JSON.stringify(input) },
+    ),
 };
+
+export type GameAdminPermission = 'SEND_BUDGET_PACKET' | 'MUTE_MEMBERS';
+
+export type GameAdminAssignmentSummary = {
+  id: string;
+  gameCode: string;
+  permissions: GameAdminPermission[];
+  room: {
+    id: string;
+    gameCode: string;
+    title: string;
+    status: string;
+  };
+  budget: {
+    gameCode: string;
+    balanceCents: string;
+    updatedAt: string | null;
+  };
+};
+
+export type GameAdminAction = {
+  id: string;
+  action: 'PACKET_SEND' | 'MEMBER_MUTE' | 'MEMBER_UNMUTE' | string;
+  targetUserId: string | null;
+  metadata: Record<string, unknown> | null;
+  createdAt: string;
+  targetUser: { uid: string; nickname: string | null } | null;
+};
+
+export type GameAdminConsole = {
+  assignment: {
+    id: string;
+    gameCode: string;
+    permissions: GameAdminPermission[];
+    status: 'ACTIVE';
+  };
+  room: GameAdminAssignmentSummary['room'];
+  budget: {
+    id: string | null;
+    gameCode: string;
+    balanceCents: string;
+    updatedAt: string | null;
+  };
+  recentActions: GameAdminAction[];
+};
+
+export type GameAdminMember = {
+  id: string;
+  user: {
+    id: string;
+    uid: string;
+    nickname: string | null;
+    tgUsername: string | null;
+    avatarUrl: string | null;
+  };
+  lastSeenAt: string;
+  online: boolean;
+  isGameAdmin: boolean;
+  mute: {
+    active: boolean;
+    mutedAt: string | null;
+    mutedUntil: string | null;
+    reason: string | null;
+  };
+};
+
+export type RoomChatStage =
+  | 'DICE'
+  | 'CLAIMING'
+  | 'SETTLING'
+  | 'CONTINUATION'
+  | 'NEXT_ROUND'
+  | 'STARTING'
+  | null;
 
 export type RoomState = {
   room: {
@@ -1011,9 +1186,26 @@ export type RoomState = {
     minPlayers: number;
     members: number;
     online: number;
+    chatMute: {
+      muted: boolean;
+      mutedAt: string | null;
+      reason: string | null;
+    };
+  };
+  chatPolicy: {
+    /** 服务端阶段禁言为权威；旧服务端缺失时页面按 round.phase 安全回退。 */
+    muted: boolean;
+    stage: RoomChatStage;
   };
   me: {
     joined: boolean;
+    isGameAdmin?: boolean;
+    chatMute?: {
+      active: boolean;
+      mutedAt: string | null;
+      mutedUntil: string | null;
+      reason: string | null;
+    };
     isBanker: boolean;
     bidCents: string | null;
     bet: { amountCents: string; reservedCents?: string; isAllIn: boolean } | null;
@@ -1051,6 +1243,8 @@ export type RoomState = {
     diceStarted?: boolean;
     /** 封盘后允许庄家取消退款并重开下一局的截止时间 */
     repostEndsAt?: string | null;
+    /** 重推确认结束后，庄家必须投骰的截止时间 */
+    diceEndsAt?: string | null;
     canRepostRound?: boolean;
     participantCount: number | null;
     packetId: string | null;
@@ -1086,6 +1280,7 @@ export type RoomState = {
     betDurationSeconds: number;
     claimDurationSeconds: number;
     repostWindowSeconds?: number;
+    bankerDiceTimeoutSeconds?: number;
     bankerBidMinCents: number;
     bankerBidMaxCents: number;
     autoTailPacketEnabled?: boolean;

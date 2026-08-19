@@ -26,6 +26,10 @@ import {
   appendSystemChatOnce,
   ensureRoundAnnouncement,
 } from './roomHub.js';
+import {
+  phaseChatPolicy,
+  roomChatPolicyMessage,
+} from './roomChatPolicy.js';
 import { WalletError } from './wallet.js';
 import { gameErrorMessage, walletErrorMessage } from './errorMessages.js';
 
@@ -167,7 +171,6 @@ function successfulBetCommand(
   };
 }
 
-const MUTED_PHASES = new Set<string>([RoundPhase.CLAIMING]);
 const diceCeremonyInFlight = new Map<string, Promise<DiceThrowResult>>();
 
 /**
@@ -178,10 +181,8 @@ const BANKER_DICE_BETWEEN_MS = 1_400;
 const BANKER_DICE_BEFORE_ANNOUNCE_MS = 1_500;
 const BANKER_DICE_CEREMONY_LOCK_MS = 20_000;
 const BANKER_REPOST_WINDOW_EVENT = 'BANKER_REPOST_WINDOW';
-
-export function isChatMuted(phase: string | null | undefined): boolean {
-  return !!phase && MUTED_PHASES.has(phase);
-}
+const BANKER_DICE_DEADLINE_EVENT = 'BANKER_DICE_DEADLINE';
+const LEGACY_BANKER_DICE_TIMEOUT_MS = 15_000;
 
 export type DiceThrowResult =
   | { kind: 'error'; message: string }
@@ -295,6 +296,21 @@ export async function throwBankerDice(params: {
       return {
         kind: 'error',
         message: `封盘确认中，还剩 ${remaining} 秒；如需取消退款并重开，请发送 /重推`,
+      };
+    }
+    const diceDeadline = await prisma.roundEvent.findFirst({
+      where: { roundId: round.id, type: BANKER_DICE_DEADLINE_EVENT },
+      select: { payload: true },
+    });
+    const diceEndsAt =
+      repostEndsAtFromPayload(diceDeadline?.payload)
+      ?? (repostEndsAt
+        ? new Date(repostEndsAt.getTime() + LEGACY_BANKER_DICE_TIMEOUT_MS)
+        : null);
+    if (diceEndsAt && Date.now() >= diceEndsAt.getTime()) {
+      return {
+        kind: 'error',
+        message: '庄家投骰时间已结束，本局正在自动取消',
       };
     }
   }
@@ -449,11 +465,73 @@ export function runBankerDiceCeremony(params: {
   return task;
 }
 
+/** 投骰截止后仍没有 BANKER_DICE 记录时，原子取消牌局并走统一退款。 */
+export async function cancelBankerDiceTimeout(params: {
+  roundId: string;
+  roomId: string;
+  now?: Date;
+}): Promise<boolean> {
+  const locked = await withRedisLock(
+    `niuniu:room:${params.roomId}:banker-dice`,
+    BANKER_DICE_CEREMONY_LOCK_MS,
+    async () => {
+      const round = await currentRoundForRoom(params.roomId);
+      if (
+        !round
+        || round.id !== params.roundId
+        || round.phase !== RoundPhase.SENDING_PACKET
+      ) {
+        return false;
+      }
+      if (await latestBankerDiceEvent(round.id)) return false;
+
+      const [deadlineEvent, repostEvent] = await Promise.all([
+        prisma.roundEvent.findFirst({
+          where: { roundId: round.id, type: BANKER_DICE_DEADLINE_EVENT },
+          select: { payload: true },
+        }),
+        prisma.roundEvent.findFirst({
+          where: { roundId: round.id, type: BANKER_REPOST_WINDOW_EVENT },
+          select: { payload: true },
+        }),
+      ]);
+      const repostEndsAt = repostEndsAtFromPayload(repostEvent?.payload);
+      const endsAt =
+        repostEndsAtFromPayload(deadlineEvent?.payload)
+        ?? (repostEndsAt
+          ? new Date(repostEndsAt.getTime() + LEGACY_BANKER_DICE_TIMEOUT_MS)
+          : null);
+      if (!endsAt || (params.now ?? new Date()).getTime() < endsAt.getTime()) {
+        return false;
+      }
+
+      const cancelled = await cancelRound(
+        round.id,
+        '庄家投骰超时',
+        'SYSTEM',
+      );
+      gameBus.transition({
+        roundId: round.id,
+        roomId: params.roomId,
+        from: RoundPhase.SENDING_PACKET,
+        to: cancelled.phase,
+      });
+      await ensureRoundAnnouncement({
+        roundId: round.id,
+        roomId: params.roomId,
+        to: cancelled.phase,
+      }).catch(() => undefined);
+      return true;
+    },
+  );
+  return locked ?? false;
+}
+
 async function startReplacementRound(roomId: string): Promise<void> {
   const waiting = await ensureWaitingRound(roomId);
   if (waiting.phase !== RoundPhase.WAITING) return;
   try {
-    const started = await startRound(waiting.id);
+    const started = await startRound(waiting.id, false, undefined, 'REPLACEMENT');
     if (started.phase !== RoundPhase.WAITING) {
       gameBus.transition({
         roundId: waiting.id,
@@ -464,7 +542,12 @@ async function startReplacementRound(roomId: string): Promise<void> {
     }
   } catch (error) {
     // 人数不足时保留新 WAITING 局；人数补齐后调度器会继续开局。
-    if (error instanceof GameError && error.code === 'NOT_ENOUGH_PLAYERS') return;
+    if (
+      error instanceof GameError
+      && ['NOT_ENOUGH_PLAYERS', 'ROUND_START_DISABLED'].includes(error.code)
+    ) {
+      return;
+    }
     throw error;
   }
 }
@@ -475,15 +558,24 @@ function parseAmountToken(raw: string): string | null {
   return value;
 }
 
+function isDecimalAmountToken(raw: string): boolean {
+  return /^\d+\.\d*$/.test(raw.trim().replace(/,/g, ''));
+}
+
 /** 普通文字无需加载整局；只有这些形态可能进入牌局指令处理。 */
 export function isRoomCommandCandidate(raw: string): boolean {
   const text = raw.trim();
   return (
-    /^\/?重推$/i.test(text) ||
-    /^\/?ChongTui$/i.test(text) ||
+    isBankerRepostCommand(text) ||
     /^sh\s*\d+(?:\.\d{1,2})?$/i.test(text) ||
+    isDecimalAmountToken(text) ||
     parseAmountToken(text) !== null
   );
+}
+
+export function isBankerRepostCommand(raw: string): boolean {
+  const text = raw.trim();
+  return /^\/?重推$/i.test(text) || /^\/?ChongTui$/i.test(text);
 }
 
 export async function handleRoomChatCommand(params: {
@@ -496,13 +588,18 @@ export async function handleRoomChatCommand(params: {
 
   const round = await currentRoundForRoom(params.roomId);
   const phase = round?.phase ?? null;
+  const chatPolicy = phaseChatPolicy(phase);
+  const repostCommand = isBankerRepostCommand(text);
 
-  if (isChatMuted(phase)) {
-    return { kind: 'muted', message: '抢红包阶段禁止发言，请专注领取' };
+  if (
+    chatPolicy.muted
+    && !(chatPolicy.stage === 'DICE' && repostCommand)
+  ) {
+    return { kind: 'muted', message: roomChatPolicyMessage(chatPolicy) };
   }
 
   // /重推：封盘确认窗口内由庄家取消整局、原路退款，并立即准备下一局。
-  if (/^\/?重推$/i.test(text) || /^\/?ChongTui$/i.test(text)) {
+  if (repostCommand) {
     try {
       const locked = await withRedisLock(
         `niuniu:room:${params.roomId}:banker-dice`,
@@ -586,6 +683,9 @@ export async function handleRoomChatCommand(params: {
   }
 
   // 纯数字：仅竞标/下注阶段当指令；其余阶段当普通聊天发出
+  if (round?.phase === RoundPhase.BANKER_BID && isDecimalAmountToken(text)) {
+    return { kind: 'error', message: '竞标金额必须是整数，请勿输入小数' };
+  }
   const amountToken = parseAmountToken(text);
   if (amountToken === null) return { kind: 'ignored' };
 
@@ -613,10 +713,12 @@ export async function handleRoomChatCommand(params: {
         params.userId,
         parseCommandAmountCents(amountToken),
       );
+      const acceptedAmountCents = bid.amountCents;
       return {
         kind: 'ok',
         action: 'bid',
-        echo: amountToken,
+        echo: (acceptedAmountCents / 100n).toString(),
+        amountCents: acceptedAmountCents.toString(),
         ...(bid?.extendedEndsAt ? { bidExtendedEndsAt: bid.extendedEndsAt } : {}),
       };
     } catch (e) {
@@ -624,7 +726,7 @@ export async function handleRoomChatCommand(params: {
         kind: 'error',
         message:
           e instanceof GameError && e.code === 'PHASE_ENDED'
-            ? '竞标已截止，正在进行 3、2、1 最终确认'
+            ? '3、2、1 播报已结束，正在锁定庄家'
             : e instanceof GameError
               ? humanizeGameError(e)
               : '竞标失败',

@@ -7,6 +7,12 @@ import {
   useRef,
   useState,
 } from 'react';
+import type {
+  KeyboardEvent as ReactKeyboardEvent,
+  MouseEvent as ReactMouseEvent,
+  PointerEvent as ReactPointerEvent,
+  ReactNode,
+} from 'react';
 import { createPortal } from 'react-dom';
 import { useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import {
@@ -15,12 +21,28 @@ import {
   invalidateDeviceSession,
   rm,
   roomWsUrl,
+  type RoomChatStage,
   type RoomState,
 } from '../api';
 import ChatComposer from '../components/ChatComposer';
 import { RedPacketIcon, TransferIcon, TransferSwapIcon } from '../components/MoneyIcons';
+import { goToTab } from '../lib/nav';
 import type { Session } from '../sessionStore';
 import { disposeChatInputFocus, openExternalLink } from '../telegram';
+
+type ChatReply = {
+  messageId: string;
+  uid: string;
+  nickname: string;
+  content: string;
+  type: 'TEXT' | 'EMOJI';
+};
+
+type SelectedChatReply = {
+  messageId: string;
+  nickname: string;
+  content: string;
+};
 
 type ChatMsg = {
   id: string;
@@ -36,11 +58,51 @@ type ChatMsg = {
     | 'GAME_PACKET'
     | 'COUNTDOWN';
   content: string;
-  from: { uid: string; nickname: string; avatarUrl?: string | null } | null;
+  from: {
+    uid: string;
+    nickname: string;
+    avatarUrl?: string | null;
+    role?: 'GAME_ADMIN';
+  } | null;
   requestId?: string;
   gameAction?: 'bid' | 'bet' | 'all_in' | 'withdraw';
+  replyTo?: ChatReply;
   at: string;
 };
+
+function compareChatMessages(left: ChatMsg, right: ChatMsg): number {
+  // Array.sort 稳定：同毫秒消息保留 Redis / WebSocket 的实际到达顺序。
+  return left.at.localeCompare(right.at);
+}
+
+function mergeContiguousChatWindows(
+  current: ChatMsg[],
+  recent: ChatMsg[],
+): ChatMsg[] | null {
+  if (!current.length) return recent;
+  if (!recent.length) return current;
+
+  const localStart = current.findIndex((message) => message.id === recent[0]!.id);
+  if (localStart < 0) return null;
+  const localSuffix = current.slice(localStart);
+  const commonLength = Math.min(localSuffix.length, recent.length);
+  // 单个稳定 ID 可能是删除后重建，不能单凭一个交点证明两段之间没有缺口。
+  if (commonLength < 2) return null;
+  for (let index = 0; index < commonLength; index += 1) {
+    if (localSuffix[index]!.id !== recent[index]!.id) return null;
+  }
+
+  if (localSuffix.length <= recent.length) {
+    return [...current.slice(0, localStart), ...recent];
+  }
+
+  // 历史快照之后可能先到达实时事件；保留其顺序，同时采用服务端窗口的最新字段。
+  const recentById = new Map(recent.map((message) => [message.id, message]));
+  return current.map((message) => {
+    const authoritative = recentById.get(message.id);
+    return authoritative ? { ...message, ...authoritative } : message;
+  });
+}
 
 type BetAcceptanceNotice = {
   requestedAmountCents: string;
@@ -67,6 +129,7 @@ type PrivateBetNoticePayload = {
 type PendingChatAck = {
   requestId: string;
   content: string;
+  replyToMessageId?: string;
   resolve: (accepted: boolean) => void;
   timer: number;
 };
@@ -86,9 +149,10 @@ function createChatRequestId(): string {
 }
 
 type CountdownPayload = {
-  mode?: 'bid' | 'bet' | 'claim' | 'lock';
+  mode?: 'bid' | 'bet' | 'claim' | 'lock' | 'repost';
   endsAt?: string;
   template?: string;
+  afterTemplate?: string;
   emoji?: string;
 };
 
@@ -101,9 +165,10 @@ type FeedItem =
       id: string;
       /** lock：普通 3/2/1 文字；其余：与顶栏同步的实时文案 */
       lockText?: string;
-      mode?: 'bid' | 'bet';
+      mode?: 'bid' | 'bet' | 'repost';
       endsAt?: string | null;
       template?: string;
+      afterTemplate?: string;
       time?: string;
     }
   | {
@@ -116,6 +181,8 @@ type FeedItem =
       emoji?: boolean;
       /** 仅服务端确认执行成功的竞庄/下注指令，用蓝色高亮。 */
       gameAction?: 'bid' | 'bet' | 'all_in' | 'withdraw';
+      administrator?: boolean;
+      replyTo?: ChatReply;
       time?: string;
     }
   | { kind: 'banner'; id: string; image: string; alt: string }
@@ -147,6 +214,7 @@ type FeedItem =
       avatar?: string | null;
       time?: string;
       demo?: boolean;
+      administrator?: boolean;
     }
   | {
       kind: 'userTip';
@@ -193,8 +261,12 @@ const GAME_PACKET_GREETING = '恭喜发财，大吉大利';
 const RED_PACKET_OPEN_ANIMATION_MS = 900;
 const LEADERBOARD_EMBLEM = '/game-ui/leaderboard-emblem-128.png';
 const REWARDS_EMBLEM = '/game-ui/rewards-emblem-128.png';
-/** 大群只渲染最近消息窗口，历史由后端持久化，重连时再取最近一段。 */
-const CLIENT_CHAT_LIMIT = 100;
+/** 首次进群保持轻量，只由服务端下发最近 100 条。 */
+const INITIAL_CHAT_HISTORY_LIMIT = 100;
+/** 上翻时按页扩展；限制 DOM 上限，避免大群渲染数千条后卡顿。 */
+const CLIENT_CHAT_LIMIT = 500;
+const CHAT_HISTORY_TOP_THRESHOLD = 56;
+const CHAT_HISTORY_LOAD_TIMEOUT_MS = 8_000;
 
 function waitForRedPacketOpeningAnimation() {
   if (
@@ -212,6 +284,7 @@ const PACKET_ERROR_TEXT: Record<string, string> = {
   PACKET_EMPTY: '来晚啦，红包已被抢光',
   PACKET_EXPIRED: '红包已过期',
   ALREADY_CLAIMED: '你已领取过该红包',
+  PACKET_ESCROW_UNAVAILABLE: '红包资金正在核对，请稍后重试',
   INSUFFICIENT_BALANCE: '余额不足，请先充值',
   KYC_REQUIRED: '请先完成实名认证',
   INVALID_PACKET_AMOUNT: '红包金额超出范围（RM0.10 ~ RM10000）',
@@ -395,16 +468,32 @@ function canonicalNumericCommand(value: string): string | null {
   return `${match[1] ? 'sh:' : ''}${whole}.${fraction}`;
 }
 
-function parseUserPacketContent(raw: string): { id: string; greeting: string } {
+function parseUserPacketContent(raw: string): {
+  id: string;
+  greeting: string;
+  administrator: boolean;
+} {
   try {
-    const parsed = JSON.parse(raw) as { id?: string; greeting?: string };
+    const parsed = JSON.parse(raw) as {
+      id?: string;
+      greeting?: string;
+      source?: string;
+    };
     if (parsed?.id) {
-      return { id: parsed.id, greeting: parsed.greeting || '恭喜发财，大吉大利' };
+      return {
+        id: parsed.id,
+        greeting: parsed.greeting || '恭喜发财，大吉大利',
+        administrator: parsed.source === 'GAME_ADMIN',
+      };
     }
   } catch {
     // 兼容旧格式：content 直接是 packetId
   }
-  return { id: raw, greeting: '恭喜发财，大吉大利' };
+  return {
+    id: raw,
+    greeting: '恭喜发财，大吉大利',
+    administrator: false,
+  };
 }
 
 function parseUserTipContent(raw: string): {
@@ -601,12 +690,45 @@ const phases: Record<string, string> = {
   CANCELLED: '本局取消',
 };
 
+type MutedChatStage = Exclude<RoomChatStage, null>;
+
+const CHAT_STAGE_COPY: Record<
+  MutedChatStage,
+  { detail: string }
+> = {
+  DICE: {
+    detail: '庄家完成投骰后，系统将自动发送本局红包',
+  },
+  CLAIMING: {
+    detail: '请先完成本局红包领取，抢包结束后继续流程',
+  },
+  SETTLING: {
+    detail: '系统正在核对领取结果并计算本局成绩',
+  },
+  CONTINUATION: {
+    detail: '等待本局庄家确认是否继续坐庄',
+  },
+  NEXT_ROUND: {
+    detail: '系统正在整理牌桌并准备下一局',
+  },
+  STARTING: {
+    detail: '系统正在发布本阶段规则与操作提示',
+  },
+};
+
+function fallbackChatStage(phase: string | undefined): MutedChatStage | null {
+  if (phase === 'SENDING_PACKET') return 'DICE';
+  if (phase === 'CLAIMING') return 'CLAIMING';
+  if (phase === 'CLAIM_EXPIRED' || phase === 'SETTLING') return 'SETTLING';
+  return null;
+}
+
 /** 空闲/预览用完整一局演示：系统播报、@庄家、对局红包 vs 玩家拼手气红包 */
 const DEMO_FEED: FeedItem[] = [
   {
     kind: 'system',
     id: 'demo-bid',
-    text: '🔔 第 1 局开始竞标\n请直接发送庄钱金额。\n竞标时间：30 秒\n最低：RM 100.00',
+    text: '🔔 第 1 局开始竞标\n请直接发送整数庄钱金额，不支持小数。\n竞标时间：30 秒\n最低：RM 100',
     time: '21:40',
   },
   {
@@ -699,7 +821,7 @@ const DEMO_FEED: FeedItem[] = [
   {
     kind: 'system',
     id: 'demo-dice-prompt',
-    text: '🎲 封盘后先保留重推确认时间。\n庄家发送 /重推＝取消整局、原路退款并重新开局；不重推则倒计时后投骰。',
+    text: '🎲 封盘后有 5 秒重推确认。\n庄家不重推，须在接下来的 15 秒内投骰；超时本局自动取消并退款。',
     time: '21:42',
   },
   {
@@ -867,17 +989,22 @@ function RemainingCopy({
   endsAt,
   mode,
   template,
+  afterTemplate,
 }: {
   endsAt?: string | null;
-  mode?: 'bid' | 'bet';
+  mode?: 'bid' | 'bet' | 'repost';
   template: string;
+  afterTemplate?: string;
 }) {
   const remaining = useRemainingSeconds(endsAt) ?? 0;
   if (remaining <= 0 && mode === 'bid') {
-    return <>竞标时间已到{'\n'}正在进行 3、2、1 最终确认…</>;
+    return <>竞标最后倒数{'\n'}最低加 RM 100，也可以加更多</>;
   }
   if (remaining <= 0 && mode === 'bet') {
     return <>下注时间已到{'\n'}正在封盘…</>;
+  }
+  if (remaining <= 0 && mode === 'repost') {
+    return <>{afterTemplate || '封盘确认已结束\n请庄家完成投骰'}</>;
   }
   return <>{fillRemaining(template, remaining)}</>;
 }
@@ -896,23 +1023,57 @@ function PacketSubtitle({
   return <>{typeof seconds === 'number' ? `${subtitle} · ${seconds}s` : subtitle}</>;
 }
 
-function ContinuationConfirm({
+function StageLockPanel({
+  stage,
+  detail,
+  children,
+}: {
+  stage: MutedChatStage;
+  detail?: string;
+  children?: ReactNode;
+}) {
+  const copy = CHAT_STAGE_COPY[stage];
+  return (
+    <section
+      className={`room-stage-lock stage-${stage.toLowerCase()}${children ? ' has-action' : ''}`}
+    >
+      <div className="room-chat-lock-state room-stage-lock-copy" role="status">
+        <span>{detail ?? copy.detail}</span>
+      </div>
+      {children && <div className="room-stage-lock-action">{children}</div>}
+    </section>
+  );
+}
+
+function ContinuationGate({
   deadline,
+  mine,
   busy,
   onConfirm,
 }: {
   deadline: string;
+  mine: boolean;
   busy: boolean;
   onConfirm: () => void;
 }) {
   const seconds = useRemainingSeconds(deadline);
-  if (seconds === null || seconds <= 0) return null;
+  const remaining = Math.max(0, seconds ?? 0);
   return (
-    <div className="game-room-actions compact">
-      <button className="primary-action" type="button" disabled={busy} onClick={onConfirm}>
-        续庄确认（{seconds}s）
-      </button>
-    </div>
+    <StageLockPanel
+      stage="CONTINUATION"
+      detail={mine ? `请确认是否续庄 · ${remaining}s` : `等待庄家确认续庄 · ${remaining}s`}
+    >
+      {mine && (
+        <button
+          className="continuation-confirm"
+          type="button"
+          disabled={busy || remaining <= 0}
+          onClick={onConfirm}
+        >
+          {busy ? '正在确认…' : '确认续庄'}
+        </button>
+      )}
+    </StageLockPanel>
   );
 }
 
@@ -1107,6 +1268,11 @@ export default function GameRoom({
   const [diceSent, setDiceSent] = useState(false);
   const [betPending, setBetPending] = useState(false);
   const [chatSendPending, setChatSendPending] = useState(false);
+  const [replyTarget, setReplyTarget] = useState<SelectedChatReply | null>(null);
+  const [composerInputRequest, setComposerInputRequest] = useState<{
+    id: number;
+    insertText?: string;
+  } | null>(null);
   const [betNotice, setBetNotice] = useState<
     (PrivateBetNoticePayload & { id: number }) | null
   >(null);
@@ -1164,11 +1330,24 @@ export default function GameRoom({
   const streamRef = useRef<HTMLDivElement>(null);
   const socketRef = useRef<WebSocket | null>(null);
   const didReceiveHistoryRef = useRef(false);
-  const chatDeleteTombstonesRef = useRef(new Set<string>());
+  const chatRef = useRef<ChatMsg[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const historyLoadingRef = useRef(false);
+  const [historyHasMore, setHistoryHasMore] = useState(false);
+  const historyHasMoreRef = useRef(false);
+  const [historyLoadFailed, setHistoryLoadFailed] = useState(false);
+  const [historyControlVisible, setHistoryControlVisible] = useState(false);
+  const historyControlVisibleRef = useRef(false);
+  const historyRequestIdRef = useRef<string | null>(null);
+  const historyRequestTombstoneGenerationRef = useRef(0);
+  const historyLoadTimerRef = useRef<number | null>(null);
+  const chatDeleteTombstonesRef = useRef(new Map<string, number>());
+  const chatDeleteGenerationRef = useRef(0);
   const betPendingRef = useRef(false);
   const betPendingTimerRef = useRef<number | null>(null);
   const betPendingRequestIdRef = useRef<string | null>(null);
   const pendingChatAckRef = useRef<PendingChatAck | null>(null);
+  const composerInputRequestIdRef = useRef(0);
   const betNoticeTimerRef = useRef<number | null>(null);
   const privateBetNoticeIdRef = useRef(0);
   const tipDanmakuIdRef = useRef(0);
@@ -1195,14 +1374,123 @@ export default function GameRoom({
   const programmaticFeedScrollRef = useRef(false);
   const roomFeatureScrollTopRef = useRef<number | null>(null);
   const [channelOpen, setChannelOpen] = useState(false);
+  const [quickActionsOpen, setQuickActionsOpen] = useState(false);
   /** 上翻看历史期间有新消息：不强拉回底部，浮出「有新消息」按钮 */
   const [newBelow, setNewBelow] = useState(false);
   const newBelowRef = useRef(false);
+
+  useLayoutEffect(() => {
+    chatRef.current = chat;
+  }, [chat]);
+
+  useEffect(() => {
+    setReplyTarget(null);
+  }, [roomId]);
+
   function markNewBelow(value: boolean) {
     if (newBelowRef.current === value) return;
     newBelowRef.current = value;
     setNewBelow(value);
   }
+
+  function markHistoryLoading(value: boolean) {
+    historyLoadingRef.current = value;
+    setHistoryLoading(value);
+  }
+
+  function markHistoryHasMore(value: boolean) {
+    historyHasMoreRef.current = value;
+    setHistoryHasMore(value);
+  }
+
+  function filterHistoryMessages(
+    messages: ChatMsg[],
+    authoritativeThroughGeneration?: number,
+  ): ChatMsg[] {
+    const tombstones = chatDeleteTombstonesRef.current;
+    return messages.filter((message) => {
+      const deletedGeneration = tombstones.get(message.id);
+      if (deletedGeneration === undefined) return true;
+      if (
+        authoritativeThroughGeneration !== undefined
+        && deletedGeneration <= authoritativeThroughGeneration
+      ) {
+        // 该删除早于本次分页请求；Redis 快照仍返回此 ID，说明它已合法重建。
+        tombstones.delete(message.id);
+        return true;
+      }
+      return false;
+    });
+  }
+
+  const markHistoryControlVisible = useCallback((value: boolean) => {
+    if (historyControlVisibleRef.current === value) return;
+    historyControlVisibleRef.current = value;
+    setHistoryControlVisible(value);
+  }, []);
+
+  const requestOlderHistory = useCallback(() => {
+    const socket = socketRef.current;
+    const oldest = chatRef.current[0] ?? {
+      id: '~',
+      at: new Date().toISOString(),
+    };
+    if (
+      !didReceiveHistoryRef.current
+      || !historyHasMoreRef.current
+      || historyLoadingRef.current
+      || !socket
+      || socket.readyState !== WebSocket.OPEN
+    ) {
+      return;
+    }
+    if (chatRef.current.length >= CLIENT_CHAT_LIMIT) {
+      historyHasMoreRef.current = false;
+      setHistoryHasMore(false);
+      return;
+    }
+
+    const requestId = createChatRequestId();
+    setHistoryLoadFailed(false);
+    historyRequestIdRef.current = requestId;
+    historyRequestTombstoneGenerationRef.current =
+      chatDeleteGenerationRef.current;
+    historyLoadingRef.current = true;
+    setHistoryLoading(true);
+    if (historyLoadTimerRef.current !== null) {
+      window.clearTimeout(historyLoadTimerRef.current);
+    }
+    historyLoadTimerRef.current = window.setTimeout(() => {
+      if (historyRequestIdRef.current !== requestId) return;
+      historyRequestIdRef.current = null;
+      historyRequestTombstoneGenerationRef.current = 0;
+      historyLoadTimerRef.current = null;
+      historyLoadingRef.current = false;
+      setHistoryLoading(false);
+      setHistoryLoadFailed(true);
+    }, CHAT_HISTORY_LOAD_TIMEOUT_MS);
+
+    try {
+      socket.send(
+        JSON.stringify({
+          type: 'chat_history_before',
+          beforeId: oldest.id,
+          beforeAt: oldest.at,
+          requestId,
+        }),
+      );
+    } catch {
+      if (historyLoadTimerRef.current !== null) {
+        window.clearTimeout(historyLoadTimerRef.current);
+        historyLoadTimerRef.current = null;
+      }
+      historyRequestIdRef.current = null;
+      historyRequestTombstoneGenerationRef.current = 0;
+      historyLoadingRef.current = false;
+      setHistoryLoading(false);
+      setHistoryLoadFailed(true);
+    }
+  }, []);
 
   function clearPendingBet() {
     betPendingRef.current = false;
@@ -1220,6 +1508,11 @@ export default function GameRoom({
     window.clearTimeout(pending.timer);
     pendingChatAckRef.current = null;
     setChatSendPending(false);
+    if (accepted && pending.replyToMessageId) {
+      setReplyTarget((current) =>
+        current?.messageId === pending.replyToMessageId ? null : current,
+      );
+    }
     pending.resolve(accepted);
   }
 
@@ -1255,24 +1548,52 @@ export default function GameRoom({
 
   // 倒计时必须跟当前阶段绑定，避免沿用上阶段时间戳造成「还有 N 秒」的假象
   const phase = state?.round?.phase;
-  const deadline = (() => {
+  const phaseDeadline = (() => {
     const round = state?.round;
     if (!round) return null;
     if (round.phase === 'BANKER_BID') return round.bidEndsAt ?? null;
     if (round.phase === 'BETTING') return round.betEndsAt ?? null;
     if (round.phase === 'CLAIMING') return round.claimEndsAt ?? null;
-    if (round.phase === 'SENDING_PACKET' && round.canRepostRound) {
-      return round.repostEndsAt ?? null;
-    }
     return null;
   })();
-  const deadlineReached = useDeadlineReached(deadline);
-  const bidWindowClosed = phase === 'BANKER_BID' && deadlineReached;
+  const repostDeadline =
+    phase === 'SENDING_PACKET' ? state?.round?.repostEndsAt ?? null : null;
+  const diceDeadline =
+    phase === 'SENDING_PACKET' ? state?.round?.diceEndsAt ?? null : null;
+  const continuation = state?.continuation ?? null;
+  const phaseDeadlineReached = useDeadlineReached(phaseDeadline);
+  const repostDeadlineReached = useDeadlineReached(repostDeadline);
+  const diceDeadlineReached = useDeadlineReached(diceDeadline);
+  const continuationDeadlineReached = useDeadlineReached(continuation?.deadline ?? null);
+  const memberMuteDeadlineReached = useDeadlineReached(
+    state?.me.chatMute?.mutedUntil ?? null,
+  );
+  const activeRoundId = state?.round?.id;
+  const bidWindowClosed =
+    phase === 'BANKER_BID'
+    && !!activeRoundId
+    && chat.some(
+      (message) => message.id === `round:${activeRoundId}:bid:final-list`,
+    );
+  const bidFinalCountdownRunning =
+    phase === 'BANKER_BID' && phaseDeadlineReached && !bidWindowClosed;
   const repostWindowOpen =
     phase === 'SENDING_PACKET'
     && state?.round?.canRepostRound === true
-    && !deadlineReached;
-  const continuation = state?.continuation;
+    && !repostDeadlineReached;
+  const continuationActive =
+    !!continuation
+    && !continuationDeadlineReached;
+  const fallbackMutedChatStage = fallbackChatStage(phase);
+  const roomGloballyMuted = state?.room.chatMute?.muted === true;
+  const policyChatMuted =
+    state?.chatPolicy?.muted
+    ?? fallbackMutedChatStage !== null;
+  const chatMuted = continuationActive || policyChatMuted;
+  const mutedChatStage: MutedChatStage | null =
+    continuationActive
+      ? 'CONTINUATION'
+      : state?.chatPolicy?.stage ?? fallbackMutedChatStage;
   const packetDiceDone =
     phase === 'SENDING_PACKET'
     && (
@@ -1280,11 +1601,40 @@ export default function GameRoom({
       || state?.round?.diceStarted === true
       || diceSent
     );
+  const repostConfirmationFinished =
+    phase === 'SENDING_PACKET'
+    && (repostDeadline ? repostDeadlineReached : !state?.round?.canRepostRound);
+  const diceWindowOpen =
+    phase === 'SENDING_PACKET'
+    && !packetDiceDone
+    && repostConfirmationFinished
+    && (!diceDeadline || !diceDeadlineReached);
+  const diceWindowTimedOut =
+    phase === 'SENDING_PACKET'
+    && !packetDiceDone
+    && !!diceDeadline
+    && diceDeadlineReached;
+  const deadline =
+    repostWindowOpen
+      ? repostDeadline
+      : diceWindowOpen && diceDeadline
+        ? diceDeadline
+        : phaseDeadline;
   const phaseLabel =
-    bidWindowClosed
+    continuationActive
+      ? '续庄询问'
+      : chatMuted && mutedChatStage === 'NEXT_ROUND'
+        ? '准备下一局'
+        : chatMuted && mutedChatStage === 'STARTING'
+          ? '阶段开始播报'
+    : bidWindowClosed
       ? '竞标最终确认'
+      : bidFinalCountdownRunning
+        ? '竞标最后倒数'
       : repostWindowOpen
         ? '封盘重推确认'
+      : diceWindowTimedOut
+        ? '投骰超时，正在取消'
       : phase === 'SENDING_PACKET'
         ? packetDiceDone
           ? '等待系统发包'
@@ -1293,23 +1643,59 @@ export default function GameRoom({
             : '等待庄家投骰'
         : phases[phase ?? 'WAITING'] ?? '等待开局';
   const phaseAside =
-    bidWindowClosed
+    continuationActive && continuation?.deadline
+      ? {
+          value: <RemainingValue endsAt={continuation.deadline} />,
+          label: '续庄',
+        }
+      : bidWindowClosed
       ? { value: '确认', label: '锁庄' }
-      : deadline && (phase !== 'SENDING_PACKET' || repostWindowOpen)
+      : bidFinalCountdownRunning
+        ? { value: '3·2·1', label: '仍可竞价' }
+      : repostWindowOpen && repostDeadline
         ? {
-            value: <RemainingValue endsAt={deadline} />,
-            label: phase === 'SENDING_PACKET' ? '重推' : '秒',
+            value: <RemainingValue endsAt={repostDeadline} />,
+            label: '重推',
           }
-        : phase === 'SENDING_PACKET'
-          ? packetDiceDone
-            ? { value: '准备', label: '发包' }
-            : { value: '待投', label: '骰子' }
-          : { value: '—', label: '倒计时' };
+        : diceWindowOpen && diceDeadline
+          ? {
+              value: <RemainingValue endsAt={diceDeadline} />,
+              label: '投骰',
+            }
+          : phase !== 'SENDING_PACKET' && deadline
+            ? {
+                value: <RemainingValue endsAt={deadline} />,
+                label: '秒',
+              }
+            : diceWindowTimedOut
+              ? { value: '超时', label: '取消中' }
+              : phase === 'SENDING_PACKET'
+                ? packetDiceDone
+                  ? { value: '准备', label: '发包' }
+                  : { value: '待投', label: '骰子' }
+                : { value: '—', label: '倒计时' };
 
   const phaseHint = useMemo(() => {
+    if (continuationActive) {
+      return continuation?.mine
+        ? '请在倒计时内确认是否续庄 · 期间所有人暂不可发言'
+        : '等待庄家确认是否续庄 · 期间所有人暂不可发言';
+    }
+    if (chatMuted && mutedChatStage === 'STARTING') {
+      return '阶段开始播报中 · 暂不可发言，播报完成后自动恢复';
+    }
+    if (chatMuted && mutedChatStage === 'NEXT_ROUND') {
+      return '系统正在准备下一局 · 暂不可发言';
+    }
+    if (chatMuted && mutedChatStage === 'SETTLING') {
+      return phase === 'CLAIM_EXPIRED'
+        ? '抢包已结束，正在核对领取金额 · 暂不可发言'
+        : '核对完成，正在计算本局成绩 · 暂不可发言';
+    }
     if (phase === 'BANKER_BID') {
-      if (bidWindowClosed) return '出价已截止，正在进行 3、2、1 最终确认';
-      return `竞标 RM ${rm(state?.config.bankerBidMinCents ?? 0)} ~ ${rm(state?.config.bankerBidMaxCents ?? 0)}`;
+      if (bidWindowClosed) return '3、2、1 已结束，正在锁定庄家';
+      if (bidFinalCountdownRunning) return '3、2、1 播报期间仍可竞标 · 最低加 RM 100';
+      return '首次报整数 · 后续最低加 RM 100，可加更多';
     }
     if (phase === 'BETTING' && state?.round?.betRange) {
       const r = state.round.betRange;
@@ -1318,26 +1704,39 @@ export default function GameRoom({
     if (phase === 'SENDING_PACKET') {
       if (repostWindowOpen) {
         return state?.me.isBanker
-          ? '倒计时内发送 /重推，可取消整局、退款并重新开局'
+          ? '如需取消并退款，请在倒计时内点击下方“重推本局”'
           : '封盘确认中；庄家可选择取消本局并退款重开';
       }
       if (packetDiceDone) return '庄家投骰已完成，正在等待系统发包';
+      if (diceWindowTimedOut) return '庄家未在时限内投骰，系统正在取消本局并原路退款';
       return state?.me.isBanker
-        ? '重推确认已结束，请完成庄家投骰'
-        : '已封盘，等待庄家投骰；完成后由系统发包';
+        ? '请在倒计时内完成庄家投骰；超时本局自动取消并退款'
+        : '等待庄家投骰；超时本局自动取消并退款';
     }
     if (phase === 'CLAIMING') {
       const isParticipant =
         !!state?.me.isBanker || !!state?.me.bet || !!state?.me.canClaim;
       return isParticipant
         ? '仅庄家与已下注闲家可领 · 抢包期间禁止发言'
-        : '未参与本局，请等待下一局';
+        : '未参与本局，请等待下一局 · 暂不可发言';
     }
-    if (phase === 'CLAIM_EXPIRED') return '抢包已结束，正在核对领取金额 · 可正常发言';
-    if (phase === 'SETTLING') return '核对完成，正在计算本局成绩 · 可正常发言';
+    if (phase === 'CLAIM_EXPIRED') return '抢包已结束，正在核对领取金额 · 暂不可发言';
+    if (phase === 'SETTLING') return '核对完成，正在计算本局成绩 · 暂不可发言';
     if (phase === 'WAITING' || !phase) return '凑齐人数后自动开局';
     return '系统自动结算';
-  }, [phase, state, packetDiceDone, bidWindowClosed, repostWindowOpen]);
+  }, [
+    phase,
+    state,
+    packetDiceDone,
+    bidWindowClosed,
+    bidFinalCountdownRunning,
+    repostWindowOpen,
+    diceWindowTimedOut,
+    continuationActive,
+    continuation,
+    chatMuted,
+    mutedChatStage,
+  ]);
 
   const liveBusy =
     !!state?.round &&
@@ -1419,17 +1818,24 @@ export default function GameRoom({
           const template =
             payload?.template ||
             (payload?.mode === 'bid'
-              ? '竞标倒计时 · 还剩 {{remaining}} 秒\n直接发送金额出价，时间到进入最终确认！'
+              ? '竞标倒计时 · 还剩 {{remaining}} 秒\n直接发送整数金额出价，时间到进入最终确认！'
+              : payload?.mode === 'repost'
+                ? '封盘确认 · 还剩 {{remaining}} 秒'
               : '下注倒计时 · 还剩 {{remaining}} 秒\n未出手的抓紧了，时间到立刻封盘！');
           items.push({
             kind: 'countdown',
             id: msg.id,
             mode:
-              payload?.mode === 'bid' || payload?.mode === 'bet'
+              payload?.mode === 'bid'
+              || payload?.mode === 'bet'
+              || payload?.mode === 'repost'
                 ? payload.mode
                 : undefined,
             endsAt,
             template: stripAssistHtml(template),
+            afterTemplate: payload?.afterTemplate
+              ? stripAssistHtml(payload.afterTemplate)
+              : undefined,
             time: formatTime(msg.at),
           });
         }
@@ -1519,6 +1925,8 @@ export default function GameRoom({
           mine: !!msg.from?.uid && msg.from.uid === myUid,
           name: msg.from?.nickname ?? '玩家',
           avatar: msg.from?.avatarUrl,
+          administrator:
+            packet.administrator || msg.from?.role === 'GAME_ADMIN',
           time: formatTime(msg.at),
         });
       } else if (msg.type === 'USER_TIP') {
@@ -1544,6 +1952,8 @@ export default function GameRoom({
           text: msg.content,
           emoji: msg.type === 'EMOJI',
           gameAction: msg.type !== 'EMOJI' ? msg.gameAction : undefined,
+          administrator: msg.from?.role === 'GAME_ADMIN',
+          replyTo: msg.replyTo,
           time: formatTime(msg.at),
         });
       }
@@ -1598,7 +2008,7 @@ export default function GameRoom({
     return items;
   }, [state, chat, myUid, showDemoFeed, liveBusy, deadline]);
 
-  // 消息窗口满 100 条后每来一条就挤掉最旧一条，feed.length 恒定；
+  // 消息窗口达到上限后每来一条就挤掉最旧一条，feed.length 恒定；
   // 贴底必须以「末条身份」为触发条件，否则新消息会停在输入栏下方看不见。
   const feedTailId = feed.length > 0 ? feed[feed.length - 1]!.id : '';
   const feedHeadId = feed.length > 0 ? feed[0]!.id : '';
@@ -1668,10 +2078,23 @@ export default function GameRoom({
     stickToBottomRef.current = true;
     didInitialScrollRef.current = false;
     setChannelOpen(false);
+    setQuickActionsOpen(false);
     setChat([]);
+    chatRef.current = [];
     markNewBelow(false);
     didReceiveHistoryRef.current = false;
+    historyRequestIdRef.current = null;
+    historyRequestTombstoneGenerationRef.current = 0;
+    if (historyLoadTimerRef.current !== null) {
+      window.clearTimeout(historyLoadTimerRef.current);
+      historyLoadTimerRef.current = null;
+    }
+    markHistoryLoading(false);
+    markHistoryHasMore(false);
+    markHistoryControlVisible(false);
+    setHistoryLoadFailed(false);
     chatDeleteTombstonesRef.current.clear();
+    chatDeleteGenerationRef.current = 0;
     clearPendingBet();
     dismissPrivateBetNotice();
     const storedClaims = readStoredPacketClaims(roomId);
@@ -1734,28 +2157,133 @@ export default function GameRoom({
               acceptance?: unknown;
               reason?: string;
               heartbeat?: boolean;
+              hasMore?: boolean;
+              error?: string;
               /** tip_thanks 附带祝福语 */
               tipMessage?: string;
               avatarUrl?: string | null;
               user?: { uid: string; nickname: string; avatarUrl?: string | null };
               requestId?: string;
               messageId?: string;
+              muted?: boolean;
+              mutedAt?: string | null;
+              mutedUntil?: string | null;
             };
             if (payload.type === 'pong') {
               acknowledgePong();
+            } else if (
+              payload.type === 'room_moderation'
+              && typeof payload.muted === 'boolean'
+            ) {
+              setState((current) =>
+                current
+                  ? {
+                      ...current,
+                      room: {
+                        ...current.room,
+                        chatMute: payload.muted
+                          ? {
+                              muted: true,
+                              mutedAt: payload.mutedAt ?? new Date().toISOString(),
+                              reason: payload.reason ?? null,
+                            }
+                          : {
+                              muted: false,
+                              mutedAt: null,
+                              reason: null,
+                            },
+                      },
+                    }
+                  : current,
+              );
+              setReplyTarget(null);
+            } else if (payload.type === 'moderation' && typeof payload.muted === 'boolean') {
+              setState((current) =>
+                current
+                  ? {
+                      ...current,
+                      me: {
+                        ...current.me,
+                        chatMute: payload.muted
+                          ? {
+                              active: true,
+                              mutedAt: payload.mutedAt ?? new Date().toISOString(),
+                              mutedUntil: payload.mutedUntil ?? null,
+                              reason: payload.reason ?? null,
+                            }
+                          : {
+                              active: false,
+                              mutedAt: null,
+                              mutedUntil: null,
+                              reason: null,
+                            },
+                      },
+                    }
+                  : current,
+              );
+              setError(
+                payload.muted
+                  ? payload.reason
+                    ? `你已被管理员禁言：${payload.reason}`
+                    : '你已被管理员禁言'
+                  : '',
+              );
             } else if (payload.type === 'chat_history' && payload.messages) {
-              const tombstones = chatDeleteTombstonesRef.current;
-              const recentMessages = payload.messages
-                .filter((message) => !tombstones.has(message.id))
+              const recentMessages = filterHistoryMessages(payload.messages)
                 .slice(-CLIENT_CHAT_LIMIT);
               const isInitialHistory = !didReceiveHistoryRef.current;
               didReceiveHistoryRef.current = true;
-              if (isInitialHistory) {
+              const knownIds = new Set(chatRef.current.map((message) => message.id));
+              let reconnectHistory = isInitialHistory
+                ? null
+                : mergeContiguousChatWindows(chatRef.current, recentMessages);
+              if (reconnectHistory) {
+                const recentPacketIds = new Set(
+                  recentMessages
+                    .filter((message) => message.type === 'USER_PACKET')
+                    .map((message) => parseUserPacketContent(message.content).id),
+                );
+                reconnectHistory = reconnectHistory.filter(
+                  (message) =>
+                    !message.id.startsWith('local-packet-')
+                    || !recentPacketIds.has(
+                      parseUserPacketContent(message.content).id,
+                    ),
+                );
+              }
+              const resetDisjointHistory =
+                !isInitialHistory
+                && reconnectHistory === null;
+              const projectedCount = Math.min(
+                CLIENT_CHAT_LIMIT,
+                isInitialHistory
+                  ? chatRef.current.length
+                    + recentMessages.filter((message) => !knownIds.has(message.id)).length
+                  : (reconnectHistory ?? recentMessages).length,
+              );
+              markHistoryHasMore(
+                (
+                  payload.hasMore === true
+                  || (
+                    payload.hasMore === undefined
+                    && recentMessages.length >= INITIAL_CHAT_HISTORY_LIMIT
+                  )
+                )
+                && projectedCount < CLIENT_CHAT_LIMIT,
+              );
+              setHistoryLoadFailed(false);
+              if (isInitialHistory || resetDisjointHistory) {
                 stickToBottomRef.current = true;
                 didInitialScrollRef.current = false;
               }
               // 历史加载可能晚于实时 chat；按 ID 合并，不能覆盖刚收到的对局红包。
               setChat((prev) => {
+                if (!isInitialHistory) {
+                  const next = (reconnectHistory ?? recentMessages)
+                    .slice(-CLIENT_CHAT_LIMIT);
+                  chatRef.current = next;
+                  return next;
+                }
                 const merged = [...recentMessages];
                 const ids = new Set(merged.map((message) => message.id));
                 for (const current of prev) {
@@ -1772,13 +2300,110 @@ export default function GameRoom({
                   merged.push(current);
                   ids.add(current.id);
                 }
-                return merged
-                  .sort((left, right) => left.at.localeCompare(right.at))
+                const next = merged
+                  .sort(compareChatMessages)
                   .slice(-CLIENT_CHAT_LIMIT);
+                chatRef.current = next;
+                return next;
               });
               const packetIds = [
                 ...new Set(
                   recentMessages
+                    .filter((message) => message.type === 'USER_PACKET')
+                    .map((message) => parseUserPacketContent(message.content).id)
+                    .filter(Boolean),
+                ),
+              ];
+              if (packetIds.length) {
+                void api.groupPacketClaimStatus(packetIds).then((result) => {
+                  if (cancelled) return;
+                  applyClaimStatusItems(result.items);
+                });
+              }
+            } else if (payload.type === 'chat_history_page' && payload.messages) {
+              if (
+                payload.requestId
+                && payload.requestId !== historyRequestIdRef.current
+              ) {
+                return;
+              }
+              if (historyLoadTimerRef.current !== null) {
+                window.clearTimeout(historyLoadTimerRef.current);
+                historyLoadTimerRef.current = null;
+              }
+              const authoritativeTombstoneGeneration =
+                historyRequestTombstoneGenerationRef.current;
+              historyRequestIdRef.current = null;
+              historyRequestTombstoneGenerationRef.current = 0;
+
+              if (
+                payload.error === 'HISTORY_UNAVAILABLE'
+                || payload.error === 'RATE_LIMITED'
+              ) {
+                markHistoryHasMore(true);
+                markHistoryLoading(false);
+                setHistoryLoadFailed(true);
+                return;
+              }
+              if (
+                payload.error === 'HISTORY_CURSOR_EXPIRED'
+              ) {
+                const resetMessages = filterHistoryMessages(
+                  payload.messages,
+                  authoritativeTombstoneGeneration,
+                )
+                  .slice(-CLIENT_CHAT_LIMIT);
+                chatRef.current = resetMessages;
+                setChat(resetMessages);
+                stickToBottomRef.current = true;
+                didInitialScrollRef.current = false;
+                markHistoryHasMore(
+                  payload.hasMore === true
+                  && resetMessages.length < CLIENT_CHAT_LIMIT,
+                );
+                markHistoryLoading(false);
+                setHistoryLoadFailed(false);
+                return;
+              }
+              if (payload.error === 'INVALID_HISTORY_CURSOR') {
+                markHistoryHasMore(false);
+                markHistoryLoading(false);
+                setHistoryLoadFailed(false);
+                return;
+              }
+              setHistoryLoadFailed(false);
+
+              const olderMessages = filterHistoryMessages(
+                payload.messages,
+                authoritativeTombstoneGeneration,
+              );
+              const knownIds = new Set(chatRef.current.map((message) => message.id));
+              const uniqueOlderCount = olderMessages.reduce(
+                (count, message) => count + (knownIds.has(message.id) ? 0 : 1),
+                0,
+              );
+              const reachesClientLimit =
+                chatRef.current.length + uniqueOlderCount >= CLIENT_CHAT_LIMIT;
+
+              setChat((prev) => {
+                const byId = new Map<string, ChatMsg>();
+                for (const message of olderMessages) byId.set(message.id, message);
+                for (const message of prev) byId.set(message.id, message);
+                const merged = [...byId.values()]
+                  .sort(compareChatMessages)
+                  .slice(-CLIENT_CHAT_LIMIT);
+                chatRef.current = merged;
+                return merged;
+              });
+              markHistoryHasMore(
+                payload.hasMore === true
+                && !reachesClientLimit,
+              );
+              markHistoryLoading(false);
+
+              const packetIds = [
+                ...new Set(
+                  olderMessages
                     .filter((message) => message.type === 'USER_PACKET')
                     .map((message) => parseUserPacketContent(message.content).id)
                     .filter(Boolean),
@@ -1871,8 +2496,15 @@ export default function GameRoom({
               payload.type === 'chat_delete'
               && typeof payload.messageId === 'string'
             ) {
-              chatDeleteTombstonesRef.current.add(payload.messageId);
+              chatDeleteGenerationRef.current += 1;
+              chatDeleteTombstonesRef.current.set(
+                payload.messageId,
+                chatDeleteGenerationRef.current,
+              );
               setChat((prev) => prev.filter((message) => message.id !== payload.messageId));
+              setReplyTarget((current) =>
+                current?.messageId === payload.messageId ? null : current,
+              );
             } else if (
               payload.type === 'bet_confirmation' &&
               (payload.status === 'success' || payload.status === 'failed') &&
@@ -2090,6 +2722,17 @@ export default function GameRoom({
             clearWsTimers();
             if (cancelled || socket !== ws) return;
             settlePendingChat(false);
+            // 新连接会从 Redis 权威窗口重建；不要让旧连接的删除标记屏蔽合法重建 ID。
+            chatDeleteTombstonesRef.current.clear();
+            const historyWasLoading = historyLoadingRef.current;
+            if (historyLoadTimerRef.current !== null) {
+              window.clearTimeout(historyLoadTimerRef.current);
+              historyLoadTimerRef.current = null;
+            }
+            historyRequestIdRef.current = null;
+            historyRequestTombstoneGenerationRef.current = 0;
+            markHistoryLoading(false);
+            if (historyWasLoading) setHistoryLoadFailed(true);
             socket = null;
             if (socketRef.current === ws) socketRef.current = null;
             if (event.code === 4401 || event.reason === 'DEVICE_SESSION_EXPIRED') {
@@ -2161,6 +2804,13 @@ export default function GameRoom({
       reconnectNowRef.current = () => {};
       socket?.close();
       socketRef.current = null;
+      if (historyLoadTimerRef.current !== null) {
+        window.clearTimeout(historyLoadTimerRef.current);
+        historyLoadTimerRef.current = null;
+      }
+      historyRequestIdRef.current = null;
+      historyRequestTombstoneGenerationRef.current = 0;
+      historyLoadingRef.current = false;
       clearPendingBet();
       settlePendingChat(false);
       dismissPrivateBetNotice();
@@ -2189,6 +2839,7 @@ export default function GameRoom({
     if (!el) return;
     const onScroll = () => {
       const nextScrollTop = el.scrollTop;
+      markHistoryControlVisible(nextScrollTop <= CHAT_HISTORY_TOP_THRESHOLD);
       const roomFeatureScrollTop = roomFeatureScrollTopRef.current;
       if (roomFeatureScrollTop !== null) {
         const lockedScrollTop = Math.min(
@@ -2228,6 +2879,9 @@ export default function GameRoom({
       }
       lastScrollTopRef.current = nextScrollTop;
       lastScrollHeightRef.current = el.scrollHeight;
+      if (nextScrollTop <= CHAT_HISTORY_TOP_THRESHOLD) {
+        requestOlderHistory();
+      }
     };
     el.addEventListener('scroll', onScroll, { passive: true });
     const keepPinned = () => {
@@ -2280,7 +2934,7 @@ export default function GameRoom({
       el.removeEventListener('scroll', onScroll);
       observer.disconnect();
     };
-  }, [loading]);
+  }, [loading, markHistoryControlVisible, requestOlderHistory]);
 
   useLayoutEffect(() => {
     const el = streamRef.current;
@@ -2370,10 +3024,11 @@ export default function GameRoom({
       stickToBottomRef.current = true;
       feedViewportAnchorRef.current = null;
       markNewBelow(false);
+      markHistoryControlVisible(el.scrollTop <= CHAT_HISTORY_TOP_THRESHOLD);
       return;
     }
 
-    // 上翻看历史时，以屏幕内正在阅读的消息作为锚点。即使 100 条窗口挤掉了
+    // 上翻看历史时，以屏幕内正在阅读的消息作为锚点。即使窗口挤掉了
     // 顶部旧消息，或新消息高度不同，也不会用总高度差把视口向下推。
     const anchor = feedViewportAnchorRef.current;
     feedIdsRef.current = nextFeedIds;
@@ -2405,7 +3060,15 @@ export default function GameRoom({
       feedViewportAnchorRef.current = captureFeedViewport(el, nextFeedIds);
       if (appendedBelow) markNewBelow(true);
     }
-  }, [loading, freezeFeed, feed.length, feedTailId, feedHeadId]);
+    markHistoryControlVisible(el.scrollTop <= CHAT_HISTORY_TOP_THRESHOLD);
+  }, [
+    loading,
+    freezeFeed,
+    feed.length,
+    feedTailId,
+    feedHeadId,
+    markHistoryControlVisible,
+  ]);
 
   useEffect(() => {
     void api
@@ -2482,7 +3145,7 @@ export default function GameRoom({
       );
       if (exists) return prev;
       return [
-        ...prev,
+        ...prev.slice(-(CLIENT_CHAT_LIMIT - 1)),
         {
           id: `local-packet-${sent.packetId}`,
           type: 'USER_PACKET',
@@ -2531,12 +3194,39 @@ export default function GameRoom({
     return false;
   }
 
+  function requestComposerInput(insertText?: string) {
+    composerInputRequestIdRef.current += 1;
+    setComposerInputRequest({
+      id: composerInputRequestIdRef.current,
+      ...(insertText ? { insertText } : {}),
+    });
+  }
+
+  function mentionPlayer(nickname: string) {
+    const normalized = nickname.trim().replace(/\s+/g, ' ').slice(0, 40);
+    if (!normalized) return;
+    requestComposerInput(`@${normalized} `);
+  }
+
+  function selectMessageReply(item: Extract<FeedItem, { kind: 'chat' }>) {
+    setReplyTarget({
+      messageId: item.id,
+      nickname: item.name,
+      content: item.text,
+    });
+    requestComposerInput();
+  }
+
   /** 服务端回显/确认后才清空输入；拒绝、断线或超时均返回 false 并保留草稿。 */
   function sendChat(content: string): Promise<boolean> | false {
     if (!content) return false;
     if (!ensureSocketReady()) return false;
     if (pendingChatAckRef.current) return false;
-    const pendingBet = phase === 'BETTING' ? parsePendingBetCommand(content) : null;
+    const selectedReply = activeReplyTarget;
+    const pendingBet =
+      !selectedReply && phase === 'BETTING'
+        ? parsePendingBetCommand(content)
+        : null;
     if (pendingBet && betPendingRef.current) return false;
 
     setError('');
@@ -2550,6 +3240,7 @@ export default function GameRoom({
       pendingChatAckRef.current = {
         requestId,
         content: content.trim(),
+        ...(selectedReply ? { replyToMessageId: selectedReply.messageId } : {}),
         resolve,
         timer,
       };
@@ -2557,7 +3248,12 @@ export default function GameRoom({
 
       try {
         socketRef.current!.send(
-          JSON.stringify({ type: 'chat', content, requestId }),
+          JSON.stringify({
+            type: 'chat',
+            content,
+            requestId,
+            ...(selectedReply ? { replyToId: selectedReply.messageId } : {}),
+          }),
         );
         jumpToBottom();
       } catch {
@@ -2601,9 +3297,8 @@ export default function GameRoom({
       return;
     }
     if (roomId) void api.leaveRoom(roomId).catch(() => undefined);
-    // 深链直接进房时没有上一页历史，navigate(-1) 会退出小程序
-    if (location.key !== 'default') navigate(-1);
-    else navigate(roomId ? `/game/${roomId}` : '/', { replace: true });
+    // 互动群属于「消息」会话：无论从大厅、规则页还是深链进入，都统一回消息列表。
+    goToTab(navigate, 'chat');
   }
 
   function sendSticker(stickerId: string) {
@@ -2639,6 +3334,7 @@ export default function GameRoom({
     feature: 'leaderboards' | 'rewards' | 'send-packet' | 'tip',
   ) {
     if (!roomId) return;
+    setQuickActionsOpen(false);
     prepareRoomFeatureOpen();
     disposeChatInputFocus();
     navigate(`/game/${roomId}/${feature}`, {
@@ -2762,13 +3458,20 @@ export default function GameRoom({
       const detail = await api.gamePacket(packetId);
       const ownClaim = detail.claims.find((claimEntry) => claimEntry.uid === myUid);
       const amountCents = ownClaim?.amountCents ?? currentAmount;
+      const expiresAtMs = detail.expiresAt ? Date.parse(detail.expiresAt) : Number.NaN;
+      const expired = Number.isFinite(expiresAtMs) && expiresAtMs <= Date.now();
+      const claimOpen =
+        detail.phase === 'CLAIMING' && detail.status === 'SENT' && !expired;
+      const canClaim =
+        detail.canClaim === true ||
+        (detail.canClaim == null && isCurrent && state?.me.canClaim === true);
       const status: PacketDialogStatus = amountCents
         ? 'claimed'
         : detail.phase === 'SENDING_PACKET'
           ? 'waiting'
-          : detail.phase === 'CLAIMING' && isCurrent && state?.me.canClaim
+          : claimOpen && canClaim
             ? 'claimable'
-            : detail.phase === 'CLAIMING' && isCurrent
+            : claimOpen
               ? 'ineligible'
               : 'gone';
       patchPacketDialog(packetId, {
@@ -2779,9 +3482,16 @@ export default function GameRoom({
         status,
         amountCents,
       });
+      if (!isCurrent && (detail.phase === 'SENDING_PACKET' || detail.phase === 'CLAIMING')) {
+        void refresh().catch(() => undefined);
+      }
     } catch {
       patchPacketDialog(packetId, {
-        status: currentStatus === 'loading' ? 'gone' : currentStatus,
+        status: currentStatus === 'loading' ? 'error' : currentStatus,
+        error:
+          currentStatus === 'loading'
+            ? '红包状态暂时没有同步成功，请点击重试'
+            : undefined,
       });
     }
   }
@@ -2927,15 +3637,55 @@ export default function GameRoom({
       }),
     [myUid, myProfile?.nickname, session.uid, session.nickname],
   );
-  const claimLocked = phase === 'CLAIMING';
-  const chatMuted = claimLocked;
+  const memberChatMuted =
+    state?.me.chatMute?.active === true
+    && (
+      !state.me.chatMute.mutedUntil
+      || !memberMuteDeadlineReached
+    );
   const canThrowDice =
     phase === 'SENDING_PACKET'
     && !!state?.me.isBanker
     && !state?.round?.diceThrown
     && !state?.round?.diceStarted
-    && !repostWindowOpen
+    && diceWindowOpen
     && !diceSent;
+  const muteAllowsGameCommand =
+    canBid
+    || canBet
+    || canThrowDice
+    || (repostWindowOpen && state?.me.isBanker === true);
+  const displayedMutedStage: MutedChatStage =
+    mutedChatStage
+    ?? (
+      phase === 'BANKER_BID' || phase === 'BETTING'
+        ? 'STARTING'
+        : phase === 'WAITING' || phase === 'FINISHED' || phase === 'CANCELLED'
+          ? 'NEXT_ROUND'
+          : 'STARTING'
+    );
+  const stageLockDetail =
+    displayedMutedStage === 'DICE'
+      ? repostWindowOpen
+        ? state?.me.isBanker
+          ? '不重推可等待倒计时结束；重推将取消本局并原路退款'
+          : '等待庄家确认是否重推本局'
+        : canThrowDice
+          ? '请在倒计时内投骰，三颗骰子将依次同步到群内'
+          : diceWindowTimedOut
+            ? '投骰已超时，系统正在取消本局并原路退款'
+            : packetDiceDone
+              ? '庄家已完成投骰，系统正在发送本局红包'
+              : '等待本局庄家完成投骰'
+      : displayedMutedStage === 'CLAIMING'
+        ? state?.me.isBanker || state?.me.bet || state?.me.canClaim
+          ? '请先完成本局红包领取，抢包结束后继续流程'
+          : '您未参与本局，请等待抢包结束'
+        : displayedMutedStage === 'SETTLING'
+          ? phase === 'CLAIM_EXPIRED'
+            ? '系统正在核对本局红包领取结果'
+            : '系统正在计算并发布本局成绩'
+          : CHAT_STAGE_COPY[displayedMutedStage].detail;
 
   function sendDice() {
     if (
@@ -2943,7 +3693,7 @@ export default function GameRoom({
       !state?.me.isBanker ||
       state?.round?.diceThrown ||
       state?.round?.diceStarted ||
-      repostWindowOpen ||
+      !diceWindowOpen ||
       diceSent
     ) {
       return;
@@ -2956,32 +3706,37 @@ export default function GameRoom({
     jumpToBottom();
   }
 
+  function repostRound() {
+    if (!repostWindowOpen || !state?.me.isBanker || chatSendPending) return;
+    const result = sendChat('/重推');
+    if (result) void result;
+  }
+
   const composerUnavailable = loading || !state || connState !== 'online';
-  const composerHint = loading
-    ? '正在进入互动群…'
-    : connState === 'kicked'
-      ? '连接已断开，请重新进入'
+  const canUseChatGestures =
+    !roomGloballyMuted
+    && !chatMuted
+    && !memberChatMuted
+    && !composerUnavailable;
+  const activeReplyTarget = canUseChatGestures ? replyTarget : null;
+  const composerControlsHidden =
+    composerUnavailable
+    || roomGloballyMuted
+    || chatMuted
+    || bidWindowClosed
+    || (memberChatMuted && !muteAllowsGameCommand);
+  const composerHint =
+    loading || !state
+      ? '正在进入互动群'
       : connState !== 'online'
-        ? '实时连接中，暂时不能发送'
-        : chatSendPending
-          ? '等待服务器确认，成功后自动清空'
-          : betPending
-            ? '下注确认中，请勿重复发送'
-            : chatMuted
-              ? '抢包中，暂不可发言'
-              : bidWindowClosed
-                ? '竞标已截止，正在最终确认'
-                : canBid
-                  ? '竞庄金额，如 8800'
-                  : canBet
-                    ? '下注金额，如 100'
-                    : repostWindowOpen && state?.me.isBanker
-                      ? '发送 /重推：取消整局、退款并重新开局'
-                      : phase === 'SENDING_PACKET' && state?.me.isBanker
-                        ? '可发送消息，等待系统继续流程'
-                      : phase === 'CLAIM_EXPIRED' || phase === 'SETTLING'
-                        ? '可发言（数字也会当聊天发出）'
-                        : '发送消息…';
+        ? null
+        : roomGloballyMuted
+          ? '互动群已禁言'
+          : bidWindowClosed
+            ? '竞标最终确认 · 暂不可发言'
+            : memberChatMuted && !muteAllowsGameCommand
+              ? '您当前已被禁言'
+              : null;
 
   return (
     <div
@@ -3088,42 +3843,105 @@ export default function GameRoom({
             </div>
           </div>
         )}
-        <nav className="game-room-quick-actions" aria-label="房间快捷入口">
+        {historyControlVisible && (
+          historyLoading ? (
+            <div className="feed-history-control is-loading" role="status">
+              正在加载更早消息…
+            </div>
+          ) : historyHasMore ? (
+            <button
+              className={`feed-history-control is-button${historyLoadFailed ? ' failed' : ''}`}
+              type="button"
+              onClick={requestOlderHistory}
+              aria-controls="room-message-feed"
+            >
+              {historyLoadFailed ? '重试加载更早消息' : '查看更早消息'}
+            </button>
+          ) : null
+        )}
+        <nav
+          className={`game-room-quick-actions${quickActionsOpen ? ' is-open' : ''}`}
+          aria-label="房间快捷入口"
+          onKeyDown={(event) => {
+            if (event.key === 'Escape') setQuickActionsOpen(false);
+          }}
+        >
+          {quickActionsOpen && (
+            <div className="game-room-quick-menu" id="room-quick-menu">
+              <button
+                className="game-room-quick-link leaderboard"
+                type="button"
+                onPointerDown={prepareRoomFeatureOpen}
+                onClick={() => openRoomFeature('leaderboards')}
+                aria-label="打开排行榜"
+              >
+                <img
+                  src={LEADERBOARD_EMBLEM}
+                  width="44"
+                  height="44"
+                  alt=""
+                  aria-hidden="true"
+                />
+                <span>榜单</span>
+              </button>
+              <button
+                className="game-room-quick-link rewards"
+                type="button"
+                onPointerDown={prepareRoomFeatureOpen}
+                onClick={() => openRoomFeature('rewards')}
+                aria-label="打开每日奖励"
+              >
+                <img
+                  src={REWARDS_EMBLEM}
+                  width="44"
+                  height="44"
+                  alt=""
+                  aria-hidden="true"
+                />
+                <span>奖励</span>
+              </button>
+            </div>
+          )}
           <button
-            className="game-room-quick-link leaderboard"
+            className="game-room-quick-toggle"
             type="button"
-            onPointerDown={prepareRoomFeatureOpen}
-            onClick={() => openRoomFeature('leaderboards')}
-            aria-label="打开排行榜"
+            aria-expanded={quickActionsOpen}
+            aria-controls="room-quick-menu"
+            aria-label={quickActionsOpen ? '收起任务入口' : '展开任务入口'}
+            onClick={() => setQuickActionsOpen((open) => !open)}
           >
-            <img
-              src={LEADERBOARD_EMBLEM}
-              width="44"
-              height="44"
-              alt=""
+            <svg
+              className={quickActionsOpen ? 'is-collapse' : 'is-gift'}
+              viewBox="0 0 24 24"
               aria-hidden="true"
-            />
-            <span>榜单</span>
-          </button>
-          <button
-            className="game-room-quick-link rewards"
-            type="button"
-            onPointerDown={prepareRoomFeatureOpen}
-            onClick={() => openRoomFeature('rewards')}
-            aria-label="打开每日奖励"
-          >
-            <img
-              src={REWARDS_EMBLEM}
-              width="44"
-              height="44"
-              alt=""
-              aria-hidden="true"
-            />
-            <span>奖励</span>
+            >
+              {quickActionsOpen ? (
+                <>
+                  <path d="M6.5 5.5 13 12l-6.5 6.5" />
+                  <path d="M11.5 5.5 18 12l-6.5 6.5" />
+                </>
+              ) : (
+                <>
+                  <path d="M4.25 10.25h15.5v10H4.25z" />
+                  <path d="M3.25 7h17.5v4.25H3.25z" />
+                  <path d="M12 7v13.25" />
+                  <path d="M11.85 6.9H8.7A2.45 2.45 0 1 1 11 3.65l1 3.25Z" />
+                  <path d="M12.15 6.9h3.15A2.45 2.45 0 1 0 13 3.65l-1 3.25Z" />
+                </>
+              )}
+            </svg>
+            <span>{quickActionsOpen ? '收起' : '任务'}</span>
           </button>
         </nav>
 
-        <div className="game-room-feed" ref={streamRef}>
+        <div
+          id="room-message-feed"
+          className={`game-room-feed${!loading && state ? ' has-quick-actions' : ''}`}
+          ref={streamRef}
+          role="region"
+          aria-label="互动群消息记录"
+          tabIndex={0}
+        >
           {loading && (
             <div className="feed-entry-skeleton" role="status" aria-label="正在进入互动群">
               <div className="feed-entry-skeleton-title">正在进入互动群…</div>
@@ -3173,6 +3991,7 @@ export default function GameRoom({
                             endsAt={item.endsAt}
                             mode={item.mode}
                             template={item.template ?? ''}
+                            afterTemplate={item.afterTemplate}
                           />
                         </p>
                       )}
@@ -3232,10 +4051,15 @@ export default function GameRoom({
                 <div className={`feed-chat ${item.mine ? 'mine' : 'theirs'}`} key={item.id}>
                   {!item.mine && <ChatAvatar url={item.avatar} name={item.name} />}
                   <div className="feed-chat-body">
-                    {!item.mine && <div className="feed-chat-name">{item.name}</div>}
+                    {!item.mine && (
+                      <div className="feed-chat-name">
+                        {item.name}
+                        {item.administrator && <em className="game-admin-badge">管理员</em>}
+                      </div>
+                    )}
                     <button
                       type="button"
-                      className="wx-rp wx-rp-standard"
+                      className={`wx-rp ${item.administrator ? 'wx-rp-admin' : 'wx-rp-standard'}`}
                       onClick={() => {
                         if (isDemo) return;
                         void openUserPacket({
@@ -3264,7 +4088,9 @@ export default function GameRoom({
                         </div>
                       </div>
                       <div className="wx-rp-foot">
-                        <span className="wx-rp-brand">普通红包</span>
+                        <span className="wx-rp-brand">
+                          {item.administrator ? '管理员福利红包' : '普通红包'}
+                        </span>
                       </div>
                     </button>
                   </div>
@@ -3311,17 +4137,44 @@ export default function GameRoom({
                       : '我的下注';
               return (
                 <div className={`feed-chat ${item.mine ? 'mine' : 'theirs'}${ownBet ? ' own-bet' : ''}`} key={item.id}>
-                  {!item.mine && <ChatAvatar url={item.avatar} name={item.name} />}
+                  {!item.mine && (
+                    <ChatAvatar
+                      url={item.avatar}
+                      name={item.name}
+                      onLongPress={
+                        canUseChatGestures
+                          ? () => mentionPlayer(item.name)
+                          : undefined
+                      }
+                    />
+                  )}
                   <div className="feed-chat-body">
                     {(!item.mine || ownBet) && (
                       <div className={`feed-chat-name${ownBet ? ' own-bet' : ''}`}>
                         {ownBet ? ownActionLabel : item.name}
+                        {!ownBet && item.administrator && (
+                          <em className="game-admin-badge">管理员</em>
+                        )}
                       </div>
                     )}
-                    <div className={`feed-chat-bubble ${item.emoji ? 'emoji' : ''} ${ownBet ? 'is-bet' : ''}`}>
-                      <p>{item.text}</p>
+                    <LongPressSurface
+                      className={`feed-chat-bubble ${item.emoji ? 'emoji' : ''} ${ownBet ? 'is-bet' : ''}`}
+                      ariaLabel={`来自${item.name}的消息，长按回复`}
+                      onLongPress={
+                        !item.mine && canUseChatGestures
+                          ? () => selectMessageReply(item)
+                          : undefined
+                      }
+                    >
+                      {item.replyTo && (
+                        <div className="feed-chat-reply">
+                          <strong>回复 {item.replyTo.nickname}</strong>
+                          <span>{item.replyTo.content}</span>
+                        </div>
+                      )}
+                      <AssistantCopy text={item.text} ownTokens={ownMentionTokens} />
                       {item.time && <time>{item.time}</time>}
-                    </div>
+                    </LongPressSurface>
                   </div>
                 </div>
               );
@@ -3431,59 +4284,121 @@ export default function GameRoom({
           </div>
         )}
 
-        {continuation?.mine && continuation.deadline && (
-          <ContinuationConfirm
+        {roomGloballyMuted ? (
+          <div
+            className="room-chat-lock-state room-global-mute-state"
+            role="status"
+            aria-live="polite"
+          >
+            互动群已禁言
+          </div>
+        ) : continuationActive && continuation ? (
+          <ContinuationGate
             deadline={continuation.deadline}
+            mine={continuation.mine}
             busy={busy}
             onConfirm={() =>
               void runAction(() => api.continueBanker(roomId, continuation.previousRoundId))
             }
           />
-        )}
-
-        {state && connState === 'online' && (canBid || canBet) && (
-          <div className="composer-mode-tip" role="status">
-            <b>{canBid ? '竞庄模式' : '下注模式'}</b>
-            <span>输入纯数字即提交金额，单位 RM；文字仍作为群消息发送</span>
+        ) : chatMuted ? (
+          <StageLockPanel stage={displayedMutedStage} detail={stageLockDetail}>
+            {repostWindowOpen && state?.me.isBanker ? (
+              <button
+                className="stage-control-button repost"
+                type="button"
+                disabled={chatSendPending || connState !== 'online'}
+                onClick={repostRound}
+              >
+                <span>{chatSendPending ? '正在重推…' : '重推本局'}</span>
+                <small>取消本局并原路退款重开</small>
+              </button>
+            ) : canThrowDice ? (
+              <button
+                className="stage-control-button dice"
+                type="button"
+                disabled={diceSent || connState !== 'online'}
+                onClick={sendDice}
+              >
+                <span>{diceSent ? '投骰已发送…' : '投骰开包'}</span>
+                <small>三颗骰子将依次同步到群内</small>
+              </button>
+            ) : null}
+          </StageLockPanel>
+        ) : (
+          <>
+          {memberChatMuted && !composerControlsHidden && (
+          <div className="room-member-mute-bar" role="status">
+            <span className="room-member-mute-icon">禁</span>
+            <span>
+              <strong>
+                {state?.me.chatMute?.mutedUntil
+                  ? `禁言至 ${new Date(state.me.chatMute.mutedUntil).toLocaleString('zh-MY', {
+                      timeZone: 'Asia/Kuala_Lumpur',
+                      hour12: false,
+                    })}`
+                  : '已被永久禁言'}
+              </strong>
+              <small>
+                {state?.me.chatMute?.reason || '管理员未填写原因'}
+                {muteAllowsGameCommand ? ' · 游戏指令仍可使用' : ''}
+              </small>
+            </span>
           </div>
         )}
 
-        <ChatComposer
-          onSend={sendChat}
-          disabled={chatMuted || composerUnavailable}
-          busy={betPending || chatSendPending}
-          placeholder={composerHint}
-          amountMode={canBid ? 'bid' : canBet ? 'bet' : null}
-          stickers={stickers}
-          onSendSticker={sendSticker}
-          toolsHighlight={canThrowDice}
-          diceAvailable={canThrowDice}
-          defaultToolTab={canThrowDice ? 'dice' : 'emoji'}
-          dicePanel={
-            canThrowDice ? (
-              <>
-                <div className="dice-panel-ready-head">
-                  <span className="dice-panel-art" aria-hidden="true">
-                    <Die value={5} />
-                  </span>
-                  <span>
-                    <strong>庄家投骰</strong>
-                    <small>三颗骰子将依次掷出，并同步到互动群</small>
-                  </span>
-                </div>
-                <button
-                  className="primary-action dice-action"
-                  type="button"
-                  onClick={sendDice}
-                  disabled={diceSent}
-                >
-                  {diceSent ? '已发送到群聊…' : '投骰子到群聊'}
-                </button>
-              </>
-            ) : (
-              <div className="dice-panel-unavailable">
-                <span className="dice-panel-lock" aria-hidden="true">
-                  <svg viewBox="0 0 24 24">
+        {composerHint && (
+          <div className="room-chat-lock-state" role="status" aria-live="polite">
+            {composerHint}
+          </div>
+        )}
+
+        {!composerControlsHidden && (
+          <ChatComposer
+            onSend={sendChat}
+            disabled={composerControlsHidden}
+            busy={betPending || chatSendPending}
+            placeholder=""
+            amountMode={activeReplyTarget ? null : canBid ? 'bid' : canBet ? 'bet' : null}
+            bidHighCents={
+              canBid && state?.round?.topBids?.[0]
+                ? Number(state.round.topBids[0].amountCents)
+                : null
+            }
+            restrictedToGameCommands={memberChatMuted}
+            inputRequest={composerInputRequest ?? undefined}
+            replyPreview={activeReplyTarget}
+            onCancelReply={() => setReplyTarget(null)}
+            stickers={stickers}
+            onSendSticker={sendSticker}
+            toolsHighlight={canThrowDice}
+            diceAvailable={canThrowDice}
+            defaultToolTab={canThrowDice ? 'dice' : 'emoji'}
+            dicePanel={
+              canThrowDice ? (
+                <>
+                  <div className="dice-panel-ready-head">
+                    <span className="dice-panel-art" aria-hidden="true">
+                      <Die value={5} />
+                    </span>
+                    <span>
+                      <strong>庄家投骰</strong>
+                      <small>三颗骰子将依次掷出，并同步到互动群</small>
+                    </span>
+                  </div>
+                  <button
+                    className="primary-action dice-action"
+                    type="button"
+                    onClick={sendDice}
+                    disabled={diceSent}
+                  >
+                    {diceSent ? '已发送到群聊…' : '投骰子到群聊'}
+                  </button>
+                </>
+              ) : (
+                <div className="dice-panel-unavailable">
+                  <span className="dice-panel-lock" aria-hidden="true">
+                    <svg viewBox="0 0 24 24">
                     <rect x="4.5" y="10" width="15" height="10" rx="3" />
                     <path d="M8 10V7.5a4 4 0 0 1 8 0V10" />
                     <circle cx="12" cy="15" r="1" />
@@ -3493,6 +4408,8 @@ export default function GameRoom({
                   <strong>
                     {repostWindowOpen && state?.me.isBanker
                       ? '重推确认中'
+                      : diceWindowTimedOut && state?.me.isBanker
+                        ? '投骰已超时'
                       : phase === 'SENDING_PACKET' && state?.me.isBanker
                         ? '本局已经完成投骰'
                       : '投骰暂不可用'}
@@ -3500,6 +4417,8 @@ export default function GameRoom({
                   <small>
                     {repostWindowOpen && state?.me.isBanker
                       ? '发送 /重推将取消本局、退款并重新开局'
+                      : diceWindowTimedOut && state?.me.isBanker
+                        ? '系统正在取消本局并原路退回冻结金额'
                       : phase !== 'SENDING_PACKET'
                       ? '进入庄家投骰阶段后才可使用'
                       : state?.me.isBanker
@@ -3527,6 +4446,9 @@ export default function GameRoom({
             },
           ]}
         />
+        )}
+          </>
+        )}
       </div>
 
       {channelOpen &&
@@ -3844,10 +4766,115 @@ function RedPacketDialog({
   );
 }
 
-function ChatAvatar({ url, name }: { url?: string | null; name: string }) {
+function useLongPressAction(onLongPress?: () => void, delayMs = 480) {
+  const timerRef = useRef<number | null>(null);
+  const originRef = useRef<{ x: number; y: number } | null>(null);
+  const triggeredRef = useRef(false);
+  const [pressing, setPressing] = useState(false);
+
+  const cancel = useCallback(() => {
+    if (timerRef.current !== null) {
+      window.clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+    originRef.current = null;
+    setPressing(false);
+  }, []);
+
+  useEffect(() => cancel, [cancel]);
+
+  const onPointerDown = (event: ReactPointerEvent<HTMLElement>) => {
+    if (!onLongPress || (event.pointerType === 'mouse' && event.button !== 0)) return;
+    cancel();
+    triggeredRef.current = false;
+    originRef.current = { x: event.clientX, y: event.clientY };
+    setPressing(true);
+    timerRef.current = window.setTimeout(() => {
+      timerRef.current = null;
+      originRef.current = null;
+      triggeredRef.current = true;
+      setPressing(false);
+      onLongPress();
+    }, delayMs);
+  };
+
+  const onPointerMove = (event: ReactPointerEvent<HTMLElement>) => {
+    const origin = originRef.current;
+    if (!origin) return;
+    if (
+      Math.abs(event.clientX - origin.x) > 10
+      || Math.abs(event.clientY - origin.y) > 10
+    ) {
+      cancel();
+    }
+  };
+
+  const onContextMenu = (event: ReactMouseEvent<HTMLElement>) => {
+    if (!onLongPress) return;
+    event.preventDefault();
+    cancel();
+    if (!triggeredRef.current) onLongPress();
+    triggeredRef.current = false;
+  };
+
+  return {
+    pressing,
+    handlers: {
+      onPointerDown,
+      onPointerMove,
+      onPointerUp: cancel,
+      onPointerCancel: cancel,
+      onPointerLeave: cancel,
+      onContextMenu,
+    },
+  };
+}
+
+function LongPressSurface({
+  children,
+  className,
+  ariaLabel,
+  onLongPress,
+}: {
+  children: ReactNode;
+  className: string;
+  ariaLabel: string;
+  onLongPress?: () => void;
+}) {
+  const { pressing, handlers } = useLongPressAction(onLongPress);
+  const interactive = !!onLongPress;
+  const onKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (!onLongPress || (event.key !== 'Enter' && event.key !== ' ')) return;
+    event.preventDefault();
+    onLongPress();
+  };
+  return (
+    <div
+      className={`${className}${interactive ? ' long-pressable' : ''}${pressing ? ' is-pressing' : ''}`}
+      {...(interactive ? handlers : {})}
+      role={interactive ? 'button' : undefined}
+      tabIndex={interactive ? 0 : undefined}
+      aria-label={interactive ? ariaLabel : undefined}
+      onKeyDown={interactive ? onKeyDown : undefined}
+    >
+      {children}
+    </div>
+  );
+}
+
+function ChatAvatar({
+  url,
+  name,
+  onLongPress,
+}: {
+  url?: string | null;
+  name: string;
+  onLongPress?: () => void;
+}) {
   const [failed, setFailed] = useState(false);
-  if (url && !failed) {
-    return (
+  const { pressing, handlers } = useLongPressAction(onLongPress);
+  const avatar = url && !failed
+    ? (
       <img
         className="feed-chat-avatar"
         src={url}
@@ -3855,12 +4882,25 @@ function ChatAvatar({ url, name }: { url?: string | null; name: string }) {
         loading="lazy"
         onError={() => setFailed(true)}
       />
+    )
+    : (
+      <div className="feed-chat-avatar" aria-hidden>
+        {(name || '?').slice(0, 1)}
+      </div>
     );
-  }
+  if (!onLongPress) return avatar;
   return (
-    <div className="feed-chat-avatar" aria-hidden>
-      {(name || '?').slice(0, 1)}
-    </div>
+    <button
+      type="button"
+      className={`feed-chat-avatar-action${pressing ? ' is-pressing' : ''}`}
+      aria-label={`长按艾特${name}`}
+      {...handlers}
+      onClick={(event) => {
+        if (event.detail === 0) onLongPress();
+      }}
+    >
+      {avatar}
+    </button>
   );
 }
 

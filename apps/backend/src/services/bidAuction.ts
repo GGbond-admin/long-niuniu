@@ -4,7 +4,11 @@
 import { RoundPhase } from '@prisma/client';
 import { fromCents } from '../engine/betting.js';
 import { prisma } from '../lib/prisma.js';
-import { closeBidding, GameError } from './game.js';
+import {
+  BANKER_BID_INCREMENT_CENTS,
+  closeBidding,
+  GameError,
+} from './game.js';
 import { gameBus } from './gameBus.js';
 import {
   getMessageTemplatesForRoom,
@@ -40,6 +44,10 @@ function stripHtml(html: string): string {
     .trim();
 }
 
+function formatBidAmount(cents: bigint): string {
+  return fromCents(cents).replace(/\.00$/, '').replace(/(\.\d)0$/, '$1');
+}
+
 export function mentionUser(user: MentionUser): string {
   // 群内 @ 优先显示玩家昵称，避免暴露 Telegram 用户名或 UID
   const name = user.nickname?.trim();
@@ -65,7 +73,7 @@ function formatBidList(
   return bids
     .map((bid, index) => {
       const mark = index === 0 ? ' ← 当前最高（锁庄前复核资格）' : '';
-      return `${index + 1}. ${mentionUser(bid.user)} RM ${fromCents(bid.amountCents)}${mark}`;
+      return `${index + 1}. ${mentionUser(bid.user)} RM ${formatBidAmount(bid.amountCents)}${mark}`;
     })
     .join('\n');
 }
@@ -89,12 +97,14 @@ export async function announceBidPlaced(params: {
   ]);
   if (!bidder) return;
   const leader = bids[0];
+  const highCents = leader?.amountCents ?? params.amountCents;
   let content = stripHtml(
     renderMessage(templates.bidPlaced, {
       player: mentionUser(bidder),
-      amount: fromCents(params.amountCents),
+      amount: formatBidAmount(params.amountCents),
       leader: leader ? mentionUser(leader.user) : mentionUser(bidder),
-      high: fromCents(leader?.amountCents ?? params.amountCents),
+      high: formatBidAmount(highCents),
+      next: formatBidAmount(highCents + BANKER_BID_INCREMENT_CENTS),
     }),
   );
   if (params.extendedEndsAt) {
@@ -124,8 +134,8 @@ type ClosingStep =
   | 'BID_FINAL_LIST';
 
 /**
- * 出价窗口结束后推进收官仪式：
- * 倒计时预告 → 依次各发一条 3 / 2 / 1 → 名单播报 → closeBidding。
+ * 名义计时结束后推进收官仪式（3、2、1 播完前仍接受加价）：
+ * 倒计时预告 → 依次各发一条 3 / 2 / 1 → 名单播报并封盘 → closeBidding。
  */
 export async function advanceBidClosingCeremony(params: {
   roundId: string;
@@ -170,7 +180,7 @@ export async function advanceBidClosingCeremony(params: {
     const sent = await appendSystemChatOnce(
       params.roomId,
       `round:${round.id}:bid:closing`,
-      content || '竞标时间到，开始 3、2、1 最终确认！',
+      content || '竞标最后倒数，3、2、1 播完前仍可继续加 RM 100。',
     );
     if (!sent) return 'pending';
     await prisma.roundEvent.create({

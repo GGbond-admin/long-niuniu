@@ -1,18 +1,39 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { api } from '../api';
+import { AUTH_READY_EVENT, api, getToken } from '../api';
 import BrandLogo from '../components/BrandLogo';
 
 type LobbyData = Awaited<ReturnType<typeof api.lobby>>;
 
+const LOBBY_CACHE_KEY = 'nn_lobby_v1';
 const LOBBY_BANNERS = [
   { id: 'banner-01', src: '/banners/banner-01.jpg', alt: '至尊牛牛 · 互动群对局' },
   { id: 'banner-02', src: '/banners/banner-02.jpg', alt: '至尊牛牛 · 公平结算' },
 ] as const;
 
+function readLobbyCache(): LobbyData | null {
+  try {
+    const raw = sessionStorage.getItem(LOBBY_CACHE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as LobbyData;
+    if (!parsed || !Array.isArray(parsed.games)) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function writeLobbyCache(data: LobbyData) {
+  try {
+    sessionStorage.setItem(LOBBY_CACHE_KEY, JSON.stringify(data));
+  } catch {
+    // ignore
+  }
+}
+
 export default function Lobby({ active = true }: { active?: boolean }) {
   const navigate = useNavigate();
-  const [data, setData] = useState<LobbyData | null>(null);
+  const [data, setData] = useState<LobbyData | null>(readLobbyCache);
   const [error, setError] = useState('');
   const [retryKey, setRetryKey] = useState(0);
   const [bannerIndex, setBannerIndex] = useState(0);
@@ -22,12 +43,24 @@ export default function Lobby({ active = true }: { active?: boolean }) {
     const refresh = () =>
       api.lobby().then((result) => {
         setData(result);
+        writeLobbyCache(result);
         setError('');
       });
-    refresh().catch((reason) => setError((reason as Error).message || '大厅加载失败'));
+    const start = () => {
+      if (!getToken()) return;
+      refresh().catch((reason) => setError((reason as Error).message || '大厅加载失败'));
+    };
+    start();
+    window.addEventListener(AUTH_READY_EVENT, start);
     // 轮询失败静默保留旧数据，成功后自动清除错误提示
-    const timer = window.setInterval(() => void refresh().catch(() => undefined), 10_000);
-    return () => window.clearInterval(timer);
+    const timer = window.setInterval(() => {
+      if (!getToken()) return;
+      void refresh().catch(() => undefined);
+    }, 10_000);
+    return () => {
+      window.removeEventListener(AUTH_READY_EVENT, start);
+      window.clearInterval(timer);
+    };
   }, [active, retryKey]);
 
   useEffect(() => {
@@ -69,9 +102,17 @@ export default function Lobby({ active = true }: { active?: boolean }) {
             className="lobby-banner-track"
             style={{ transform: `translateX(-${bannerIndex * 100}%)` }}
           >
-            {LOBBY_BANNERS.map((banner) => (
+            {LOBBY_BANNERS.map((banner, index) => (
               <div className="lobby-banner-slide" key={banner.id}>
-                <img src={banner.src} alt={banner.alt} draggable={false} />
+                {index === 0 || bannerIndex >= index ? (
+                  <img
+                    src={banner.src}
+                    alt={banner.alt}
+                    draggable={false}
+                    decoding="async"
+                    loading={index === 0 ? 'eager' : 'lazy'}
+                  />
+                ) : null}
               </div>
             ))}
           </div>

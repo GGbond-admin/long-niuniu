@@ -15,6 +15,17 @@ function formatRangeAmount(value: unknown): string | null {
   return `RM ${(value / 100).toFixed(2)}`;
 }
 
+function formatWholeRinggitAmount(value: unknown): string | null {
+  let cents: number;
+  if (typeof value === 'bigint') cents = Number(value);
+  else if (typeof value === 'string' && /^\d+$/.test(value)) cents = Number(value);
+  else if (typeof value === 'number' && Number.isFinite(value)) cents = value;
+  else return null;
+  return `RM ${(cents / 100).toLocaleString('en-MY', {
+    maximumFractionDigits: 0,
+  })}`;
+}
+
 const GAME_ERROR_AMOUNT_KEY: Record<string, string> = {
   BELOW_BET_MIN: 'betMinCents',
   ABOVE_BET_MAX: 'betMaxCents',
@@ -32,15 +43,21 @@ const GAME_ERROR_MESSAGES: Record<string, string> = {
   ROUND_NOT_FINISHED: '牌局尚未结束',
   ROUND_NOT_CANCELLED: '牌局未处于取消状态',
   ROUND_INCOMPLETE: '牌局信息不完整，请联系客服',
+  ROUND_START_DISABLED: '游戏当前已结束，请等待运营重新开局',
   ROOM_NOT_FOUND: '房间不存在或已关闭',
   ROOM_PAUSED: '房间已暂停，请稍后再试',
   ROOM_BANNED: '您已被移出该房间，如有疑问请联系客服',
+  ROOM_GLOBAL_MUTED: '互动群当前为全群禁言状态',
+  ROOM_CHAT_MUTED: '你已被管理员禁言，暂时不能在互动群发布内容',
+  ROOM_CHAT_PHASE_MUTED: '当前游戏阶段禁止普通发言',
   NOT_ENOUGH_PLAYERS: '人数不足，无法开局',
   GAME_NOT_SUPPORTED: '该游戏暂未开放',
   // 金额
   INVALID_AMOUNT: '金额无效，请重新输入',
   AMOUNT_TOO_LARGE: '金额过大，请重新输入',
   INSUFFICIENT_BALANCE: '可用余额不足',
+  BID_MUST_BE_INTEGER: '竞标金额必须是整数，请勿输入小数',
+  BID_INCREMENT_TOO_LOW: '竞标金额至少需要比当前最高价高 RM 100',
   BID_OUT_OF_RANGE: '竞标金额超出范围',
   BET_OUT_OF_RANGE: '下注金额超出范围',
   BELOW_BET_MIN: '低于最低下注金额',
@@ -59,6 +76,11 @@ const GAME_ERROR_MESSAGES: Record<string, string> = {
   BANKER_CANNOT_FORFEIT: '庄家不能放弃领取',
   BANKER_CLAIM_MISSING: '庄家认领记录缺失，请联系客服',
   PLAYER_CLAIMS_MISSING: '仍有玩家未完成认领',
+  CONTINUATION_NOT_STARTED: '成绩单尚未发布完成，请稍候',
+  CONTINUATION_IN_PROGRESS: '续庄正在处理中，请稍后再试',
+  CONTINUATION_ALREADY_USED: '本次中标的续庄资格已经使用',
+  CONTINUATION_WINDOW_EXPIRED: '续庄确认时间已结束，下一局将公开竞标',
+  NEXT_ROUND_UNAVAILABLE: '下一局状态已变化，请刷新后重试',
   // 红包
   PACKET_NOT_FOUND: '红包不存在或已失效',
   PACKET_EXPIRED: '红包已过期',
@@ -69,6 +91,7 @@ const GAME_ERROR_MESSAGES: Record<string, string> = {
   PACKET_TOTAL_EXCEEDED: '领取总额超过红包金额，请联系客服',
   PACKET_RETURN_OUT_OF_RANGE: '回收金额超出范围',
   PACKET_RECONCILIATION_OUT_OF_RANGE: '对账金额超出范围',
+  PACKET_ESCROW_UNAVAILABLE: '红包托管资金正在核对，请稍后重试',
   ALREADY_CLAIMED: '您已领取过该红包',
   NOT_ELIGIBLE_TO_CLAIM: '您不符合本局领取条件',
   CLAIM_ALREADY_RECORDED: '认领已记录，无需重复提交',
@@ -92,6 +115,10 @@ const GAME_ERROR_MESSAGES: Record<string, string> = {
 
 export function gameErrorMessage(error: GameError): string {
   const base = GAME_ERROR_MESSAGES[error.code] ?? '操作失败，请稍后重试';
+  if (error.code === 'BID_INCREMENT_TOO_LOW') {
+    const minimum = formatWholeRinggitAmount(error.details?.minimumCents);
+    if (minimum) return `下一口最低 ${minimum}`;
+  }
   const rangeKey = GAME_ERROR_AMOUNT_KEY[error.code];
   if (rangeKey) {
     const amount = formatRangeAmount(error.details?.[rangeKey]);

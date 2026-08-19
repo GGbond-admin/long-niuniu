@@ -60,6 +60,7 @@ import { GameError } from './game.js';
 import {
   confirmedChatGameAction,
   handleRoomChatCommand,
+  isRoomCommandCandidate,
   privateBetConfirmationFor,
 } from './chatCommands.js';
 
@@ -73,9 +74,6 @@ describe('非竞标/下注阶段纯数字当普通聊天', () => {
 
   it.each([
     'WAITING',
-    'SENDING_PACKET',
-    'CLAIM_EXPIRED',
-    'SETTLING',
     'FINISHED',
     'CANCELLED',
   ])('阶段 %s 发送纯数字 → ignored（走普通聊天）', async (phase) => {
@@ -102,7 +100,7 @@ describe('非竞标/下注阶段纯数字当普通聊天', () => {
   });
 
   it('非下注阶段发送 0 / sh金额 → ignored', async () => {
-    memory.phase = 'SETTLING';
+    memory.phase = 'WAITING';
     await expect(
       handleRoomChatCommand({ roomId: 'room-1', userId: 'user-1', content: '0' }),
     ).resolves.toEqual({ kind: 'ignored' });
@@ -113,8 +111,13 @@ describe('非竞标/下注阶段纯数字当普通聊天', () => {
     expect(memory.placeBet).not.toHaveBeenCalled();
   });
 
-  it('抢包禁言阶段仍拦截数字发言', async () => {
-    memory.phase = 'CLAIMING';
+  it.each([
+    'SENDING_PACKET',
+    'CLAIMING',
+    'CLAIM_EXPIRED',
+    'SETTLING',
+  ])('%s 禁言阶段拦截数字发言', async (phase) => {
+    memory.phase = phase;
     const result = await handleRoomChatCommand({
       roomId: 'room-1',
       userId: 'user-1',
@@ -309,18 +312,60 @@ describe('非竞标/下注阶段纯数字当普通聊天', () => {
     ).toBeNull();
   });
 
-  it('竞标阶段纯数字仍走竞标', async () => {
+  it('竞标阶段公共回显使用后台确认的实际输入金额', async () => {
     memory.phase = 'BANKER_BID';
-    memory.placeBankerBid.mockResolvedValue({});
+    memory.placeBankerBid.mockResolvedValue({ amountCents: 50_000n });
     const result = await handleRoomChatCommand({
       roomId: 'room-1',
       userId: 'user-1',
-      content: '8800',
+      content: '500',
     });
-    expect(result).toMatchObject({ kind: 'ok', action: 'bid', echo: '8800' });
+    expect(result).toMatchObject({
+      kind: 'ok',
+      action: 'bid',
+      echo: '500',
+      amountCents: '50000',
+    });
     expect(confirmedChatGameAction(result)).toBe('bid');
     expect(memory.placeBankerBid).toHaveBeenCalledOnce();
   });
+
+  it('竞标金额低于当前最高价加 RM100 时提示下一口最低金额', async () => {
+    memory.phase = 'BANKER_BID';
+    memory.placeBankerBid.mockRejectedValue(
+      new GameError('BID_INCREMENT_TOO_LOW', {
+        currentCents: 400_000n,
+        minimumCents: 410_000n,
+      }),
+    );
+    const result = await handleRoomChatCommand({
+      roomId: 'room-1',
+      userId: 'user-1',
+      content: '4050',
+    });
+    expect(result).toEqual({
+      kind: 'error',
+      message: '下一口最低 RM 4,100',
+    });
+  });
+
+  it.each(['8800.50', '8800.00', '8800.000'])(
+    '竞标阶段拒绝带小数点的金额 %s 且不提交出价',
+    async (content) => {
+      memory.phase = 'BANKER_BID';
+      expect(isRoomCommandCandidate(content)).toBe(true);
+      const result = await handleRoomChatCommand({
+        roomId: 'room-1',
+        userId: 'user-1',
+        content,
+      });
+      expect(result).toEqual({
+        kind: 'error',
+        message: '竞标金额必须是整数，请勿输入小数',
+      });
+      expect(memory.placeBankerBid).not.toHaveBeenCalled();
+    },
+  );
 
   it('竞标倒计时结束后明确提示正在最终确认', async () => {
     memory.phase = 'BANKER_BID';
@@ -332,7 +377,7 @@ describe('非竞标/下注阶段纯数字当普通聊天', () => {
     });
     expect(result).toEqual({
       kind: 'error',
-      message: '竞标已截止，正在进行 3、2、1 最终确认',
+      message: '3、2、1 播报已结束，正在锁定庄家',
     });
   });
 });

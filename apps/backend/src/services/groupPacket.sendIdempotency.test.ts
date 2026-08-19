@@ -1,3 +1,4 @@
+import { GroupPacketFundingSource } from '@prisma/client';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => {
@@ -50,6 +51,9 @@ const packet = {
   remainingCount: params.count,
   mode: params.mode,
   greeting: params.greeting,
+  fundingSource: GroupPacketFundingSource.USER_WALLET,
+  budgetAccountId: null,
+  gameAdminAssignmentId: null,
   status: 'ACTIVE',
   expiresAt: new Date(Date.now() + 60_000),
   createdAt: new Date(),
@@ -110,6 +114,51 @@ describe('发群红包支付验证与幂等', () => {
       sendGroupPacket({ ...params, totalCents: 10_000n }),
     ).rejects.toMatchObject({ code: 'IDEMPOTENCY_CONFLICT' });
     expect(mocks.verifyPaymentPin).not.toHaveBeenCalled();
+    expect(mocks.transfer).not.toHaveBeenCalled();
+  });
+
+  it('被管理员禁言时拒绝个人红包且不扣款', async () => {
+    mocks.tx.user.findUnique.mockResolvedValue({
+      id: params.userId,
+      status: 'ACTIVE',
+      kyc: { status: 'APPROVED' },
+      wallet: {},
+      roomMemberships: [{
+        status: 'ACTIVE',
+        chatMutedAt: new Date(),
+        chatMutedUntil: new Date(Date.now() + 60_000),
+        chatMuteReason: '刷屏',
+      }],
+    });
+
+    await expect(sendGroupPacket(params)).rejects.toMatchObject({
+      code: 'ROOM_CHAT_MUTED',
+    });
+    expect(mocks.verifyPaymentPin).toHaveBeenCalledOnce();
+    expect(mocks.assertPaymentPinVersion).toHaveBeenCalledOnce();
+    expect(mocks.transfer).not.toHaveBeenCalled();
+  });
+
+  it('全群禁言时拒绝个人红包且不扣款', async () => {
+    mocks.tx.user.findUnique.mockResolvedValue({
+      id: params.userId,
+      status: 'ACTIVE',
+      kyc: { status: 'APPROVED' },
+      wallet: {},
+      roomMemberships: [{
+        status: 'ACTIVE',
+        room: {
+          chatMutedAt: new Date(),
+          chatMuteReason: '运营维护',
+        },
+      }],
+    });
+
+    await expect(sendGroupPacket(params)).rejects.toMatchObject({
+      code: 'ROOM_GLOBAL_MUTED',
+    });
+    expect(mocks.verifyPaymentPin).toHaveBeenCalledOnce();
+    expect(mocks.assertPaymentPinVersion).toHaveBeenCalledOnce();
     expect(mocks.transfer).not.toHaveBeenCalled();
   });
 });

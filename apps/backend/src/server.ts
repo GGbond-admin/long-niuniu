@@ -30,9 +30,12 @@ import { adminNoticeRoutes, noticeRoutes } from './routes/notices.js';
 import { uploadRoutes } from './routes/uploads.js';
 import { paymentRoutes } from './routes/payments.js';
 import { settingsRoutes } from './routes/settings.js';
+import { gameAdminRoutes } from './routes/gameAdmin.js';
 import { pushService, PushService } from './services/push.js';
 import { WalletError } from './services/wallet.js';
 import { GameError } from './services/game.js';
+import { GameAdminError } from './services/gameAdmin.js';
+import { GameBudgetError } from './services/gameBudget.js';
 import { TngIngestError } from './services/tngIngest.js';
 import { PaymentPinError } from './services/paymentPin.js';
 import {
@@ -229,14 +232,64 @@ export async function buildServer() {
     if (err instanceof GameError) {
       const status = ['ROUND_NOT_FOUND', 'ROOM_NOT_FOUND', 'PACKET_NOT_FOUND'].includes(err.code)
         ? 404
+        : err.code === 'PACKET_ESCROW_UNAVAILABLE'
+          ? 503
         : ['INVALID_PHASE', 'PHASE_ENDED', 'BET_NOT_EDITABLE', 'CLAIM_ALREADY_RECORDED'].includes(err.code)
           ? 409
-          : err.code === 'KYC_REQUIRED' || err.code === 'NOT_IN_ROOM'
+        : err.code === 'KYC_REQUIRED'
+          || err.code === 'NOT_IN_ROOM'
+          || err.code === 'ROOM_CHAT_MUTED'
             ? 403
             : 400;
       return reply
         .code(status)
         .send({ error: err.code, message: gameErrorMessage(err), details: err.details });
+    }
+    if (err instanceof GameAdminError || err instanceof GameBudgetError) {
+      const notFound = [
+        'GAME_NOT_FOUND',
+        'GAME_ADMIN_ASSIGNMENT_NOT_FOUND',
+        'GAME_BUDGET_NOT_FOUND',
+        'ROOM_MEMBER_NOT_FOUND',
+      ].includes(err.code);
+      const forbidden = [
+        'GAME_ADMIN_ACCESS_DENIED',
+        'GAME_ADMIN_PERMISSION_DENIED',
+      ].includes(err.code);
+      const conflict = [
+        'IDEMPOTENCY_CONFLICT',
+        'INSUFFICIENT_GAME_BUDGET',
+        'INSUFFICIENT_PLATFORM_RESERVE',
+        'GAME_ADMIN_PACKET_SECURITY_REQUIRED',
+      ].includes(err.code);
+      const messages: Record<string, string> = {
+        GAME_NOT_FOUND: '游戏不存在或尚未初始化',
+        GAME_ADMIN_ASSIGNMENT_NOT_FOUND: '游戏管理员授权不存在',
+        GAME_BUDGET_NOT_FOUND: '游戏预算账户不存在',
+        GAME_ADMIN_ACCESS_DENIED: '你没有该游戏的管理员权限',
+        GAME_ADMIN_PERMISSION_DENIED: '你没有执行此操作的权限',
+        GAME_ADMIN_PERMISSION_REQUIRED: '请至少选择一项管理员权限',
+        INVALID_GAME_ADMIN_PERMISSION: '包含系统不支持的管理员权限',
+        GAME_ADMIN_USER_INELIGIBLE: '只能授权已启用的 Telegram 真人账号',
+        GAME_ADMIN_PACKET_SECURITY_REQUIRED: '发预算红包前需完成实名并设置支付密码',
+        GAME_ADMIN_UPDATE_REQUIRED: '没有需要更新的管理员资料',
+        ROOM_MEMBER_NOT_FOUND: '该用户不是当前游戏的活跃成员',
+        CANNOT_MUTE_SELF: '不能禁言自己',
+        CANNOT_MUTE_GAME_ADMIN: '不能禁言另一名游戏管理员，请先由平台停用其授权',
+        INVALID_MUTE_DURATION: '禁言时长必须为 1 分钟至 30 天，或选择永久',
+        INVALID_BUDGET_AMOUNT: '预算金额格式不正确',
+        BUDGET_AMOUNT_TOO_LARGE: '预算金额超出系统可处理范围',
+        INSUFFICIENT_GAME_BUDGET: '游戏预算余额不足',
+        INSUFFICIENT_PLATFORM_RESERVE: '平台备付金余额不足',
+        IDEMPOTENCY_CONFLICT: '该请求号已用于另一笔操作，请刷新后重试',
+      };
+      return reply
+        .code(notFound ? 404 : forbidden ? 403 : conflict ? 409 : 400)
+        .send({
+          error: err.code,
+          message: messages[err.code] ?? '游戏管理员操作失败，请稍后重试',
+          details: err.details,
+        });
     }
     if ((err as { statusCode?: number }).statusCode === 429) {
       return reply
@@ -267,6 +320,7 @@ export async function buildServer() {
   await app.register(authRoutes);
   await app.register(onboardingRoutes);
   await app.register(settingsRoutes);
+  await app.register(gameAdminRoutes);
   await app.register(walletRoutes);
   await app.register(paymentRoutes);
   await app.register(promotionRoutes);

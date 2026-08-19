@@ -14,6 +14,7 @@ function transactionWith(existing: Record<string, unknown>) {
     },
     platformAccount: {
       upsert: vi.fn(),
+      updateMany: vi.fn(),
       findUniqueOrThrow: vi.fn(),
     },
   };
@@ -43,6 +44,28 @@ describe('钱包分录幂等校验', () => {
 
     await expect(post(tx as never, input)).rejects.toThrow('IDEMPOTENCY_CONFLICT');
     expect(tx.wallet.update).not.toHaveBeenCalled();
+    expect(tx.ledgerEntry.create).not.toHaveBeenCalled();
+  });
+
+  it('平台备付金借记使用余额条件更新，禁止形成负余额', async () => {
+    const tx = transactionWith({});
+    tx.ledgerEntry.findUnique.mockResolvedValue(null);
+    tx.platformAccount.upsert.mockResolvedValue({
+      accountType: AccountType.PLATFORM_RESERVE,
+      balanceCents: 0n,
+    });
+    tx.platformAccount.updateMany.mockResolvedValue({ count: 0 });
+
+    await expect(
+      post(tx as never, {
+        accountType: AccountType.PLATFORM_RESERVE,
+        direction: LedgerDirection.DEBIT,
+        amountCents: 1_000n,
+        refType: 'group_packet_claim',
+        refId: 'claim-1',
+        idempotencyKey: 'claim-1:out',
+      }),
+    ).rejects.toThrow('INSUFFICIENT_BALANCE');
     expect(tx.ledgerEntry.create).not.toHaveBeenCalled();
   });
 });

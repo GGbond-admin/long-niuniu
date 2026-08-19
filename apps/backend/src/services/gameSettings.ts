@@ -20,6 +20,8 @@ export interface RoundConfig {
   continuationWindowSeconds: number;
   /** 封盘后允许庄家发送 /重推 取消退款并重开下一局的确认时间 */
   repostWindowSeconds: number;
+  /** 重推确认结束后，庄家必须完成投骰的时限 */
+  bankerDiceTimeoutSeconds: number;
   bankerBidMinCents: number;
   bankerBidMaxCents: number;
   trendLength: number;
@@ -52,7 +54,8 @@ export const DEFAULT_ROUND_CONFIG: RoundConfig = {
   betDurationSeconds: 50,
   claimDurationSeconds: 40,
   continuationWindowSeconds: 15,
-  repostWindowSeconds: 8,
+  repostWindowSeconds: 5,
+  bankerDiceTimeoutSeconds: 15,
   bankerBidMinCents: 10_000,
   bankerBidMaxCents: 100_000_000,
   trendLength: 10,
@@ -144,7 +147,7 @@ export interface MessageTemplates {
   bidPlaced: string;
   /** @deprecated 旧版「名单在倒计时前」模板，仅保留配置兼容 */
   bidClosing: string;
-  /** 出价窗口结束，先提示即将开始 3/2/1 */
+  /** 名义计时结束后开始 3/2/1；播报结束前仍可加价 */
   bidCountdownStart: string;
   bidCountdown3: string;
   bidCountdown2: string;
@@ -175,12 +178,12 @@ export const DEFAULT_MESSAGE_TEMPLATES: MessageTemplates = {
   welcome:
     '欢迎进入【至尊牛牛】互动群\n\n这里不是旁观大厅，而是本局实时战场。\n请先完成实名与充值，凑齐人数后自动开局。\n准备好了，就留下做局。',
   bidStart:
-    '【第 {{seqNo}} 局 · 庄家竞标开启】\n\n全员可上庄，现在开始叫价！\n竞标时长：{{bidSeconds}} 秒\n最低出价：RM {{minBid}}\n\n直接发送金额即可出价；再次发送=改价。\n有人出价后我会实时 @ 播报，欢迎继续加价。\n最后 5 秒内出现更高价，倒计时自动重置为 5 秒，直到无人加价。\n最高有效价锁定庄家。',
+    '【第 {{seqNo}} 局 · 庄家竞标开启】\n\n竞标时长：{{bidSeconds}} 秒\n最低出价：RM {{minBid}}\n\n首口输入整数；已有最高价后，至少加 RM 100，也可以加更多。\n最后 5 秒有效加价，计时重置为 5 秒。\n进入 3、2、1 后仍可喊价，播报结束后锁标。',
   bidPlaced:
-    '叫价更新！\n{{player}} 出价 RM {{amount}}\n\n当前最高：{{leader}} · RM {{high}}\n还有没有更高？直接发金额，错过就没了！',
+    '叫价更新！\n{{player}} 出价 RM {{amount}}\n当前最高：{{leader}} · RM {{high}}\n下一口最低 RM {{next}}，可以更高。',
   bidClosing:
     '【竞标截止 · 最终确认】\n\n本局出价名单：\n{{bidList}}\n\n当前最高：{{leader}} · RM {{high}}\n下面开始 3、2、1 倒计时，倒计时结束立刻锁定庄家！',
-  bidCountdownStart: '【竞标即将锁定】\n出价时间到，开始 3、2、1 最终确认！',
+  bidCountdownStart: '【竞标最后倒数】\n播报结束前仍可按最低加价规则继续竞标。',
   bidCountdown3: '3',
   bidCountdown2: '2',
   bidCountdown1: '1',
@@ -195,7 +198,7 @@ export const DEFAULT_MESSAGE_TEMPLATES: MessageTemplates = {
   sealedSummary:
     '【停止下注 · 封盘明细】\n\n庄家：{{banker}}\n庄钱：RM {{pot}}\n发包金额：RM {{packetTotal}}\n发包数量：{{packetCount}} 个\n总下注：RM {{betTotal}}\n总梭哈：RM {{shTotal}}\n\n代包手1：{{tailPackerBanker}}（庄家尾包）\n代包手2：{{tailPackerPlayer}}（闲家尾包）\n\n本局下注成功名单：\n{{betList}}',
   dicePrompt:
-    '【封盘确认 · {{repostWindow}} 秒】\n请庄家 {{banker}} 确认本局。\n· 继续本局：倒计时结束后点击投骰\n· 重推本局：倒计时内发送 /重推，系统会取消整局、原路退回全部冻结金额，并重新开启下一局',
+    '【封盘确认 · {{remaining}} 秒】\n请庄家 {{banker}} 确认本局。\n· 继续本局：确认结束后须在 {{diceSeconds}} 秒内投骰，超时本局自动取消并退款\n· 重推本局：倒计时内发送 /重推，系统会取消整局、原路退回全部冻结金额，并重新开启下一局',
   betCountdown: '下注倒计时 · 还剩 {{remaining}} 秒\n未出手的抓紧了，时间到立刻封盘！',
   claimStart:
     '【开始抢包 · {{claimSeconds}} 秒】\n仅庄家与已下注闲家可领，过期即止。',
@@ -216,6 +219,30 @@ export const DEFAULT_MESSAGE_TEMPLATES: MessageTemplates = {
   rewardCongrats: '【奖励到账】\n恭喜 {{player}} 获得「{{title}}」\n奖励金额：RM {{amount}}\n已发放至余额，可在钱包查看。',
 };
 
+const LEGACY_DECIMAL_BID_START =
+  '【第 {{seqNo}} 局 · 庄家竞标开启】\n\n全员可上庄，现在开始叫价！\n竞标时长：{{bidSeconds}} 秒\n最低出价：RM {{minBid}}\n\n直接发送金额即可出价；再次发送=改价。\n有人出价后我会实时 @ 播报，欢迎继续加价。\n最后 5 秒内出现更高价，倒计时自动重置为 5 秒，直到无人加价。\n最高有效价锁定庄家。';
+const LEGACY_FREE_BID_START =
+  '【第 {{seqNo}} 局 · 庄家竞标开启】\n\n全员可上庄，现在开始叫价！\n竞标时长：{{bidSeconds}} 秒\n最低出价：RM {{minBid}}\n\n仅支持整数金额，不可输入小数。\n直接发送整数金额即可出价；再次发送=改价。\n有人出价后我会实时 @ 播报，欢迎继续加价。\n最后 5 秒内出现更高价，倒计时自动重置为 5 秒，直到无人加价。\n最高有效价锁定庄家。';
+const LEGACY_FREE_BID_PLACED =
+  '叫价更新！\n{{player}} 出价 RM {{amount}}\n\n当前最高：{{leader}} · RM {{high}}\n还有没有更高？直接发金额，错过就没了！';
+const LEGACY_CLOSED_BID_COUNTDOWN_START =
+  '【竞标即将锁定】\n出价时间到，开始 3、2、1 最终确认！';
+const LEGACY_PRE_ONE_BID_START =
+  '【第 {{seqNo}} 局 · 庄家竞标开启】\n\n竞标时长：{{bidSeconds}} 秒\n最低出价：RM {{minBid}}\n\n首次发送整数金额出价；之后每次喊价固定在当前最高价上加 RM 100。\n最后 5 秒有人加价，计时重置为 5 秒。\n进入 3、2、1 后仍可喊价，数字 1 播出后锁标。';
+const LEGACY_PRE_ONE_BID_COUNTDOWN_START =
+  '【竞标最后倒数】\n数字 1 播出前仍可继续加 RM 100。';
+const LEGACY_AUTO_INCREMENT_BID_START =
+  '【第 {{seqNo}} 局 · 庄家竞标开启】\n\n竞标时长：{{bidSeconds}} 秒\n最低出价：RM {{minBid}}\n\n首次发送整数金额出价；之后每次喊价固定在当前最高价上加 RM 100。\n最后 5 秒有人加价，计时重置为 5 秒。\n进入 3、2、1 后仍可喊价，播报结束后锁标。';
+const LEGACY_AUTO_INCREMENT_BID_PLACED =
+  '叫价更新！\n{{player}} 出价 RM {{amount}}\n\n当前最高：{{leader}} · RM {{high}}\n继续发送整数即可加 RM 100。';
+const LEGACY_AUTO_INCREMENT_BID_COUNTDOWN_START =
+  '【竞标最后倒数】\n3、2、1 播报结束前仍可继续加 RM 100。';
+const LEGACY_EXACT_INCREMENT_BID_START =
+  '【第 {{seqNo}} 局 · 庄家竞标开启】\n\n竞标时长：{{bidSeconds}} 秒\n最低出价：RM {{minBid}}\n\n首口输入整数；已有最高价后，必须输入当前最高价 + RM 100。\n最后 5 秒有效加价，计时重置为 5 秒。\n进入 3、2、1 后仍可喊价，播报结束后锁标。';
+const LEGACY_EXACT_INCREMENT_BID_PLACED =
+  '叫价更新！\n{{player}} 出价 RM {{amount}}\n当前最高：{{leader}} · RM {{high}}\n下一口必须输入 RM {{next}}。';
+const LEGACY_EXACT_INCREMENT_BID_COUNTDOWN_START =
+  '【竞标最后倒数】\n播报结束前仍可按下一口准确金额继续竞标。';
 const LEGACY_BID_FINAL_LIST =
   '【竞标结束 · 最终名单】\n\n本局出价名单：\n{{bidList}}\n\n最高有效出价：{{leader}} · RM {{high}}';
 const LEGACY_CLAIM_START =
@@ -226,6 +253,8 @@ const LEGACY_DICE_PROMPT =
   '【庄家投骰】\n请庄家 {{banker}} 在 60 秒内投出 3 颗骰子。\n投骰后进入发包与抢包流程。\n如需重开本局，可发送 /重推。';
 const LEGACY_REROLL_DICE_PROMPT =
   '【庄家投骰】\n请庄家 {{banker}} 在 60 秒内投出 3 颗骰子。\n首次结果公布后有 {{rerollWindow}} 秒确认时间；如需重新投骰，请发送 /重推（每局最多一次）。';
+const LEGACY_STATIC_REPOST_DICE_PROMPT =
+  '【封盘确认 · {{repostWindow}} 秒】\n请庄家 {{banker}} 确认本局。\n· 继续本局：倒计时结束后点击投骰\n· 重推本局：倒计时内发送 /重推，系统会取消整局、原路退回全部冻结金额，并重新开启下一局';
 
 function defaultMessageTemplates(gameCode: string): MessageTemplates {
   const game = GAME_CATALOG[gameCode as SupportedGameCode];
@@ -417,9 +446,46 @@ export async function ensureGameConfigDefaults(): Promise<void> {
             }
             delete merged.diceRerollWindowSeconds;
           }
+          // 上一版默认值为 8 秒；本次产品规则统一调整为 5 秒。
+          if (raw?.repostWindowSeconds === 8) {
+            merged = { ...merged, repostWindowSeconds: 5 };
+          }
         }
         if (key === 'messages') {
           const raw = existing?.value as Record<string, unknown> | null;
+          if (
+            raw?.bidStart === LEGACY_DECIMAL_BID_START
+            || raw?.bidStart === LEGACY_FREE_BID_START
+            || raw?.bidStart === LEGACY_PRE_ONE_BID_START
+            || raw?.bidStart === LEGACY_AUTO_INCREMENT_BID_START
+            || raw?.bidStart === LEGACY_EXACT_INCREMENT_BID_START
+          ) {
+            merged = {
+              ...merged,
+              bidStart: DEFAULT_MESSAGE_TEMPLATES.bidStart,
+            };
+          }
+          if (
+            raw?.bidPlaced === LEGACY_FREE_BID_PLACED
+            || raw?.bidPlaced === LEGACY_AUTO_INCREMENT_BID_PLACED
+            || raw?.bidPlaced === LEGACY_EXACT_INCREMENT_BID_PLACED
+          ) {
+            merged = {
+              ...merged,
+              bidPlaced: DEFAULT_MESSAGE_TEMPLATES.bidPlaced,
+            };
+          }
+          if (
+            raw?.bidCountdownStart === LEGACY_CLOSED_BID_COUNTDOWN_START
+            || raw?.bidCountdownStart === LEGACY_PRE_ONE_BID_COUNTDOWN_START
+            || raw?.bidCountdownStart === LEGACY_AUTO_INCREMENT_BID_COUNTDOWN_START
+            || raw?.bidCountdownStart === LEGACY_EXACT_INCREMENT_BID_COUNTDOWN_START
+          ) {
+            merged = {
+              ...merged,
+              bidCountdownStart: DEFAULT_MESSAGE_TEMPLATES.bidCountdownStart,
+            };
+          }
           if (raw?.bidFinalList === LEGACY_BID_FINAL_LIST) {
             merged = {
               ...merged,
@@ -441,6 +507,7 @@ export async function ensureGameConfigDefaults(): Promise<void> {
           if (
             raw?.dicePrompt === LEGACY_DICE_PROMPT
             || raw?.dicePrompt === LEGACY_REROLL_DICE_PROMPT
+            || raw?.dicePrompt === LEGACY_STATIC_REPOST_DICE_PROMPT
           ) {
             merged = {
               ...merged,
@@ -610,6 +677,7 @@ const configSchemas = {
       claimDurationSeconds: z.number().int().min(5).max(3_600).optional(),
       continuationWindowSeconds: z.number().int().min(5).max(300).optional(),
       repostWindowSeconds: z.number().int().min(3).max(30).optional(),
+      bankerDiceTimeoutSeconds: z.number().int().min(5).max(120).optional(),
       bankerBidMinCents: z.number().int().min(1).max(1_000_000_000).optional(),
       bankerBidMaxCents: z.number().int().min(1).max(10_000_000_000).optional(),
       trendLength: z.number().int().min(1).max(100).optional(),

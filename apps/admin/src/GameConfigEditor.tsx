@@ -469,6 +469,23 @@ function RoundForm({
             }
           />
         </Field>
+        <Field
+          label="庄家投骰时限"
+          hint="重推确认结束后必须完成投骰；超时自动取消并退款"
+        >
+          <input
+            type="number"
+            min={5}
+            max={120}
+            value={value.bankerDiceTimeoutSeconds ?? ''}
+            onChange={(event) =>
+              onChange({
+                ...value,
+                bankerDiceTimeoutSeconds: Number(event.target.value),
+              })
+            }
+          />
+        </Field>
       </Section>
       <Section title="竞标金额范围">
         <Field
@@ -915,6 +932,10 @@ function serializeConfig(key: string, draft: Row): Row {
       repostWindowSeconds: intOrThrow(
         String(draft.repostWindowSeconds ?? ''),
         '封盘重推确认窗口',
+      ),
+      bankerDiceTimeoutSeconds: intOrThrow(
+        String(draft.bankerDiceTimeoutSeconds ?? ''),
+        '庄家投骰时限',
       ),
       bankerBidMinCents:
         typeof draft.bankerBidMinCents === 'string'

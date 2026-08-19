@@ -467,8 +467,12 @@ export async function fundVirtualPlayer(
   return prisma.wallet.findUniqueOrThrow({ where: { userId } });
 }
 
-/** 余额低于目标时补到目标。 */
-export async function topUpVirtualIfNeeded(userId: string, operatorId = 'SYSTEM') {
+/** 余额低于目标时补到目标；特定动作可要求更高的最低可用额。 */
+export async function topUpVirtualIfNeeded(
+  userId: string,
+  operatorId = 'SYSTEM',
+  minimumAvailableCents = 0n,
+) {
   return serializable(async (tx) => {
     // 目标余额判断必须和入账共享行锁；否则两个 worker 都会按旧余额各补一次。
     await tx.$queryRaw(
@@ -480,9 +484,13 @@ export async function topUpVirtualIfNeeded(userId: string, operatorId = 'SYSTEM'
     });
     if (!profile?.enabled || !profile.user.wallet) return null;
     const available = profile.user.wallet.availableCents;
-    if (available >= profile.targetBalanceCents) return null;
+    const target =
+      profile.targetBalanceCents >= minimumAvailableCents
+        ? profile.targetBalanceCents
+        : minimumAvailableCents;
+    if (available >= target) return null;
 
-    const need = profile.targetBalanceCents - available;
+    const need = target - available;
     const adjustmentId = randomUUID();
     await transfer(tx, {
       amountCents: need,

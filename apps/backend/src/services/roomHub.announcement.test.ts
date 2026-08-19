@@ -119,7 +119,9 @@ vi.mock('./scoreboardSyncLock.js', () => {
   };
 });
 
-vi.mock('./gameBus.js', () => ({ gameBus: { on: vi.fn() } }));
+vi.mock('./gameBus.js', () => ({
+  gameBus: { on: vi.fn(), announcementCompleted: vi.fn() },
+}));
 vi.mock('./gameSettings.js', () => ({
   isAssistantEnabledSync: () => true,
   isAssistantEnabledFresh: async () => true,

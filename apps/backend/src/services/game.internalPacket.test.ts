@@ -37,8 +37,10 @@ const memory = vi.hoisted(() => {
       ['player-2', { status: 'FROZEN' }],
     ]),
     diceReady: false,
+    roomChatMutedAt: null as Date | null,
     events: [] as Array<{ type: string; payload?: unknown }>,
     transfers: [] as Array<Record<string, unknown>>,
+    failClaimTransfer: false,
     claimSeq: 0,
   };
   return state;
@@ -68,7 +70,14 @@ const tx = vi.hoisted(() => ({
   packet: {
     findUnique: vi.fn(async () => ({
       ...memory.packet,
-      round: { ...memory.round, claims: memory.claims.map((claim) => ({ ...claim })) },
+      round: {
+        ...memory.round,
+        claims: memory.claims.map((claim) => ({ ...claim })),
+        room: {
+          chatMutedAt: memory.roomChatMutedAt,
+          chatMuteReason: memory.roomChatMutedAt ? '运营全群禁言' : null,
+        },
+      },
     })),
     update: vi.fn(async ({ data }: { data: Record<string, unknown> }) => {
       if (
@@ -124,6 +133,22 @@ const tx = vi.hoisted(() => ({
 
 const transferMock = vi.hoisted(() =>
   vi.fn(async (_tx: unknown, params: Record<string, unknown>) => {
+    if (
+      params.idempotencyKey === 'settle:fee_packet_agent:round-1'
+      && memory.transfers.some(
+        (entry) => entry.idempotencyKey === params.idempotencyKey,
+      )
+    ) {
+      return;
+    }
+    if (
+      memory.failClaimTransfer
+      && params.refType === 'packet_internal_claim'
+    ) {
+      throw Object.assign(new Error('INSUFFICIENT_BALANCE'), {
+        code: 'INSUFFICIENT_BALANCE',
+      });
+    }
     memory.transfers.push(params);
   }),
 );
@@ -148,6 +173,7 @@ vi.mock('./wallet.js', () => ({
 }));
 
 import {
+  balanceBeforePrepaidPacketFee,
   cancelRound,
   claimInternalPacket,
   forfeitMissingPlayer,
@@ -170,6 +196,8 @@ describe('内部红包发包与抢包', () => {
     memory.events.length = 0;
     memory.transfers.length = 0;
     memory.diceReady = false;
+    memory.roomChatMutedAt = null;
+    memory.failClaimTransfer = false;
     memory.claimSeq = 0;
     memory.bets.set('player-1', { status: 'FROZEN' });
     memory.bets.set('player-2', { status: 'FROZEN' });
@@ -208,6 +236,56 @@ describe('内部红包发包与抢包', () => {
     expect(memory.events.some((event) => event.type === 'PACKET_SENT')).toBe(true);
   });
 
+  it('首次内部抢包前先把庄家已冻结的整包费用转入红包备付金', async () => {
+    memory.diceReady = true;
+    await publishInternalPacket({ roundId: 'round-1' });
+    await claimInternalPacket('packet-1', 'player-1');
+
+    expect(memory.transfers).toHaveLength(2);
+    expect(memory.transfers[0]).toMatchObject({
+      amountCents: 1_000n,
+      from: {
+        userId: 'banker-1',
+        accountType: 'USER_FREEZE_BANKER',
+      },
+      to: { accountType: 'PLATFORM_RESERVE' },
+      refType: 'fee_packet_agent',
+      refId: 'round-1',
+      idempotencyKey: 'settle:fee_packet_agent:round-1',
+    });
+    expect(memory.transfers[1]).toMatchObject({
+      refType: 'packet_internal_claim',
+      idempotencyKey: 'pkt-internal-claim:packet-1:player-1',
+    });
+  });
+
+  it('内部红包托管出款不足时不误报玩家余额不足', async () => {
+    memory.diceReady = true;
+    memory.failClaimTransfer = true;
+    await publishInternalPacket({ roundId: 'round-1' });
+
+    await expect(
+      claimInternalPacket('packet-1', 'player-1'),
+    ).rejects.toMatchObject({ code: 'PACKET_ESCROW_UNAVAILABLE' });
+  });
+
+  it('全群禁言时拒绝内部抢包且不触碰红包备付金', async () => {
+    memory.diceReady = true;
+    await publishInternalPacket({ roundId: 'round-1' });
+    memory.roomChatMutedAt = new Date('2026-08-15T12:00:05.000Z');
+
+    await expect(
+      claimInternalPacket('packet-1', 'player-1'),
+    ).rejects.toMatchObject({ code: 'ROOM_GLOBAL_MUTED' });
+    expect(memory.claims).toHaveLength(0);
+    expect(memory.transfers).toHaveLength(0);
+  });
+
+  it('成绩单的庄家期初余额加回已经提前收取的代包费', () => {
+    expect(balanceBeforePrepaidPacketFee(9_000n, 1_000n, true)).toBe(10_000n);
+    expect(balanceBeforePrepaidPacketFee(10_000n, 1_000n, false)).toBe(10_000n);
+  });
+
   async function publishAndClaimAll() {
     memory.diceReady = true;
     await publishInternalPacket({ roundId: 'round-1' });
@@ -232,8 +310,8 @@ describe('内部红包发包与抢包', () => {
     expect(player2.complete).toBe(true);
 
     // 每笔抢包都即时从平台备付金转入玩家余额，幂等键含 packetId+userId
-    expect(memory.transfers).toHaveLength(3);
-    expect(memory.transfers[0]).toMatchObject({
+    expect(memory.transfers).toHaveLength(4);
+    expect(memory.transfers[1]).toMatchObject({
       refType: 'packet_internal_claim',
       idempotencyKey: 'pkt-internal-claim:packet-1:banker-1',
     });
@@ -250,7 +328,7 @@ describe('内部红包发包与抢包', () => {
     await expect(claimInternalPacket('packet-1', 'stranger')).rejects.toMatchObject<
       Partial<GameError>
     >({ code: 'NOT_ELIGIBLE_TO_CLAIM' });
-    expect(memory.transfers).toHaveLength(1);
+    expect(memory.transfers).toHaveLength(2);
   });
 
   it('过期后不可抢：PACKET_EXPIRED', async () => {

@@ -16,6 +16,19 @@ export function goBack(
 
 type TabKey = 'lobby' | 'wallet' | 'chat' | 'me';
 
+/** 直接回到主界面指定 Tab，并替换当前二级页，避免系统返回再次进入旧页面。 */
+export function goToTab(
+  navigate: NavigateFunction,
+  tab: TabKey,
+) {
+  try {
+    sessionStorage.setItem('miniapp-tab', tab);
+  } catch {
+    // ignore storage errors
+  }
+  navigate('/', { replace: true });
+}
+
 /**
  * 返回主界面指定 Tab：有历史时按真实回退（Tab 状态由 sessionStorage 保持）；
  * 深链直达时写入目标 Tab 后回主页。

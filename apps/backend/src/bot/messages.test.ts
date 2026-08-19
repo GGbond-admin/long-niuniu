@@ -55,6 +55,7 @@ describe('成绩单文案', () => {
         netCents: '-5000',
         balanceBeforeCents: '100000',
         balanceAfterCents: '95000',
+        trend: ['3点', '5点', '4点', '对子'],
       },
     } as unknown as RoundScoreboard;
 
@@ -81,7 +82,9 @@ describe('成绩单文案', () => {
     );
     expect(text).not.toContain('积分：');
     expect(text).not.toContain('上庄费');
-    expect(text).not.toContain('走势：');
+    expect(text).toMatch(
+      /━━━━━━━━━━━━━━━━━━\n庄家走势\n3点 → 5点 → 4点 → 对子$/,
+    );
   });
 
   it('只覆盖展示标题、名称、备注和页脚，金融数字仍取原成绩单', () => {
@@ -109,6 +112,7 @@ describe('成绩单文案', () => {
         netCents: '-5000',
         balanceBeforeCents: '100000',
         balanceAfterCents: '95000',
+        trend: ['7点', '对子'],
       },
     } as unknown as RoundScoreboard;
 
@@ -129,6 +133,9 @@ describe('成绩单文案', () => {
     expect(text).toContain('本次仅更正展示文字，不影响账务。');
     expect(text).toContain('抢 1.11 · 下 8.00 · 赢→131.92');
     expect(text).toContain('抢 0.70 · 输→50.00');
+    expect(text).toMatch(
+      /本次仅更正展示文字，不影响账务。\n━━━━━━━━━━━━━━━━━━\n庄家走势\n7点 → 对子$/,
+    );
   });
 
   it('转义展示文本并按聊天消息上限稳定分段', () => {
@@ -172,5 +179,49 @@ describe('成绩单文案', () => {
     expect(chunks.join('\n')).toContain('&lt;b&gt;备注&lt;/b&gt;');
     expect(chunks.join('\n')).not.toContain('<script>');
     expect(chunks.join('\n')).not.toContain('<img');
+  });
+
+  it('临近消息上限时不拆散庄家走势标题与内容', () => {
+    const trendText = '5点 → 7点 → 9点 → 豹子 → 3点 → 对子';
+    const scoreboard = {
+      seqNo: 12,
+      playerLines: [],
+      bankerSummary: {
+        uid: '2001',
+        nickname: '庄家',
+        claimCents: '70',
+        netCents: '-5000',
+        balanceBeforeCents: '100000',
+        balanceAfterCents: '95000',
+        trend: trendText.split(' → '),
+      },
+    } as unknown as RoundScoreboard;
+
+    const chunks = formatScoreboard(scoreboard, {
+      footer: '附'.repeat(1_270),
+    });
+
+    expect(chunks.some((chunk) => (
+      chunk.includes(`━━━━━━━━━━━━━━━━━━\n庄家走势\n${trendText}`)
+    ))).toBe(true);
+    expect(chunks.every((chunk) => !chunk.endsWith('庄家走势'))).toBe(true);
+  });
+
+  it('忽略无效走势项，且没有有效走势时不添加空区域', () => {
+    const scoreboard = {
+      seqNo: 11,
+      playerLines: [],
+      bankerSummary: {
+        uid: '2001',
+        nickname: '庄家',
+        claimCents: '70',
+        netCents: '0',
+        balanceBeforeCents: '100000',
+        balanceAfterCents: '100000',
+        trend: [{ invalid: true }, '', null],
+      },
+    } as unknown as RoundScoreboard;
+
+    expect(formatScoreboard(scoreboard).join('\n')).not.toContain('庄家走势');
   });
 });

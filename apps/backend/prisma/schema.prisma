@@ -47,23 +47,25 @@ model User {
   createdAt     DateTime       @default(now()) @map("created_at")
   updatedAt     DateTime       @updatedAt @map("updated_at")
 
-  bids              BankerBid[]
-  bets              Bet[]
-  claims            Claim[]
-  settlements       Settlement[]
-  bankerStats       BankerStat[]
-  rewardGrants      RewardGrant[]
-  rebateSettlements RebateSettlement[]
-  depositOrders     DepositOrder[]
-  withdrawOrders    WithdrawOrder[]
-  withdrawAccounts  WithdrawAccount[]
-  roomMemberships   RoomMember[]
-  chatMessages      ChatMessage[]
-  noticeReads       SystemNoticeRead[]
-  groupPacketsSent  GroupPacket[]      @relation("GroupPacketSender")
-  groupPacketClaims GroupPacketClaim[]
-  agentProfile      Agent?
-  agentBinding      AgentPlayer?
+  bids                   BankerBid[]
+  bets                   Bet[]
+  claims                 Claim[]
+  settlements            Settlement[]
+  bankerStats            BankerStat[]
+  rewardGrants           RewardGrant[]
+  rebateSettlements      RebateSettlement[]
+  depositOrders          DepositOrder[]
+  withdrawOrders         WithdrawOrder[]
+  withdrawAccounts       WithdrawAccount[]
+  roomMemberships        RoomMember[]
+  chatMessages           ChatMessage[]
+  noticeReads            SystemNoticeRead[]
+  groupPacketsSent       GroupPacket[]         @relation("GroupPacketSender")
+  groupPacketClaims      GroupPacketClaim[]
+  agentProfile           Agent?
+  agentBinding           AgentPlayer?
+  gameAdminAssignments   GameAdminAssignment[]
+  gameAdminActionTargets GameAdminActionLog[]  @relation("GameAdminActionTarget")
 
   @@index([inviterId])
   @@index([grandInviterId])
@@ -288,32 +290,32 @@ enum DepositPayeeStatus {
 }
 
 model DepositOrder {
-  id              String               @id @default(cuid())
-  userId          String               @map("user_id")
-  requestId       String               @map("request_id")
-  amountCents     BigInt               @map("amount_cents")
-  proofUrl        String?              @map("proof_url")
-  payeeAccountId  String?              @map("payee_account_id")
-  payeeSnapshot   Json?                @map("payee_snapshot") // 提交时银行/账号/户名快照
-  status          OrderStatus          @default(PENDING)
-  reviewedBy      String?              @map("reviewed_by")
-  reviewedAt      DateTime?            @map("reviewed_at")
-  rejectReason    String?              @map("reject_reason")
-  createdAt       DateTime             @default(now()) @map("created_at")
+  id                  String               @id @default(cuid())
+  userId              String               @map("user_id")
+  requestId           String               @map("request_id")
+  amountCents         BigInt               @map("amount_cents")
+  proofUrl            String?              @map("proof_url")
+  payeeAccountId      String?              @map("payee_account_id")
+  payeeSnapshot       Json?                @map("payee_snapshot") // 提交时银行/账号/户名快照
+  status              OrderStatus          @default(PENDING)
+  reviewedBy          String?              @map("reviewed_by")
+  reviewedAt          DateTime?            @map("reviewed_at")
+  rejectReason        String?              @map("reject_reason")
+  createdAt           DateTime             @default(now()) @map("created_at")
   /// 支付渠道：MANUAL=玩家转账后人工确认；VPAY=第三方网关自动到账
-  channel         DepositChannel       @default(MANUAL)
-  providerTradeNo String?              @map("provider_trade_no") // 网关平台单号
-  providerCode    String?              @map("provider_code") // 网关通道代码（trade_code）
-  payUrl          String?              @map("pay_url")
-  expiredAt       DateTime?            @map("expired_at")
+  channel             DepositChannel       @default(MANUAL)
+  providerTradeNo     String?              @map("provider_trade_no") // 网关平台单号
+  providerCode        String?              @map("provider_code") // 网关通道代码（trade_code）
+  payUrl              String?              @map("pay_url")
+  expiredAt           DateTime?            @map("expired_at")
   /// 回调返回的实付金额，与下单金额不符时不自动入账
-  paidAmountCents BigInt?              @map("paid_amount_cents")
+  paidAmountCents     BigInt?              @map("paid_amount_cents")
   /// 实际写入用户账本的不可变金额；冲正必须按此值撤销
-  creditedAmountCents BigInt?          @map("credited_amount_cents")
-  providerPayload Json?                @map("provider_payload") // 最近一次网关下单/回调原文留档
-  providerCheckedAt DateTime?          @map("provider_checked_at")
-  user            User                 @relation(fields: [userId], references: [id])
-  payeeAccount    DepositPayeeAccount? @relation(fields: [payeeAccountId], references: [id])
+  creditedAmountCents BigInt?              @map("credited_amount_cents")
+  providerPayload     Json?                @map("provider_payload") // 最近一次网关下单/回调原文留档
+  providerCheckedAt   DateTime?            @map("provider_checked_at")
+  user                User                 @relation(fields: [userId], references: [id])
+  payeeAccount        DepositPayeeAccount? @relation(fields: [payeeAccountId], references: [id])
 
   @@unique([userId, requestId])
   @@index([status])
@@ -435,34 +437,45 @@ enum BotStatus {
 
 // 游戏房：对局在 Mini App 网页房间内进行；chatId/botId 为旧 TG 群绑定遗留字段（已弃用）
 model Room {
-  id                String             @id @default(cuid())
-  gameCode          String             @unique @default("SUPREME_NIUNIU") @map("game_code")
-  chatId            BigInt?            @unique @map("chat_id") // 已弃用：旧 Telegram 群 ID
-  title             String // 由游戏目录决定，不允许作为普通互动群自由改名
-  botId             String?            @map("bot_id") // 已弃用：旧群管理 Bot
-  minPlayers        Int                @default(2) @map("min_players")
-  status            RoomStatus         @default(ACTIVE)
-  inviteLink        String?            @map("invite_link") // 已弃用：旧群邀请链接
-  bot               TelegramBot?       @relation(fields: [botId], references: [id])
-  rounds            Round[]
-  members           RoomMember[]
-  virtualPlayers    VirtualPlayer[]
-  profitPoolBatches ProfitPoolBatch[]
-  profitPoolCutover ProfitPoolCutover?
-  createdAt         DateTime           @default(now()) @map("created_at")
+  id                   String                @id @default(cuid())
+  gameCode             String                @unique @default("SUPREME_NIUNIU") @map("game_code")
+  chatId               BigInt?               @unique @map("chat_id") // 已弃用：旧 Telegram 群 ID
+  title                String // 由游戏目录决定，不允许作为普通互动群自由改名
+  botId                String?               @map("bot_id") // 已弃用：旧群管理 Bot
+  minPlayers           Int                   @default(2) @map("min_players")
+  status               RoomStatus            @default(ACTIVE)
+  roundStartMode       RoomStartMode         @default(MANUAL) @map("round_start_mode")
+  chatMutedAt          DateTime?             @map("chat_muted_at")
+  chatMuteReason       String?               @map("chat_mute_reason")
+  chatMutedByAdminId   String?               @map("chat_muted_by_admin_id")
+  inviteLink           String?               @map("invite_link") // 已弃用：旧群邀请链接
+  bot                  TelegramBot?          @relation(fields: [botId], references: [id])
+  rounds               Round[]
+  members              RoomMember[]
+  virtualPlayers       VirtualPlayer[]
+  profitPoolBatches    ProfitPoolBatch[]
+  profitPoolCutover    ProfitPoolCutover?
+  gameAdminAssignments GameAdminAssignment[]
+  gameBudget           GameBudgetAccount?
+  createdAt            DateTime              @default(now()) @map("created_at")
 
   @@map("rooms")
 }
 
 model RoomMember {
-  id         String           @id @default(cuid())
-  roomId     String           @map("room_id")
-  userId     String           @map("user_id")
-  status     MembershipStatus @default(ACTIVE)
-  lastSeenAt DateTime         @default(now()) @map("last_seen_at")
-  joinedAt   DateTime         @default(now()) @map("joined_at")
-  room       Room             @relation(fields: [roomId], references: [id])
-  user       User             @relation(fields: [userId], references: [id])
+  id                      String               @id @default(cuid())
+  roomId                  String               @map("room_id")
+  userId                  String               @map("user_id")
+  status                  MembershipStatus     @default(ACTIVE)
+  lastSeenAt              DateTime             @default(now()) @map("last_seen_at")
+  joinedAt                DateTime             @default(now()) @map("joined_at")
+  chatMutedAt             DateTime?            @map("chat_muted_at")
+  chatMutedUntil          DateTime?            @map("chat_muted_until")
+  chatMuteReason          String?              @map("chat_mute_reason")
+  chatMutedByAssignmentId String?              @map("chat_muted_by_assignment_id")
+  room                    Room                 @relation(fields: [roomId], references: [id])
+  user                    User                 @relation(fields: [userId], references: [id])
+  chatMutedBy             GameAdminAssignment? @relation("RoomMemberMutedBy", fields: [chatMutedByAssignmentId], references: [id], onDelete: SetNull)
 
   @@unique([roomId, userId])
   @@index([roomId, status])
@@ -479,6 +492,12 @@ enum MembershipStatus {
 enum RoomStatus {
   ACTIVE
   PAUSED
+}
+
+enum RoomStartMode {
+  MANUAL
+  AUTO
+  STOPPED
 }
 
 // ─────────────────────────── 对局 ───────────────────────────
@@ -516,6 +535,7 @@ model Round {
 
   @@unique([roomId, seqNo])
   @@index([roomId, phase, seqNo])
+  @@index([roomId, bankerId, phase, seqNo])
   @@index([phase])
   @@map("rounds")
 }
@@ -1267,30 +1287,42 @@ enum MessageType {
 
 /// 玩家在互动群自发的余额红包（拼手气），领完或过期后结束
 model GroupPacket {
-  id             String   @id @default(cuid())
-  roomId         String   @map("room_id")
-  senderId       String   @map("sender_id")
-  requestId      String   @map("request_id")
-  totalCents     BigInt   @map("total_cents")
-  count          Int
-  remainingCents BigInt   @map("remaining_cents")
-  remainingCount Int      @map("remaining_count")
+  id                    String                   @id @default(cuid())
+  roomId                String                   @map("room_id")
+  senderId              String                   @map("sender_id")
+  requestId             String                   @map("request_id")
+  totalCents            BigInt                   @map("total_cents")
+  count                 Int
+  remainingCents        BigInt                   @map("remaining_cents")
+  remainingCount        Int                      @map("remaining_count")
   /**
    * RANDOM = 拼手气 / EQUAL = 平分
    */
-  mode           String   @default("RANDOM")
-  greeting       String   @default("恭喜发财，大吉大利")
-  status         String   @default("ACTIVE") // ACTIVE / FINISHED / EXPIRED
-  expiresAt      DateTime @map("expires_at")
-  createdAt      DateTime @default(now()) @map("created_at")
+  mode                  String                   @default("RANDOM")
+  greeting              String                   @default("恭喜发财，大吉大利")
+  fundingSource         GroupPacketFundingSource @default(USER_WALLET) @map("funding_source")
+  budgetAccountId       String?                  @map("budget_account_id")
+  gameAdminAssignmentId String?                  @map("game_admin_assignment_id")
+  status                String                   @default("ACTIVE") // ACTIVE / FINISHED / EXPIRED
+  expiresAt             DateTime                 @map("expires_at")
+  createdAt             DateTime                 @default(now()) @map("created_at")
 
-  sender User               @relation("GroupPacketSender", fields: [senderId], references: [id])
-  claims GroupPacketClaim[]
+  sender              User                 @relation("GroupPacketSender", fields: [senderId], references: [id])
+  claims              GroupPacketClaim[]
+  budgetAccount       GameBudgetAccount?   @relation(fields: [budgetAccountId], references: [id], onDelete: Restrict)
+  gameAdminAssignment GameAdminAssignment? @relation(fields: [gameAdminAssignmentId], references: [id], onDelete: Restrict)
 
   @@unique([senderId, requestId])
   @@index([roomId, createdAt])
   @@index([status, expiresAt])
+  @@index([budgetAccountId, createdAt])
+  @@index([gameAdminAssignmentId, createdAt])
   @@map("group_packets")
+}
+
+enum GroupPacketFundingSource {
+  USER_WALLET
+  GAME_BUDGET
 }
 
 model GroupPacketClaim {
@@ -1380,6 +1412,95 @@ enum AdminRole {
   OPERATOR
   REVIEWER
   FINANCE
+}
+
+enum GameAdminAssignmentStatus {
+  ACTIVE
+  DISABLED
+}
+
+/// 平台用户按游戏获得的有限管理员授权；不等同于平台后台 Admin。
+model GameAdminAssignment {
+  id          String                    @id @default(cuid())
+  gameCode    String                    @map("game_code")
+  userId      String                    @map("user_id")
+  permissions String[]                  @default([])
+  status      GameAdminAssignmentStatus @default(ACTIVE)
+  createdBy   String                    @map("created_by")
+  updatedBy   String                    @map("updated_by")
+  createdAt   DateTime                  @default(now()) @map("created_at")
+  updatedAt   DateTime                  @updatedAt @map("updated_at")
+
+  room          Room                    @relation(fields: [gameCode], references: [gameCode], onDelete: Restrict)
+  user          User                    @relation(fields: [userId], references: [id], onDelete: Restrict)
+  packets       GroupPacket[]
+  budgetEntries GameBudgetLedgerEntry[]
+  actionLogs    GameAdminActionLog[]    @relation("GameAdminActionActor")
+  mutedMembers  RoomMember[]            @relation("RoomMemberMutedBy")
+
+  @@unique([gameCode, userId])
+  @@index([userId, status])
+  @@index([gameCode, status])
+  @@map("game_admin_assignments")
+}
+
+/// 每个游戏一个共享运营预算，余额只允许通过不可变流水变动。
+model GameBudgetAccount {
+  id           String   @id @default(cuid())
+  gameCode     String   @unique @map("game_code")
+  balanceCents BigInt   @default(0) @map("balance_cents")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  room    Room                    @relation(fields: [gameCode], references: [gameCode], onDelete: Restrict)
+  entries GameBudgetLedgerEntry[]
+  packets GroupPacket[]
+
+  @@map("game_budget_accounts")
+}
+
+model GameBudgetLedgerEntry {
+  id                    String          @id @default(cuid())
+  budgetAccountId       String          @map("budget_account_id")
+  direction             LedgerDirection
+  amountCents           BigInt          @map("amount_cents")
+  balanceAfterCents     BigInt          @map("balance_after_cents")
+  refType               String          @map("ref_type")
+  refId                 String?         @map("ref_id")
+  idempotencyKey        String          @unique @map("idempotency_key")
+  platformAdminId       String?         @map("platform_admin_id")
+  gameAdminAssignmentId String?         @map("game_admin_assignment_id")
+  memo                  String?
+  createdAt             DateTime        @default(now()) @map("created_at")
+
+  budgetAccount       GameBudgetAccount    @relation(fields: [budgetAccountId], references: [id], onDelete: Restrict)
+  gameAdminAssignment GameAdminAssignment? @relation(fields: [gameAdminAssignmentId], references: [id], onDelete: SetNull)
+
+  @@index([budgetAccountId, createdAt])
+  @@index([gameAdminAssignmentId, createdAt])
+  @@map("game_budget_ledger")
+}
+
+/// 游戏管理员的高风险动作审计；平台后台动作继续写 AuditLog。
+model GameAdminActionLog {
+  id             String   @id @default(cuid())
+  assignmentId   String   @map("assignment_id")
+  gameCode       String   @map("game_code")
+  action         String
+  targetUserId   String?  @map("target_user_id")
+  packetId       String?  @map("packet_id")
+  idempotencyKey String?  @unique @map("idempotency_key")
+  metadata       Json?
+  ip             String?
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  assignment GameAdminAssignment @relation("GameAdminActionActor", fields: [assignmentId], references: [id], onDelete: Restrict)
+  targetUser User?               @relation("GameAdminActionTarget", fields: [targetUserId], references: [id], onDelete: SetNull)
+
+  @@index([gameCode, createdAt])
+  @@index([assignmentId, createdAt])
+  @@index([targetUserId, createdAt])
+  @@map("game_admin_action_logs")
 }
 
 model AuditLog {

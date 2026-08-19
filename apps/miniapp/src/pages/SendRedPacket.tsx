@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { api } from '../api';
 import { goBack } from '../lib/nav';
-import { BackIcon, ShuffleIcon } from '../components/MoneyIcons';
+import { BackIcon } from '../components/MoneyIcons';
 import PaymentPinSheet from '../components/PaymentPinSheet';
 import { completeRequest, pendingRequestId } from '../lib/idempotency';
 import { paymentPinErrorMessage } from '../lib/paymentPin';
@@ -207,18 +207,19 @@ export default function SendRedPacket({
             <input
               value={greeting}
               maxLength={40}
+              placeholder="恭喜发财，大吉大利"
               onChange={(e) => setGreeting(e.target.value)}
               disabled={busy}
             />
             <button
               type="button"
-              aria-label="换一句"
+              className="cash-greet-swap"
               onClick={() =>
                 setGreeting(GREETINGS[Math.floor(Math.random() * GREETINGS.length)]!)
               }
               disabled={busy}
             >
-              <ShuffleIcon />
+              换一句
             </button>
           </label>
         </section>

@@ -102,6 +102,15 @@ export function formatScoreboard(
   const bankerMention = mention(banker, presentation.bankerAlias);
   const bankerNet = BigInt(String(banker.netCents));
   const bankerResult = netDisplay(bankerNet);
+  const bankerTrend = Array.isArray(banker.trend)
+    ? banker.trend
+        .filter((item): item is string | number => (
+          typeof item === 'string' || typeof item === 'number'
+        ))
+        .map((item) => String(item).trim())
+        .filter(Boolean)
+        .map(escapeHtml)
+    : [];
   lines.push(
     '━━━━━━━━━━━━━━━━━━',
     `${bankerResult.symbol} <b>庄家 ${bankerMention}</b> ·`,
@@ -117,6 +126,13 @@ export function formatScoreboard(
       ? ['', '━━━━━━━━━━━━━━━━━━', escapeHtml(presentation.footer.trim())]
       : []),
   );
+  if (bankerTrend.length) {
+    lines.push([
+      '━━━━━━━━━━━━━━━━━━',
+      '庄家走势',
+      bankerTrend.join(' → '),
+    ].join('\n'));
+  }
 
   const chunks: string[] = [];
   let current = '';

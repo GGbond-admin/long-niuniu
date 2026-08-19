@@ -46,6 +46,7 @@ vi.mock('../lib/prisma.js', () => ({
 }));
 
 vi.mock('./game.js', () => ({
+  BANKER_BID_INCREMENT_CENTS: 10_000n,
   closeBidding: memory.closeBidding,
   GameError: class GameError extends Error {
     constructor(public code: string) {

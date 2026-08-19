@@ -19,7 +19,7 @@ function finishedRound(
     bankerId: 'banker-a',
     continuationUsed: false,
     isContinued: false,
-    finishedAt: new Date('2026-08-07T07:00:00.000Z'),
+    continuationStartedAt: new Date('2026-08-07T07:00:00.000Z'),
     ...patch,
   };
 }
@@ -88,10 +88,16 @@ describe('庄家续庄资格', () => {
     expect(
       check(
         finishedRound({
-          finishedAt: new Date('2026-08-07T06:59:55.000Z'),
+          continuationStartedAt: new Date('2026-08-07T06:59:55.000Z'),
         }),
       ),
     ).toBe('CONTINUATION_WINDOW_EXPIRED');
+  });
+
+  it('成绩单完成事件落库前不得续庄', () => {
+    expect(
+      check(finishedRound({ continuationStartedAt: null })),
+    ).toBe('CONTINUATION_NOT_STARTED');
   });
 
   it('竞拍中标 → 续庄 → 强制重拍 → 原庄再中标后重新获得一次续庄资格', () => {
@@ -130,6 +136,15 @@ describe('续庄结束后的下一局推进', () => {
       shouldStartWaitingRound({
         autoStart: true,
         continuationError: null,
+      }),
+    ).toBe(false);
+  });
+
+  it('成绩单尚未发布完成时，即使自动开局开启也不得推进', () => {
+    expect(
+      shouldStartWaitingRound({
+        autoStart: true,
+        continuationError: 'CONTINUATION_NOT_STARTED',
       }),
     ).toBe(false);
   });

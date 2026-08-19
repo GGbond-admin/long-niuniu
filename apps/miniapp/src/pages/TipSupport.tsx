@@ -28,13 +28,9 @@ function normalizeMoneyInput(value: string) {
 export default function TipSupport({
   ownerUid,
   paymentPinSet,
-  nickname,
-  avatarUrl,
 }: {
   ownerUid: string;
   paymentPinSet: boolean;
-  nickname?: string;
-  avatarUrl?: string | null;
 }) {
   const { roomId = '' } = useParams();
   const navigate = useNavigate();
@@ -45,7 +41,6 @@ export default function TipSupport({
   const [pinOpen, setPinOpen] = useState(false);
   const [pinError, setPinError] = useState('');
   const mountedRef = useRef(true);
-  const previewName = nickname?.trim() || `玩家${ownerUid.slice(-4)}`;
 
   useEffect(() => {
     mountedRef.current = true;
@@ -140,10 +135,6 @@ export default function TipSupport({
 
   return (
     <div className="tip-page">
-      <div className="tip-page-ambient" aria-hidden>
-        <i />
-        <i />
-      </div>
       <header className="tip-page-nav">
         <button
           type="button"
@@ -153,13 +144,12 @@ export default function TipSupport({
         >
           <BackIcon />
         </button>
-        <h1>送一份心意</h1>
+        <h1>打赏</h1>
         <span />
       </header>
 
       <main className="tip-page-body">
-        <section className="tip-page-hero" aria-labelledby="tip-page-title">
-          <span className="tip-page-hero-shine" aria-hidden />
+        <section className="tip-page-payee" aria-labelledby="tip-page-title">
           <span className="tip-page-avatar" aria-hidden>
             <svg viewBox="0 0 24 24">
               <path d="M5 12a7 7 0 0 1 14 0" />
@@ -167,25 +157,16 @@ export default function TipSupport({
               <path d="M19 12v4a2 2 0 0 1-2 2h-1v-6h3Z" />
               <path d="M16 18c-.7 1.2-1.9 2-4 2" />
             </svg>
-            <i>♥</i>
           </span>
-          <div className="tip-page-hero-copy">
-            <small>24H ONLINE SUPPORT</small>
-            <h2 id="tip-page-title">送给客服小妹</h2>
-            <p>谢谢每一次耐心守候，也谢谢你的认可。</p>
+          <div className="tip-page-payee-copy">
+            <small>转账给</small>
+            <h2 id="tip-page-title">客服小妹</h2>
           </div>
-          <span className="tip-page-live-pill">
-            <i aria-hidden />
-            全群播报
-          </span>
         </section>
 
         <section className="tip-page-card">
           <div className="tip-page-amount">
-            <div className="tip-page-amount-head">
-              <span>选择心意金额</span>
-              <small>RM 1 – 5,000</small>
-            </div>
+            <span>转账金额</span>
             <label>
               <em>RM</em>
               <input
@@ -202,7 +183,6 @@ export default function TipSupport({
               />
             </label>
           </div>
-
           <div className="tip-page-presets" aria-label="快捷选择打赏金额">
             {PRESETS.map((value) => (
               <button
@@ -215,8 +195,7 @@ export default function TipSupport({
                 }}
                 disabled={busy}
               >
-                <small>RM</small>
-                <b>{value}</b>
+                RM {value}
               </button>
             ))}
           </div>
@@ -224,48 +203,16 @@ export default function TipSupport({
 
         {error && <p className="tip-page-error">{error}</p>}
 
-        <section className="tip-page-preview" aria-label="互动群弹幕预览">
-          <div className="tip-page-preview-head">
-            <span>
-              <i aria-hidden />
-              互动群弹幕预览
-            </span>
-            <small>打赏成功后实时出现</small>
-          </div>
-          <div className="tip-page-preview-stage">
-            <div className="tip-page-preview-card">
-              <span className="tip-page-preview-avatar" aria-hidden>
-                {avatarUrl ? <img src={avatarUrl} alt="" /> : previewName.slice(0, 1)}
-              </span>
-              <span className="tip-page-preview-copy">
-                <strong>
-                  {previewName}
-                  <em>打赏客服小妹</em>
-                </strong>
-                <small>感谢这份心意，为你全群播报</small>
-              </span>
-              <b>RM {displayAmount}</b>
-            </div>
-          </div>
-        </section>
-
         <button
           type="button"
           className="tip-page-cta"
           disabled={busy || !amount}
           onClick={requestPaymentPin}
         >
-          <span>{busy ? '正在送出心意…' : '确认打赏'}</span>
-          {!busy && <strong>RM {displayAmount}</strong>}
+          {busy ? '支付中…' : '确认支付'}
         </button>
 
-        <p className="tip-page-security-note">
-          <svg viewBox="0 0 20 20" aria-hidden>
-            <rect x="4.5" y="8.5" width="11" height="8" rx="2" />
-            <path d="M7 8.5V6.8a3 3 0 0 1 6 0v1.7" />
-          </svg>
-          支付密码验证 · 记录可在账单中查看
-        </p>
+        <p className="tip-page-security-note">支付密码验证后从余额扣除</p>
       </main>
 
       <PaymentPinSheet

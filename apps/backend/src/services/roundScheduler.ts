@@ -1,4 +1,4 @@
-import { PacketChannel, RoundPhase } from '@prisma/client';
+import { PacketChannel, RoundPhase, RoomStartMode } from '@prisma/client';
 import {
   bankerContinuationError,
   shouldStartWaitingRound,
@@ -7,8 +7,10 @@ import { redis, withRedisLock } from '../lib/redis.js';
 import { prisma } from '../lib/prisma.js';
 import { env } from '../config.js';
 import { advanceBidClosingCeremony } from './bidAuction.js';
+import { cancelBankerDiceTimeout } from './chatCommands.js';
 import {
   applyAutoTailClaims,
+  bankerContinuationFunding,
   closeBetting,
   ensureWaitingRound,
   expirePacket,
@@ -18,6 +20,7 @@ import {
   refreshUnannouncedClaimDeadline,
   startRound,
 } from './game.js';
+import { rejectInsufficientContinuation } from './bankerContinuationFlow.js';
 import { finalizeInternalRound } from './internalPacket.js';
 import { gameBus } from './gameBus.js';
 import { getGameSettings, parseSettingsSnapshot } from './gameSettings.js';
@@ -29,12 +32,28 @@ import {
   rebroadcastRoomState,
   systemChat,
 } from './roomHub.js';
-import { scheduleVirtualDiceForRound } from './virtualPlayerWorker.js';
+import {
+  CONTINUATION_REJECTED_INSUFFICIENT,
+  ROOM_ANNOUNCED_FINISHED,
+} from './roomChatPolicy.js';
+import {
+  scheduleVirtualContinuationForRound,
+  scheduleVirtualDiceForRound,
+} from './virtualPlayerWorker.js';
 
 // 正常阶段变化都有即时事件；这里只做丢事件恢复心跳。
 // 大群若 5 秒一次会让所有在线客户端同时拉 state，形成数据库尖峰。
 const ROUND_REBROADCAST_INTERVAL_MS = 30_000;
+const LEGACY_BANKER_DICE_TIMEOUT_MS = 15_000;
 const lastRoundBroadcastAt = new Map<string, number>();
+
+function eventEndsAtMs(payload: unknown): number | null {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null;
+  const value = (payload as { endsAt?: unknown }).endsAt;
+  if (typeof value !== 'string') return null;
+  const timestamp = new Date(value).getTime();
+  return Number.isFinite(timestamp) ? timestamp : null;
+}
 
 async function cacheRound(roundId: string) {
   const round = await prisma.round.findUnique({
@@ -155,6 +174,18 @@ export class RoundScheduler {
               configSnapshot: true,
               room: { select: { gameCode: true } },
               packet: { select: { id: true, channel: true } },
+              events: {
+                where: {
+                  type: {
+                    in: [
+                      'BANKER_DICE',
+                      'BANKER_REPOST_WINDOW',
+                      'BANKER_DICE_DEADLINE',
+                    ],
+                  },
+                },
+                select: { type: true, payload: true },
+              },
             },
             take: 50,
           }),
@@ -288,12 +319,45 @@ export class RoundScheduler {
           }
         }
 
+        const diceTimedOutRoundIds = new Set<string>();
         for (const round of pendingPackets) {
+          if (round.events.some((event) => event.type === 'BANKER_DICE')) continue;
+          const deadlineEvent = round.events.find(
+            (event) => event.type === 'BANKER_DICE_DEADLINE',
+          );
+          const repostEvent = round.events.find(
+            (event) => event.type === 'BANKER_REPOST_WINDOW',
+          );
+          const repostDeadline = eventEndsAtMs(repostEvent?.payload);
+          const deadline =
+            eventEndsAtMs(deadlineEvent?.payload)
+            ?? (repostDeadline === null
+              ? null
+              : repostDeadline + LEGACY_BANKER_DICE_TIMEOUT_MS);
+          if (deadline === null || deadline > now.getTime()) continue;
+          try {
+            const cancelled = await cancelBankerDiceTimeout({
+              roundId: round.id,
+              roomId: round.roomId,
+              now,
+            });
+            if (cancelled) {
+              diceTimedOutRoundIds.add(round.id);
+              await cacheRound(round.id);
+            }
+          } catch (error) {
+            console.error('[scheduler] banker dice timeout failed', round.id, error);
+          }
+        }
+
+        for (const round of pendingPackets) {
+          if (diceTimedOutRoundIds.has(round.id)) continue;
           await scheduleVirtualDiceForRound(round.roomId, round.id);
         }
 
         // 系统红包：投骰完成后由至尊牛牛小助手自动发包，无需 TNG 链接。
         for (const round of pendingPackets) {
+          if (diceTimedOutRoundIds.has(round.id)) continue;
           if (!round.packet?.id) continue;
           const settings = round.configSnapshot
             ? parseSettingsSnapshot(round.configSnapshot)
@@ -328,6 +392,7 @@ export class RoundScheduler {
           });
           if (account) {
             for (const round of pendingPackets) {
+              if (diceTimedOutRoundIds.has(round.id)) continue;
               if (!round.packet?.id) continue;
               const settings = round.configSnapshot
                 ? parseSettingsSnapshot(round.configSnapshot)
@@ -421,7 +486,12 @@ export class RoundScheduler {
 
         const rooms = await prisma.room.findMany({
           where: { status: 'ACTIVE' },
-          select: { id: true, gameCode: true },
+          select: {
+            id: true,
+            gameCode: true,
+            roundStartMode: true,
+            chatMutedAt: true,
+          },
         });
         const settingsByGame = new Map<string, Awaited<ReturnType<typeof getGameSettings>>>();
         for (const room of rooms) {
@@ -432,11 +502,12 @@ export class RoundScheduler {
             settingsByGame.set(room.gameCode, settings);
           }
           if (
-            settings.round.assistantEnabled === false
-            || waiting.phase !== RoundPhase.WAITING
+            waiting.phase !== RoundPhase.WAITING
           ) {
             continue;
           }
+          // 当前局的超时与收尾由上面的阶段调度照常完成；这里只阻止禁言期间开启下一局。
+          if (room.chatMutedAt) continue;
 
           const previous =
             waiting.seqNo > 1
@@ -455,23 +526,133 @@ export class RoundScheduler {
                     finishedAt: true,
                     cancelReason: true,
                     configSnapshot: true,
+                    events: {
+                      where: {
+                        type: {
+                          in: [
+                            ROOM_ANNOUNCED_FINISHED,
+                            CONTINUATION_REJECTED_INSUFFICIENT,
+                          ],
+                        },
+                      },
+                      select: { type: true, createdAt: true },
+                    },
                   },
                 })
               : null;
+          const finishedAnnouncement = previous?.events.find(
+            (event) => event.type === ROOM_ANNOUNCED_FINISHED,
+          );
+          const continuationRejected = previous?.events.some(
+            (event) => event.type === CONTINUATION_REJECTED_INSUFFICIENT,
+          );
+          const finishedAnnouncementReady =
+            previous?.phase === RoundPhase.FINISHED
+            && !!finishedAnnouncement;
+          if (
+            previous?.phase === RoundPhase.FINISHED
+            && !finishedAnnouncement
+          ) {
+            // 崩溃恢复：主动补齐成绩单；完成事件落库前不得启动续庄计时。
+            try {
+              await ensureRoundAnnouncement({
+                roundId: previous.id,
+                roomId: previous.roomId,
+                to: RoundPhase.FINISHED,
+              });
+              await rebroadcastRoomState({
+                roomId: room.id,
+                roundId: waiting.id,
+                phase: RoundPhase.WAITING,
+              });
+            } catch (error) {
+              console.error(
+                '[scheduler] finished announcement recovery failed',
+                previous.id,
+                error,
+              );
+            }
+            continue;
+          }
+          if (
+            settings.round.assistantEnabled === false
+            && !finishedAnnouncementReady
+          ) {
+            continue;
+          }
+          const bankerRepostCancelled =
+            previous?.phase === RoundPhase.CANCELLED
+            && previous.cancelReason === '庄家重推';
+          const roomStartMode =
+            room.roundStartMode
+            ?? (settings.round.autoStart ? RoomStartMode.AUTO : RoomStartMode.MANUAL);
+          if (
+            roomStartMode === RoomStartMode.STOPPED
+            || (
+              roomStartMode === RoomStartMode.MANUAL
+              && !bankerRepostCancelled
+            )
+          ) {
+            continue;
+          }
+          if (continuationRejected && previous) {
+            await rejectInsufficientContinuation({
+              previousRoundId: previous.id,
+            }).catch((error) => {
+              console.error(
+                '[scheduler] rejected continuation recovery failed',
+                previous.id,
+                error,
+              );
+            });
+            continue;
+          }
           let continuationError: ReturnType<typeof bankerContinuationError> | undefined;
           if (previous?.bankerId && previous.configSnapshot) {
             const continuationSettings = parseSettingsSnapshot(previous.configSnapshot);
             continuationError = bankerContinuationError({
-              previous,
+              previous: {
+                ...previous,
+                continuationStartedAt: finishedAnnouncement?.createdAt ?? null,
+              },
               next: waiting,
               userId: previous.bankerId,
               windowSeconds: continuationSettings.round.continuationWindowSeconds,
               now,
             });
           }
-          const bankerRepostCancelled =
-            previous?.phase === RoundPhase.CANCELLED
-            && previous.cancelReason === '庄家重推';
+          if (continuationError === null && previous) {
+            let funding: Awaited<ReturnType<typeof bankerContinuationFunding>>;
+            try {
+              funding = await bankerContinuationFunding(previous.id);
+            } catch (error) {
+              console.error('[scheduler] continuation funding check failed', previous.id, error);
+              continue;
+            }
+            if (!funding.sufficient && !funding.autoFundableVirtual) {
+              await rejectInsufficientContinuation({
+                previousRoundId: previous.id,
+                requiredCents: funding.requiredCents,
+                availableCents: funding.availableCents,
+              }).catch((error) => {
+                console.error(
+                  '[scheduler] insufficient continuation fallback failed',
+                  previous.id,
+                  error,
+                );
+              });
+              continue;
+            }
+            await scheduleVirtualContinuationForRound(room.id, previous.id).catch(
+              (error) => {
+                console.error(
+                  '[scheduler] virtual continuation scheduling failed',
+                  previous.id,
+                  error,
+                );
+              },
+            );
+          }
           if (
             !bankerRepostCancelled
             && !shouldStartWaitingRound({
@@ -487,10 +668,16 @@ export class RoundScheduler {
               room.id,
               `round:${previous.id}:continuation:expired`,
               '【续庄确认超时】\n庄家未在规定时间内确认，下一局转入公开竞标。',
+              { force: true },
             ).catch(() => undefined);
           }
           await transition(waiting.id, room.id, RoundPhase.WAITING, () =>
-            startRound(waiting.id),
+            startRound(
+              waiting.id,
+              false,
+              undefined,
+              bankerRepostCancelled ? 'REPLACEMENT' : 'AUTO',
+            ),
           ).catch((error) => {
             if (error instanceof GameError && error.code === 'NOT_ENOUGH_PLAYERS') return;
             throw error;

@@ -4,8 +4,24 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content" />
     <title>至尊牛牛</title>
-    <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <style>
+      html, body { background: #09090a; margin: 0; }
+      .boot-splash {
+        min-height: 100vh;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 10px;
+        color: #e8d5a8;
+        font: 16px/1.4 -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Noto Sans SC', sans-serif;
+      }
+      .boot-splash strong {
+        font-size: 22px;
+        letter-spacing: 0.16em;
+        color: #f5f5f4;
+      }
+      .boot-splash span { color: #a8a29e; font-size: 13px; }
       #boot-fallback {
         display: none;
         margin: 48px 24px;
@@ -16,26 +32,46 @@
     </style>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <div id="boot-splash" class="boot-splash">
+        <strong>至尊牛牛</strong>
+        <span>正在进入…</span>
+      </div>
+    </div>
     <div id="boot-fallback">页面加载失败，请升级 Telegram 或系统 WebView 后重试。</div>
     <script>
-      // 启动脚本抛错时给出可读提示，避免旧机白屏/无限转圈
+      // 启动脚本抛错或超时仍停在启动画面时，给出可读提示，避免旧机白屏/无限转圈
+      function showBootFallback(message) {
+        var el = document.getElementById('boot-fallback');
+        if (!el) return;
+        el.style.display = 'block';
+        if (message) el.textContent = message;
+      }
       window.addEventListener('error', function (event) {
-        if (document.getElementById('root') && !document.getElementById('root').childNodes.length) {
-          var el = document.getElementById('boot-fallback');
-          if (el) {
-            el.style.display = 'block';
-            if (event && event.message) el.textContent = '页面加载失败：' + event.message;
-          }
+        if (document.getElementById('boot-splash')) {
+          showBootFallback(event && event.message ? '页面加载失败：' + event.message : '');
         }
       });
       setTimeout(function () {
-        var root = document.getElementById('root');
-        if (root && !root.childNodes.length) {
-          var el = document.getElementById('boot-fallback');
-          if (el) el.style.display = 'block';
-        }
+        if (document.getElementById('boot-splash')) showBootFallback('');
       }, 8000);
+
+      // Telegram WebView 通常已注入 WebApp：立刻 ready/expand，让官方转圈尽早收起。
+      // 本地开发不要去拉 telegram.org，否则脚本挂起时连启动画面都画不出来。
+      (function () {
+        var app = window.Telegram && window.Telegram.WebApp;
+        if (app) {
+          try { app.ready(); } catch (e) {}
+          try { app.expand(); } catch (e) {}
+          return;
+        }
+        var host = location.hostname;
+        if (host === 'localhost' || host === '127.0.0.1' || host === '[::1]') return;
+        var script = document.createElement('script');
+        script.src = 'https://telegram.org/js/telegram-web-app.js';
+        script.async = true;
+        document.head.appendChild(script);
+      })();
     </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>

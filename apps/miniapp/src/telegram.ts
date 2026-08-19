@@ -1,3 +1,11 @@
+export interface TgBackButton {
+  isVisible?: boolean;
+  show(): void;
+  hide(): void;
+  onClick(handler: () => void): void;
+  offClick(handler: () => void): void;
+}
+
 export interface TgWebApp {
   initData: string;
   initDataUnsafe: { start_param?: string; user?: { id: number; first_name?: string } };
@@ -20,6 +28,8 @@ export interface TgWebApp {
   viewportStableHeight?: number;
   safeAreaInset?: { top: number; bottom: number; left: number; right: number };
   contentSafeAreaInset?: { top: number; bottom: number; left: number; right: number };
+  /** Telegram 顶栏原生返回键；二级页面显示，主页隐藏并保留「关闭」 */
+  BackButton?: TgBackButton;
   onEvent?(event: string, handler: ((payload?: { isStateStable?: boolean }) => void) | (() => void)): void;
   offEvent?(event: string, handler: ((payload?: { isStateStable?: boolean }) => void) | (() => void)): void;
 }
@@ -32,6 +42,27 @@ declare global {
 
 export function tg(): TgWebApp | null {
   return window.Telegram?.WebApp ?? null;
+}
+
+function isLocalDevHost(): boolean {
+  const host = window.location.hostname;
+  return host === 'localhost' || host === '127.0.0.1' || host === '[::1]';
+}
+
+/** Telegram 未注入时等一小会儿，避免 React 抢先渲染后误报「请从 Telegram 打开小程序」。 */
+export function waitForTelegramWebApp(timeoutMs = 1200): Promise<void> {
+  if (tg() || import.meta.env.DEV || isLocalDevHost()) return Promise.resolve();
+  return new Promise((resolve) => {
+    const startedAt = Date.now();
+    const tick = () => {
+      if (tg() || Date.now() - startedAt >= timeoutMs) {
+        resolve();
+        return;
+      }
+      window.setTimeout(tick, 40);
+    };
+    tick();
+  });
 }
 
 function writeCssVar(name: string, px: number) {
@@ -61,6 +92,7 @@ let viewportFrame = 0;
 let composerFocused = false;
 let exitedFullscreenForKeyboard = false;
 let restoreFullscreenTimer = 0;
+let preserveTelegramHeader = false;
 
 function clearFullscreenRestoreTimer() {
   if (!restoreFullscreenTimer) return;
@@ -132,7 +164,13 @@ function scheduleViewportSync() {
 }
 
 function requestMobileFullscreen(app: TgWebApp) {
-  if (!isMobileTelegram(app) || !canRequestFullscreen(app) || app.isFullscreen || composerFocused) {
+  if (
+    preserveTelegramHeader
+    || !isMobileTelegram(app)
+    || !canRequestFullscreen(app)
+    || app.isFullscreen
+    || composerFocused
+  ) {
     return;
   }
   try {
@@ -190,11 +228,15 @@ export function disposeChatInputFocus() {
 }
 
 /**
- * 手机端进入即请求真全屏（Bot API 8.0+，Telegram 客户端 ≥ 11.0）。
- * 桌面端保持普通展开：桌面 requestFullscreen 会弹成独立全屏窗口，体验反而差。
+ * 同步 Telegram 安全区与可视高度。
+ * preserveTelegramHeader=true 时保留 Telegram 标准顶栏，供原生返回键使用；
+ * 否则手机端可继续请求 Bot API 8.0+ 真全屏。
  * 同时同步 visualViewport / Telegram viewport，软键盘出现时聊天输入栏始终留在可视区内。
  */
-export function initTelegramFullscreen() {
+export function initTelegramFullscreen(options?: {
+  preserveTelegramHeader?: boolean;
+}) {
+  preserveTelegramHeader = options?.preserveTelegramHeader === true;
   // React StrictMode / Fast Refresh 会重复初始化；先移除旧监听，避免一次事件触发多次布局写入。
   disposeTelegramLayout?.();
   disposeTelegramLayout = null;
@@ -240,7 +282,15 @@ export function initTelegramFullscreen() {
     if (viewportFrame) window.cancelAnimationFrame(viewportFrame);
   };
   syncLayout();
-  requestMobileFullscreen(app);
+  if (preserveTelegramHeader && app.isFullscreen) {
+    try {
+      app.exitFullscreen?.();
+    } catch {
+      // 客户端不支持退出时维持当前模式，页面内返回键仍会作为兜底保留。
+    }
+  } else {
+    requestMobileFullscreen(app);
+  }
 }
 
 export function getInitData(): string {

@@ -444,7 +444,7 @@ function discoverLegacyScoreboardMessageIds(
     }
     // 上线前的真实格式以“🎲 庄家”进入庄家汇总、以“走势：”作为最后一行。
     // 找到该终止标记即停止，后续任意可配置续庄文案都不属于成绩单。
-    if (bankerSummaryStarted && /(?:^|\n)走势：/u.test(message.content)) {
+    if (bankerSummaryStarted && /(?:^|\n)(?:庄家)?走势：/u.test(message.content)) {
       return { ids, incomplete: false };
     }
   }
