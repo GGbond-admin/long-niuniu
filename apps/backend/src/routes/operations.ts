@@ -1431,7 +1431,7 @@ export async function adminOperationsRoutes(app: FastifyInstance) {
     if (body.target.startsWith('ROOM:')) {
       return reply.code(400).send({
         error: 'ROOM_PIN_VIA_ASSISTANT_ONLY',
-        message: '房间置顶请在游戏运营中心接管小助手后操作',
+        message: '房间置顶请在游戏运营中心接管至尊牛牛小助手后操作',
       });
     }
     const { publishNow, ...data } = body;
@@ -1456,7 +1456,7 @@ export async function adminOperationsRoutes(app: FastifyInstance) {
     if (existing.target.startsWith('ROOM:')) {
       return reply.code(409).send({
         error: 'ROOM_PIN_VIA_ASSISTANT_ONLY',
-        message: '房间置顶请在游戏运营中心接管小助手后操作',
+        message: '房间置顶请在游戏运营中心接管至尊牛牛小助手后操作',
       });
     }
     const body = z

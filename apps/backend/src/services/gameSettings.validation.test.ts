@@ -54,4 +54,16 @@ describe('游戏配置跨字段校验', () => {
       }),
     ).toBeTruthy();
   });
+
+  it('封盘重推确认窗口只允许 3 至 30 秒', () => {
+    expect(() =>
+      validateGameConfig('round', { repostWindowSeconds: 2 }),
+    ).toThrow();
+    expect(() =>
+      validateGameConfig('round', { repostWindowSeconds: 31 }),
+    ).toThrow();
+    expect(
+      validateGameConfig('round', { repostWindowSeconds: 8 }),
+    ).toBeTruthy();
+  });
 });

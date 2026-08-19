@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { api } from '../api';
 import { goBack } from '../lib/nav';
@@ -41,6 +41,14 @@ export default function SendRedPacket({
   const [error, setError] = useState('');
   const [pinOpen, setPinOpen] = useState(false);
   const [pinError, setPinError] = useState('');
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   const displayAmount = useMemo(() => {
     const n = Number(amount);
@@ -94,18 +102,32 @@ export default function SendRedPacket({
         paymentPin,
       );
       completeRequest(requestKey, requestId, ownerUid);
+      if (!mountedRef.current) return;
       setPinOpen(false);
-      navigate(`/game/${roomId}/play`, {
-        replace: true,
-        state: {
-          sentPacket: {
-            packetId: result.packetId,
-            greeting: normalizedGreeting,
+      const openedOverRoom = Boolean(
+        (location.state as { backgroundLocation?: unknown } | null)?.backgroundLocation,
+      );
+      if (openedOverRoom) {
+        // 群聊仍挂载且会收到 USER_PACKET；真实回退可移除覆盖层历史，避免 play→play。
+        navigate(-1);
+      } else {
+        navigate(`/game/${roomId}/play`, {
+          replace: true,
+          state: {
+            sentPacket: {
+              packetId: result.packetId,
+              greeting: normalizedGreeting,
+            },
           },
-        },
-      });
+        });
+      }
     } catch (e) {
       const code = (e as Error & { code?: string }).code ?? (e as Error).message;
+      // 冲突代表服务端已有该笔结果；即使页面已离开也必须清掉本地请求号。
+      if (code === 'IDEMPOTENCY_CONFLICT') {
+        completeRequest(requestKey, requestId, ownerUid);
+      }
+      if (!mountedRef.current) return;
       if (code === 'PAYMENT_PIN_REQUIRED') {
         setPinOpen(false);
         navigate('/settings/payment-pin', {
@@ -118,7 +140,6 @@ export default function SendRedPacket({
         return;
       }
       if (code === 'IDEMPOTENCY_CONFLICT') {
-        completeRequest(requestKey, requestId, ownerUid);
         setPinOpen(false);
         setError('上一笔红包已发送，系统已阻止重复扣款，请返回群聊查看。');
         return;
@@ -126,7 +147,7 @@ export default function SendRedPacket({
       setPinOpen(false);
       setError(PACKET_ERROR[code] ?? code ?? '发送失败');
     } finally {
-      setBusy(false);
+      if (mountedRef.current) setBusy(false);
     }
   }
 

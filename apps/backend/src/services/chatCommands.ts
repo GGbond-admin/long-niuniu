@@ -1,5 +1,5 @@
 /**
- * 网页互动群聊天指令：数字竞标/下注、sh 梭哈、0 撤回、/重推。
+ * 网页互动群聊天指令：数字竞标/下注、sh 梭哈、0 撤回、/重推整局。
  */
 import { RoundPhase } from '@prisma/client';
 import { fromCents, toCentsBigInt } from '../engine/betting.js';
@@ -8,9 +8,11 @@ import { withRedisLock } from '../lib/redis.js';
 import {
   cancelRound,
   currentRoundForRoom,
+  ensureWaitingRound,
   GameError,
   placeBankerBid,
   placeBet,
+  startRound,
   type PlaceBetResult,
   withdrawBet,
 } from './game.js';
@@ -76,6 +78,14 @@ export type PrivateBetConfirmation = {
   acceptance?: BetAcceptanceDetails;
   reason?: string;
 };
+
+/** 仅成功执行的游戏指令可写入聊天语义，普通数字文字不能由前端自行猜测。 */
+export function confirmedChatGameAction(
+  result: ChatCommandResult,
+): Exclude<ChatCommandAction, 'repost'> | undefined {
+  if (result.kind !== 'ok' || result.action === 'repost') return undefined;
+  return result.action;
+}
 
 /** 只回给发起下注的 socket，不写群聊、不进入公共历史。 */
 export function privateBetConfirmationFor(
@@ -167,6 +177,7 @@ const diceCeremonyInFlight = new Map<string, Promise<DiceThrowResult>>();
 const BANKER_DICE_BETWEEN_MS = 1_400;
 const BANKER_DICE_BEFORE_ANNOUNCE_MS = 1_500;
 const BANKER_DICE_CEREMONY_LOCK_MS = 20_000;
+const BANKER_REPOST_WINDOW_EVENT = 'BANKER_REPOST_WINDOW';
 
 export function isChatMuted(phase: string | null | undefined): boolean {
   return !!phase && MUTED_PHASES.has(phase);
@@ -209,6 +220,30 @@ function diceFromPayload(payload: unknown): [number, number, number] | null {
   return [Number(values[0]), Number(values[1]), Number(values[2])];
 }
 
+function repostEndsAtFromPayload(payload: unknown): Date | null {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null;
+  const value = (payload as { endsAt?: unknown }).endsAt;
+  if (typeof value !== 'string') return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function randomDice(): [number, number, number] {
+  return [
+    1 + Math.floor(Math.random() * 6),
+    1 + Math.floor(Math.random() * 6),
+    1 + Math.floor(Math.random() * 6),
+  ];
+}
+
+async function latestBankerDiceEvent(roundId: string) {
+  return prisma.roundEvent.findFirst({
+    where: { roundId, type: 'BANKER_DICE' },
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+    select: { id: true, payload: true, createdAt: true },
+  });
+}
+
 async function roundEventExists(roundId: string, type: string): Promise<boolean> {
   return !!(await prisma.roundEvent.findFirst({
     where: { roundId, type },
@@ -237,7 +272,7 @@ export async function throwBankerDice(params: {
   const round = await currentRoundForRoom(params.roomId);
   if (!round) return { kind: 'error', message: '当前没有进行中的牌局' };
   if (round.phase !== RoundPhase.SENDING_PACKET) {
-    return { kind: 'error', message: '当前不是掷骰阶段，请等待小助手播报投骰后再试' };
+    return { kind: 'error', message: '当前不是掷骰阶段，请等待系统播报投骰后再试' };
   }
   if (round.bankerId !== params.userId) {
     return { kind: 'error', message: '仅本局庄家可投骰子' };
@@ -245,18 +280,28 @@ export async function throwBankerDice(params: {
   if (await roundEventExists(round.id, 'BANKER_DICE_READY_FOR_PACKET')) {
     return { kind: 'error', message: '本局已投过骰子' };
   }
-  const existing = await prisma.roundEvent.findFirst({
-    where: { roundId: round.id, type: 'BANKER_DICE' },
-    select: { id: true, payload: true },
-  });
+  const existing = await latestBankerDiceEvent(round.id);
+  if (!existing) {
+    const repostWindow = await prisma.roundEvent.findFirst({
+      where: { roundId: round.id, type: BANKER_REPOST_WINDOW_EVENT },
+      select: { payload: true },
+    });
+    const repostEndsAt = repostEndsAtFromPayload(repostWindow?.payload);
+    if (repostEndsAt && Date.now() < repostEndsAt.getTime()) {
+      const remaining = Math.max(
+        1,
+        Math.ceil((repostEndsAt.getTime() - Date.now()) / 1_000),
+      );
+      return {
+        kind: 'error',
+        message: `封盘确认中，还剩 ${remaining} 秒；如需取消退款并重开，请发送 /重推`,
+      };
+    }
+  }
   let dice = diceFromPayload(existing?.payload);
   if (existing && !dice) return { kind: 'error', message: '本局投骰记录异常，请联系运营处理' };
   if (!dice) {
-    dice = [
-      1 + Math.floor(Math.random() * 6),
-      1 + Math.floor(Math.random() * 6),
-      1 + Math.floor(Math.random() * 6),
-    ];
+    dice = randomDice();
     await prisma.roundEvent.create({
       data: {
         roundId: round.id,
@@ -322,7 +367,7 @@ export function runBankerDiceCeremony(params: {
           const round = await currentRoundForRoom(params.roomId);
           if (!round) return { kind: 'error', message: '当前没有进行中的牌局' };
           if (round.phase !== RoundPhase.SENDING_PACKET) {
-            return { kind: 'error', message: '当前不是掷骰阶段，请等待小助手播报投骰后再试' };
+            return { kind: 'error', message: '当前不是掷骰阶段，请等待系统播报投骰后再试' };
           }
           if (round.bankerId !== params.userId) {
             return { kind: 'error', message: '仅本局庄家可投骰子' };
@@ -335,7 +380,7 @@ export function runBankerDiceCeremony(params: {
               to: RoundPhase.SENDING_PACKET,
             });
           } catch {
-            return { kind: 'error', message: '小助手封盘播报尚未完成，请稍后再试' };
+            return { kind: 'error', message: '系统封盘播报尚未完成，请稍后再试' };
           }
 
           const result = await throwBankerDice(params);
@@ -372,7 +417,7 @@ export function runBankerDiceCeremony(params: {
                 )
               : null;
             if (!sent) {
-              return { kind: 'error', message: '小助手已暂停，恢复后才能完成开骰播报' };
+              return { kind: 'error', message: '系统播报已暂停，恢复后才能完成开骰播报' };
             }
             await recordRoundEvent(result.roundId, 'BANKER_DICE_ANNOUNCED');
           }
@@ -386,7 +431,7 @@ export function runBankerDiceCeremony(params: {
                 )
               : null;
             if (!sent) {
-              return { kind: 'error', message: '小助手已暂停，恢复后才能进入发包阶段' };
+              return { kind: 'error', message: '系统播报已暂停，恢复后才能进入发包阶段' };
             }
             await recordRoundEvent(result.roundId, 'BANKER_PACKET_WAIT_ANNOUNCED');
           }
@@ -404,6 +449,26 @@ export function runBankerDiceCeremony(params: {
   return task;
 }
 
+async function startReplacementRound(roomId: string): Promise<void> {
+  const waiting = await ensureWaitingRound(roomId);
+  if (waiting.phase !== RoundPhase.WAITING) return;
+  try {
+    const started = await startRound(waiting.id);
+    if (started.phase !== RoundPhase.WAITING) {
+      gameBus.transition({
+        roundId: waiting.id,
+        roomId,
+        from: RoundPhase.WAITING,
+        to: started.phase,
+      });
+    }
+  } catch (error) {
+    // 人数不足时保留新 WAITING 局；人数补齐后调度器会继续开局。
+    if (error instanceof GameError && error.code === 'NOT_ENOUGH_PLAYERS') return;
+    throw error;
+  }
+}
+
 function parseAmountToken(raw: string): string | null {
   const value = raw.trim().replace(/,/g, '');
   if (!/^\d+(\.\d{1,2})?$/.test(value)) return null;
@@ -414,8 +479,8 @@ function parseAmountToken(raw: string): string | null {
 export function isRoomCommandCandidate(raw: string): boolean {
   const text = raw.trim();
   return (
-    /^\/重推$/i.test(text) ||
-    /^\/ChongTui$/i.test(text) ||
+    /^\/?重推$/i.test(text) ||
+    /^\/?ChongTui$/i.test(text) ||
     /^sh\s*\d+(?:\.\d{1,2})?$/i.test(text) ||
     parseAmountToken(text) !== null
   );
@@ -436,28 +501,64 @@ export async function handleRoomChatCommand(params: {
     return { kind: 'muted', message: '抢红包阶段禁止发言，请专注领取' };
   }
 
-  // /重推：庄家在待发包阶段可取消本局重开
-  if (/^\/重推$/i.test(text) || /^\/ChongTui$/i.test(text)) {
-    if (!round) return { kind: 'error', message: '当前没有进行中的牌局' };
-    if (round.phase !== RoundPhase.SENDING_PACKET) {
-      return { kind: 'error', message: '仅在等待发包阶段可重推本局' };
-    }
-    if (round.bankerId !== params.userId) {
-      return { kind: 'error', message: '仅本局庄家可重推' };
-    }
+  // /重推：封盘确认窗口内由庄家取消整局、原路退款，并立即准备下一局。
+  if (/^\/?重推$/i.test(text) || /^\/?ChongTui$/i.test(text)) {
     try {
-      const cancelled = await cancelRound(round.id, '庄家重推', params.userId);
-      gameBus.transition({
-        roundId: round.id,
-        roomId: params.roomId,
-        from: RoundPhase.SENDING_PACKET,
-        to: cancelled.phase,
-      });
-      return { kind: 'ok', action: 'repost', echo: text };
+      const locked = await withRedisLock(
+        `niuniu:room:${params.roomId}:banker-dice`,
+        BANKER_DICE_CEREMONY_LOCK_MS,
+        async (): Promise<ChatCommandResult> => {
+          const liveRound = await currentRoundForRoom(params.roomId);
+          if (!liveRound) return { kind: 'error', message: '当前没有进行中的牌局' };
+          if (liveRound.phase !== RoundPhase.SENDING_PACKET) {
+            return { kind: 'error', message: '仅在封盘确认阶段可以重推本局' };
+          }
+          if (liveRound.bankerId !== params.userId) {
+            return { kind: 'error', message: '仅本局庄家可重推' };
+          }
+          if (await latestBankerDiceEvent(liveRound.id)) {
+            return { kind: 'error', message: '本局已经开始投骰，不能再重推' };
+          }
+          const repostWindow = await prisma.roundEvent.findFirst({
+            where: {
+              roundId: liveRound.id,
+              type: BANKER_REPOST_WINDOW_EVENT,
+            },
+            select: { payload: true },
+          });
+          const repostEndsAt = repostEndsAtFromPayload(repostWindow?.payload);
+          if (repostEndsAt && Date.now() >= repostEndsAt.getTime()) {
+            return { kind: 'error', message: '重推确认时间已结束，请继续完成庄家投骰' };
+          }
+
+          const cancelled = await cancelRound(
+            liveRound.id,
+            '庄家重推',
+            params.userId,
+          );
+          gameBus.transition({
+            roundId: liveRound.id,
+            roomId: params.roomId,
+            from: RoundPhase.SENDING_PACKET,
+            to: cancelled.phase,
+          });
+          await ensureRoundAnnouncement({
+            roundId: liveRound.id,
+            roomId: params.roomId,
+            to: cancelled.phase,
+          }).catch(() => undefined);
+          // 退款事务已完成即视为重推成功；下一局启动若遇瞬时故障，由调度器继续恢复。
+          await startReplacementRound(params.roomId).catch((error) => {
+            console.error('[banker-repost] start replacement round failed', liveRound.id, error);
+          });
+          return { kind: 'ok', action: 'repost', echo: text };
+        },
+      );
+      return locked ?? { kind: 'error', message: '牌局正在处理中，请稍后再试' };
     } catch (e) {
       return {
         kind: 'error',
-        message: e instanceof GameError ? e.code : '重推失败',
+        message: e instanceof GameError ? humanizeGameError(e) : '重推失败，请稍后再试',
       };
     }
   }

@@ -235,6 +235,7 @@ export async function buildRoundAnnounceMessages(params: {
         stripHtml(
           renderMessage(templates.dicePrompt, {
             banker: banker ? mention(banker) : '庄家',
+            repostWindow: settings?.round.repostWindowSeconds ?? 8,
           }),
         ),
       ),

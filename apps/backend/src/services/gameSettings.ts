@@ -18,6 +18,8 @@ export interface RoundConfig {
   betDurationSeconds: number;
   claimDurationSeconds: number;
   continuationWindowSeconds: number;
+  /** 封盘后允许庄家发送 /重推 取消退款并重开下一局的确认时间 */
+  repostWindowSeconds: number;
   bankerBidMinCents: number;
   bankerBidMaxCents: number;
   trendLength: number;
@@ -50,6 +52,7 @@ export const DEFAULT_ROUND_CONFIG: RoundConfig = {
   betDurationSeconds: 50,
   claimDurationSeconds: 40,
   continuationWindowSeconds: 15,
+  repostWindowSeconds: 8,
   bankerBidMinCents: 10_000,
   bankerBidMaxCents: 100_000_000,
   trendLength: 10,
@@ -188,11 +191,11 @@ export const DEFAULT_MESSAGE_TEMPLATES: MessageTemplates = {
   betStart:
     '【第 {{seqNo}} 局 · 开注】\n\n本局庄家：{{banker}}\n庄钱：RM {{pot}}\n下注时长：{{betSeconds}} 秒\n\n普通下注：RM {{betMin}} ~ {{betMax}}\n梭哈：最低 RM {{shMin}}，上限为当前余额\n\n操作说明：\n· 发送金额 = 下注\n· 发送 sh金额 = 梭哈（如 sh200）\n· 发送 0 = 撤回本局下注\n\n时间一到立刻封盘，请抓紧出手。',
   sealed:
-    '【封盘 · 等待发包】\n下注已截止。\n请各位留在本页，勿退出，以免错过抢包。\n小助手正在准备本局红包…',
+    '【封盘 · 等待发包】\n下注已截止。\n请各位留在本页，勿退出，以免错过抢包。\n正在准备本局红包…',
   sealedSummary:
     '【停止下注 · 封盘明细】\n\n庄家：{{banker}}\n庄钱：RM {{pot}}\n发包金额：RM {{packetTotal}}\n发包数量：{{packetCount}} 个\n总下注：RM {{betTotal}}\n总梭哈：RM {{shTotal}}\n\n代包手1：{{tailPackerBanker}}（庄家尾包）\n代包手2：{{tailPackerPlayer}}（闲家尾包）\n\n本局下注成功名单：\n{{betList}}',
   dicePrompt:
-    '【庄家投骰】\n请庄家 {{banker}} 在 60 秒内投出 3 颗骰子。\n投骰后进入发包与抢包流程。\n如需重开本局，可发送 /重推。',
+    '【封盘确认 · {{repostWindow}} 秒】\n请庄家 {{banker}} 确认本局。\n· 继续本局：倒计时结束后点击投骰\n· 重推本局：倒计时内发送 /重推，系统会取消整局、原路退回全部冻结金额，并重新开启下一局',
   betCountdown: '下注倒计时 · 还剩 {{remaining}} 秒\n未出手的抓紧了，时间到立刻封盘！',
   claimStart:
     '【开始抢包 · {{claimSeconds}} 秒】\n仅庄家与已下注闲家可领，过期即止。',
@@ -219,6 +222,10 @@ const LEGACY_CLAIM_START =
   '【红包已发出 · 开始抢包】\n仅本局庄家与已下注闲家可领。\n倒计时 {{claimSeconds}} 秒，过期无法再领。\n点开红包立刻抢，手慢无！';
 const LEGACY_CLAIM_WARNING =
   '【领包提醒 · {{claimSeconds}} 秒】\n请尽快领取本局红包。\n超时未领将按尾包规则由系统补录，结果不得争议。\n恶意卡包、拖延认额，将按平台规则处理。';
+const LEGACY_DICE_PROMPT =
+  '【庄家投骰】\n请庄家 {{banker}} 在 60 秒内投出 3 颗骰子。\n投骰后进入发包与抢包流程。\n如需重开本局，可发送 /重推。';
+const LEGACY_REROLL_DICE_PROMPT =
+  '【庄家投骰】\n请庄家 {{banker}} 在 60 秒内投出 3 颗骰子。\n首次结果公布后有 {{rerollWindow}} 秒确认时间；如需重新投骰，请发送 /重推（每局最多一次）。';
 
 function defaultMessageTemplates(gameCode: string): MessageTemplates {
   const game = GAME_CATALOG[gameCode as SupportedGameCode];
@@ -234,11 +241,20 @@ function defaultMessageTemplates(gameCode: string): MessageTemplates {
 export async function getMessageTemplates(
   gameCode: string,
 ): Promise<MessageTemplates> {
-  return getGameConfig(
+  const templates = await getGameConfig(
     gameCode,
     'messages',
     defaultMessageTemplates(gameCode),
   );
+  // 兼容后台已保存的旧默认话术：发送者栏已统一显示「至尊牛牛小助手」，
+  // 气泡正文不再重复出现另一个「小助手」身份。
+  return {
+    ...templates,
+    sealed: templates.sealed.replace(
+      '小助手正在准备本局红包…',
+      '正在准备本局红包…',
+    ),
+  };
 }
 
 export async function getMessageTemplatesForRoom(
@@ -317,7 +333,7 @@ export async function setAssistantService(
 }
 
 /**
- * 切换发包方式：TNG 链接 / 内部红包（小助手直发）。
+ * 切换发包方式：TNG 链接 / 系统红包（至尊牛牛小助手发送）。
  * 进行中的牌局沿用开局时的配置快照，切换后自下一局生效。
  */
 export async function setPacketChannel(
@@ -391,6 +407,16 @@ export async function ensureGameConfigDefaults(): Promise<void> {
           if (raw && typeof raw.assistantEnabled === 'undefined') {
             merged = { ...merged, assistantEnabled: true, autoStart: false };
           }
+          // 清理开发期间曾使用的错误「重新投骰」字段，统一为整局重推确认窗口。
+          if (typeof raw?.diceRerollWindowSeconds === 'number') {
+            if (typeof raw.repostWindowSeconds !== 'number') {
+              merged = {
+                ...merged,
+                repostWindowSeconds: raw.diceRerollWindowSeconds,
+              };
+            }
+            delete merged.diceRerollWindowSeconds;
+          }
         }
         if (key === 'messages') {
           const raw = existing?.value as Record<string, unknown> | null;
@@ -412,6 +438,17 @@ export async function ensureGameConfigDefaults(): Promise<void> {
               claimWarning: DEFAULT_MESSAGE_TEMPLATES.claimWarning,
             };
           }
+          if (
+            raw?.dicePrompt === LEGACY_DICE_PROMPT
+            || raw?.dicePrompt === LEGACY_REROLL_DICE_PROMPT
+          ) {
+            merged = {
+              ...merged,
+              dicePrompt: DEFAULT_MESSAGE_TEMPLATES.dicePrompt,
+            };
+          }
+          delete merged.diceReaction;
+          delete merged.diceRerollAccepted;
         }
         return prisma.gameConfig.upsert({
           where: { gameCode_key: { gameCode, key } },
@@ -572,6 +609,7 @@ const configSchemas = {
       betDurationSeconds: z.number().int().min(5).max(3_600).optional(),
       claimDurationSeconds: z.number().int().min(5).max(3_600).optional(),
       continuationWindowSeconds: z.number().int().min(5).max(300).optional(),
+      repostWindowSeconds: z.number().int().min(3).max(30).optional(),
       bankerBidMinCents: z.number().int().min(1).max(1_000_000_000).optional(),
       bankerBidMaxCents: z.number().int().min(1).max(10_000_000_000).optional(),
       trendLength: z.number().int().min(1).max(100).optional(),

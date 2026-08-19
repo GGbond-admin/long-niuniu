@@ -556,6 +556,11 @@ export const api = {
       phase: string;
       totalCents: string;
       participantCount: number;
+      banker: {
+        uid: string;
+        nickname: string;
+        avatarUrl: string | null;
+      } | null;
       claims: Array<{
         uid: string;
         nickname: string | null;
@@ -1042,9 +1047,14 @@ export type RoomState = {
     }>;
     claimedCount: number;
     diceThrown?: boolean;
+    /** 已经开始投骰后不能再重推整局 */
+    diceStarted?: boolean;
+    /** 封盘后允许庄家取消退款并重开下一局的截止时间 */
+    repostEndsAt?: string | null;
+    canRepostRound?: boolean;
     participantCount: number | null;
     packetId: string | null;
-    /** TNG=跳转外部链接抢包；INTERNAL=小助手直发、群内直接抢 */
+    /** TNG=跳转外部链接抢包；INTERNAL=至尊牛牛小助手发送系统红包、群内直接抢 */
     packetChannel?: 'TNG' | 'INTERNAL';
     packetTotalCents?: string | null;
     claims?: Array<{
@@ -1075,6 +1085,7 @@ export type RoomState = {
     bidDurationSeconds: number;
     betDurationSeconds: number;
     claimDurationSeconds: number;
+    repostWindowSeconds?: number;
     bankerBidMinCents: number;
     bankerBidMaxCents: number;
     autoTailPacketEnabled?: boolean;

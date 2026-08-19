@@ -26,6 +26,7 @@ type PacketLocationState = {
 };
 
 const ASSISTANT_AVATAR = '/avatars/assistant.jpg';
+const ASSISTANT_NAME = '至尊牛牛小助手';
 const DEFAULT_GREETING = '恭喜发财，大吉大利';
 
 export default function PacketDetail({ overlay = false }: { overlay?: boolean } = {}) {
@@ -43,7 +44,7 @@ export default function PacketDetail({ overlay = false }: { overlay?: boolean } 
   const [kind, setKind] = useState<PacketKind>(kindHint ?? 'group');
   const [greeting, setGreeting] = useState(preset?.greeting || DEFAULT_GREETING);
   const [sender, setSender] = useState(
-    preset?.sender ?? { name: '小助手', avatar: ASSISTANT_AVATAR },
+    preset?.sender ?? { name: ASSISTANT_NAME, avatar: ASSISTANT_AVATAR },
   );
   const [amountCents, setAmountCents] = useState(preset?.amountCents);
   const [gone, setGone] = useState(preset?.gone === true);
@@ -75,7 +76,11 @@ export default function PacketDetail({ overlay = false }: { overlay?: boolean } 
         if (cancelled) return;
         const mine = detail.claims.find((claim) => claim.uid === myUid);
         setKind('game');
-        setSender({ name: '小助手', avatar: ASSISTANT_AVATAR });
+        setSender(
+          detail.banker
+            ? { name: detail.banker.nickname, avatar: detail.banker.avatarUrl }
+            : preset?.sender ?? { name: ASSISTANT_NAME, avatar: ASSISTANT_AVATAR },
+        );
         setGreeting(DEFAULT_GREETING);
         setClaims(detail.claims);
         setTotalCents(detail.totalCents);
@@ -104,7 +109,11 @@ export default function PacketDetail({ overlay = false }: { overlay?: boolean } 
       const round = state.round;
       if (!round?.packetId) throw new Error('当前没有可查看的红包');
       setKind('game');
-      setSender({ name: '小助手', avatar: ASSISTANT_AVATAR });
+      setSender(
+        round.banker
+          ? { name: round.banker.nickname, avatar: round.banker.avatarUrl }
+          : { name: ASSISTANT_NAME, avatar: ASSISTANT_AVATAR },
+      );
       setGreeting(DEFAULT_GREETING);
       setClaims(round.claims ?? []);
       setTotalCents(round.packetTotalCents ?? '0');

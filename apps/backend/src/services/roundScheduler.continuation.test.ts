@@ -12,6 +12,7 @@ const memory = vi.hoisted(() => ({
     isContinued: false,
     continuationUsed: false,
     finishedAt: new Date('2026-08-07T07:00:00.000Z'),
+    cancelReason: null as string | null,
     configSnapshot: {},
   },
   startRound: vi.fn(),
@@ -129,6 +130,8 @@ describe('续庄窗口结束后的调度', () => {
     vi.setSystemTime(new Date('2026-08-07T07:00:20.000Z'));
     memory.autoStart = false;
     memory.previous.finishedAt = new Date('2026-08-07T07:00:00.000Z');
+    memory.previous.phase = 'FINISHED';
+    memory.previous.cancelReason = null;
     memory.previous.isContinued = false;
     memory.previous.continuationUsed = false;
     memory.startRound.mockReset();
@@ -170,6 +173,22 @@ describe('续庄窗口结束后的调度', () => {
 
     expect(memory.startRound).not.toHaveBeenCalled();
     expect(memory.appendSystemChatOnce).not.toHaveBeenCalled();
+  });
+
+  it('庄家重推取消后，即使自动开局关闭也会启动替代局', async () => {
+    memory.previous.phase = 'CANCELLED';
+    memory.previous.cancelReason = '庄家重推';
+
+    const scheduler = new RoundScheduler();
+    await scheduler.tick();
+
+    expect(memory.startRound).toHaveBeenCalledWith('round-2');
+    expect(memory.transition).toHaveBeenCalledWith({
+      roundId: 'round-2',
+      roomId: 'room-1',
+      from: RoundPhase.WAITING,
+      to: RoundPhase.BANKER_BID,
+    });
   });
 
   it('CLAIM_EXPIRED 内部局结算失败后会在后续 tick 重试', async () => {

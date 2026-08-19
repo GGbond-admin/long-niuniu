@@ -29,6 +29,8 @@ vi.mock('./game.js', () => ({
       : null,
   ),
   cancelRound: vi.fn(),
+  ensureWaitingRound: vi.fn(),
+  startRound: vi.fn(),
   placeBankerBid: memory.placeBankerBid,
   placeBet: memory.placeBet,
   withdrawBet: memory.withdrawBet,
@@ -56,6 +58,7 @@ vi.mock('./roomHub.js', () => ({
 
 import { GameError } from './game.js';
 import {
+  confirmedChatGameAction,
   handleRoomChatCommand,
   privateBetConfirmationFor,
 } from './chatCommands.js';
@@ -83,6 +86,7 @@ describe('非竞标/下注阶段纯数字当普通聊天', () => {
       content: '100',
     });
     expect(result).toEqual({ kind: 'ignored' });
+    expect(confirmedChatGameAction(result)).toBeUndefined();
     expect(memory.placeBet).not.toHaveBeenCalled();
     expect(memory.placeBankerBid).not.toHaveBeenCalled();
   });
@@ -133,6 +137,7 @@ describe('非竞标/下注阶段纯数字当普通聊天', () => {
       echo: '100',
       amountCents: '10000',
     });
+    expect(confirmedChatGameAction(result)).toBe('bet');
     expect(privateBetConfirmationFor(result)).toEqual({
       type: 'bet_confirmation',
       status: 'success',
@@ -313,6 +318,7 @@ describe('非竞标/下注阶段纯数字当普通聊天', () => {
       content: '8800',
     });
     expect(result).toMatchObject({ kind: 'ok', action: 'bid', echo: '8800' });
+    expect(confirmedChatGameAction(result)).toBe('bid');
     expect(memory.placeBankerBid).toHaveBeenCalledOnce();
   });
 

@@ -374,6 +374,12 @@ export async function gameRoutes(app: FastifyInstance) {
     if (!(await hasActiveRoomMembership(userId, packet.round.roomId))) {
       return reply.code(403).send({ error: 'NOT_IN_ROOM' });
     }
+    const banker = packet.round.bankerId
+      ? await prisma.user.findUnique({
+          where: { id: packet.round.bankerId },
+          select: { uid: true, nickname: true, avatarUrl: true },
+        })
+      : null;
     return {
       id: packet.id,
       channel: packet.channel,
@@ -381,6 +387,13 @@ export async function gameRoutes(app: FastifyInstance) {
       phase: packet.round.phase,
       totalCents: String(packet.totalCents),
       participantCount: packet.participantCount,
+      banker: banker
+        ? {
+            uid: banker.uid,
+            nickname: banker.nickname ?? banker.uid,
+            avatarUrl: banker.avatarUrl,
+          }
+        : null,
       claims: packet.round.claims.map((claim) => ({
         uid: claim.user.uid,
         nickname: claim.user.nickname,
@@ -1461,7 +1474,7 @@ export async function adminGameRoutes(app: FastifyInstance) {
     const { id } = req.params as { id: string };
     const adminId = (req.user as { sub: string }).sub;
     const { reason } = z
-      .object({ reason: z.string().trim().min(2).max(200).default('运营暂停小助手') })
+      .object({ reason: z.string().trim().min(2).max(200).default('运营暂停至尊牛牛小助手') })
       .parse(req.body ?? {});
     const room = await requireSupportedRoom(id);
     const result = await pauseAssistantService(id, reason, adminId);
@@ -1486,7 +1499,7 @@ export async function adminGameRoutes(app: FastifyInstance) {
     });
     systemChat(
       id,
-      `【运营暂停小助手】群内自动播报与自动开局已关闭（入口仍开放）。原因：${reason}`,
+      `【运营暂停至尊牛牛小助手】群内自动播报与自动开局已关闭（入口仍开放）。原因：${reason}`,
       { force: true },
     );
     broadcastToRoomObservers(id, {
@@ -1525,7 +1538,7 @@ export async function adminGameRoutes(app: FastifyInstance) {
         ip: req.ip,
       },
     });
-    systemChat(id, '【运营恢复】小助手播报已开启。自动开局仍关闭，请手动开局或打开自动开局。', {
+    systemChat(id, '【运营恢复】至尊牛牛小助手播报已开启。自动开局仍关闭，请手动开局或打开自动开局。', {
       force: true,
     });
     broadcastToRoomObservers(id, {
@@ -1550,7 +1563,7 @@ export async function adminGameRoutes(app: FastifyInstance) {
     if (enabled && settings.round.assistantEnabled === false) {
       return reply.code(409).send({
         error: 'ASSISTANT_DISABLED',
-        message: '请先开启小助手，再打开自动开局',
+        message: '请先开启至尊牛牛小助手，再打开自动开局',
       });
     }
     const next = await setAssistantService(room.gameCode, { autoStart: enabled }, adminId);
@@ -1699,7 +1712,7 @@ export async function adminGameRoutes(app: FastifyInstance) {
     return { ok: true, packet };
   });
 
-  /** 本局改用小助手直发内部红包（不依赖发包方式配置，运营可临时切换） */
+  /** 本局使用系统红包（不依赖房间发包方式配置，运营可临时切换） */
   app.post(
     '/api/admin/rounds/:id/packet/internal',
     { preHandler: operations },
@@ -1743,7 +1756,7 @@ export async function adminGameRoutes(app: FastifyInstance) {
     },
   );
 
-  /** 切换发包方式（TNG 链接 / 小助手直发）；进行中的牌局沿用原快照，下一局生效 */
+  /** 切换发包方式（TNG 链接 / 系统红包）；进行中的牌局沿用原快照，下一局生效 */
   app.post(
     '/api/admin/rooms/:id/packet-channel',
     { preHandler: operations },

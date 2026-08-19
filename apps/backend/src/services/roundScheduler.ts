@@ -292,7 +292,7 @@ export class RoundScheduler {
           await scheduleVirtualDiceForRound(round.roomId, round.id);
         }
 
-        // 内部红包：投骰完成后小助手自动发包，无需 TNG 链接与发包账号。
+        // 系统红包：投骰完成后由至尊牛牛小助手自动发包，无需 TNG 链接。
         for (const round of pendingPackets) {
           if (!round.packet?.id) continue;
           const settings = round.configSnapshot
@@ -453,6 +453,7 @@ export class RoundScheduler {
                     isContinued: true,
                     continuationUsed: true,
                     finishedAt: true,
+                    cancelReason: true,
                     configSnapshot: true,
                   },
                 })
@@ -468,8 +469,12 @@ export class RoundScheduler {
               now,
             });
           }
+          const bankerRepostCancelled =
+            previous?.phase === RoundPhase.CANCELLED
+            && previous.cancelReason === '庄家重推';
           if (
-            !shouldStartWaitingRound({
+            !bankerRepostCancelled
+            && !shouldStartWaitingRound({
               autoStart: Boolean(settings.round.autoStart),
               continuationError,
             })

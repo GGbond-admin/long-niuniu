@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 /**
- * 内部红包（小助手直发）：发包、抢包拆分入账、防重复与资格校验。
+ * 系统红包（至尊牛牛小助手发送）：发包、抢包拆分入账、防重复与资格校验。
  */
 const memory = vi.hoisted(() => {
   const state = {

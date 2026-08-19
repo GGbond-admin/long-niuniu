@@ -26,6 +26,7 @@ import {
 } from '../services/game.js';
 import { announceBidPlaced } from '../services/bidAuction.js';
 import {
+  confirmedChatGameAction,
   handleRoomChatCommand,
   isRoomCommandCandidate,
   isChatMuted,
@@ -129,7 +130,7 @@ async function buildRoomState(roomId: string, userId: string) {
     bankerRow,
     eligiblePlayers,
     claimable,
-    diceEvent,
+    diceEvents,
     lastFinished,
     pins,
     playedRounds24h,
@@ -152,11 +153,21 @@ async function buildRoomState(roomId: string, userId: string) {
       ? canClaimPacket(round.packet.id, userId)
       : Promise.resolve(false),
     round?.phase === RoundPhase.SENDING_PACKET
-      ? prisma.roundEvent.findFirst({
-          where: { roundId: round.id, type: 'BANKER_DICE_READY_FOR_PACKET' },
-          select: { id: true },
+      ? prisma.roundEvent.findMany({
+          where: {
+            roundId: round.id,
+            type: {
+              in: [
+                'BANKER_DICE',
+                'BANKER_REPOST_WINDOW',
+                'BANKER_DICE_READY_FOR_PACKET',
+              ],
+            },
+          },
+          orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+          select: { type: true, payload: true, createdAt: true },
         })
-      : Promise.resolve(null),
+      : Promise.resolve([]),
     prisma.round.findFirst({
       where: { roomId, phase: RoundPhase.FINISHED },
       orderBy: { seqNo: 'desc' },
@@ -206,7 +217,31 @@ async function buildRoomState(roomId: string, userId: string) {
     }));
 
   const canClaim = Boolean(claimable) && !myClaim;
-  const diceThrown = Boolean(diceEvent);
+  const diceThrown = diceEvents.some(
+    (event) => event.type === 'BANKER_DICE_READY_FOR_PACKET',
+  );
+  const latestDiceEvent = diceEvents
+    .filter((event) => event.type === 'BANKER_DICE')
+    .at(-1);
+  const repostWindowEvent = diceEvents.find(
+    (event) => event.type === 'BANKER_REPOST_WINDOW',
+  );
+  const repostWindowPayload =
+    repostWindowEvent?.payload
+    && typeof repostWindowEvent.payload === 'object'
+    && !Array.isArray(repostWindowEvent.payload)
+      ? repostWindowEvent.payload as { endsAt?: unknown }
+      : null;
+  const repostEndsAt =
+    typeof repostWindowPayload?.endsAt === 'string'
+      ? repostWindowPayload.endsAt
+      : null;
+  const diceStarted = !!latestDiceEvent;
+  const canRepostRound =
+    !diceThrown
+    && !diceStarted
+    && !!repostEndsAt
+    && new Date(repostEndsAt).getTime() > now.getTime();
 
   let continuation: { previousRoundId: string; mine: boolean; deadline: string } | null = null;
   if (lastFinished?.bankerId && lastFinished.configSnapshot && round) {
@@ -277,6 +312,9 @@ async function buildRoomState(roomId: string, userId: string) {
           })),
           claimedCount: round.claims.length,
           diceThrown,
+          diceStarted,
+          repostEndsAt,
+          canRepostRound,
           participantCount: round.packet?.participantCount ?? null,
           /** 发包完成后才暴露，前端据此弹出可领红包：TNG 需有链接，内部红包直接可领 */
           packetId:
@@ -322,6 +360,7 @@ async function buildRoomState(roomId: string, userId: string) {
       bidDurationSeconds: settings.round.bidDurationSeconds,
       betDurationSeconds: settings.round.betDurationSeconds,
       claimDurationSeconds: settings.round.claimDurationSeconds,
+      repostWindowSeconds: settings.round.repostWindowSeconds,
       bankerBidMinCents: settings.round.bankerBidMinCents,
       bankerBidMaxCents: settings.round.bankerBidMaxCents,
       autoTailPacketEnabled: settings.round.autoTailPacketEnabled ?? false,
@@ -917,6 +956,15 @@ export async function gameRoomRoutes(app: FastifyInstance) {
             reply({ type: 'chat_error', message: result.message });
             return;
           }
+          await broadcastToRoomCluster(id, {
+            type: 'activity',
+            kind: 'dice',
+            user: {
+              uid: client.uid,
+              nickname: client.nickname,
+              avatarUrl: client.avatarUrl,
+            },
+          });
           return;
         }
         // 连接建立时已验明身份；昵称/头像变更会通过 profile_update 同步并更新 client。
@@ -983,11 +1031,13 @@ export async function gameRoomRoutes(app: FastifyInstance) {
               return;
             }
             if (result.kind === 'ok') {
+              const gameAction = confirmedChatGameAction(result);
               appendChat(id, {
                 type: 'TEXT',
                 content: result.echo,
                 from: senderProfile,
                 requestId,
+                ...(gameAction ? { gameAction } : {}),
               });
               if (result.action === 'bid') {
                 const liveRound = await currentRoundForRoom(id);

@@ -9,6 +9,7 @@ const fixture = vi.hoisted(() => {
       bidDurationSeconds: 30,
       betDurationSeconds: 50,
       claimDurationSeconds: 30,
+      repostWindowSeconds: 8,
       tailPackerBankerName: '庄家尾包',
       tailPackerPlayerName: '闲家尾包',
     },
@@ -40,7 +41,7 @@ const fixture = vi.hoisted(() => {
     betStart: 'bet-start {{banker}} {{pot}} {{betSeconds}}',
     betCountdown: 'bet-countdown {{remaining}}',
     sealedSummary: 'sealed-summary {{banker}} {{betList}}',
-    dicePrompt: 'dice-prompt {{banker}}',
+    dicePrompt: 'dice-prompt {{banker}} {{repostWindow}}',
     sealed: 'sealed-wait',
     claimStart: 'claim-start {{claimSeconds}}',
     claimWarning: 'claim-warning {{claimSeconds}}',
@@ -119,6 +120,10 @@ describe('阶段机器人播报顺序', () => {
       'sealed-summary',
       'dice-prompt',
     ]);
+    expect(messages[2]).toMatchObject({
+      kind: 'text',
+      content: 'dice-prompt @庄家 8',
+    });
   });
 
   it('完成播报为成绩单分段提供稳定语义键', async () => {

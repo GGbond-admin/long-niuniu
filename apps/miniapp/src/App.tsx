@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import {
   Navigate,
   Route,
@@ -87,6 +87,79 @@ function DefaultGameRedirect({
       ? `/game/${roomId}`
       : `/game/${roomId}/${destination}`;
   return <Navigate to={path} replace />;
+}
+
+function RoomFullscreenOverlay({
+  label,
+  children,
+}: {
+  label: string;
+  children: ReactNode;
+}) {
+  const overlayRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const previousFocus =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const focusableSelector =
+      'button:not([disabled]), input:not([disabled]), [href], [tabindex]:not([tabindex="-1"])';
+    const trapFocus = (event: KeyboardEvent) => {
+      if (event.key !== 'Tab' || document.querySelector('.payment-pin-sheet')) return;
+      const overlay = overlayRef.current;
+      if (!overlay) return;
+      const controls = Array.from(
+        overlay.querySelectorAll<HTMLElement>(focusableSelector),
+      );
+      if (!controls.length) {
+        event.preventDefault();
+        overlay.focus({ preventScroll: true });
+        return;
+      }
+      const first = controls[0]!;
+      const last = controls[controls.length - 1]!;
+      const active = document.activeElement;
+      if (event.shiftKey && (active === first || !overlay.contains(active))) {
+        event.preventDefault();
+        last.focus({ preventScroll: true });
+      } else if (!event.shiftKey && (active === last || !overlay.contains(active))) {
+        event.preventDefault();
+        first.focus({ preventScroll: true });
+      }
+    };
+    document.addEventListener('keydown', trapFocus);
+    const focusFrame = window.requestAnimationFrame(() => {
+      const firstControl =
+        overlayRef.current?.querySelector<HTMLElement>(focusableSelector);
+      (firstControl ?? overlayRef.current)?.focus({ preventScroll: true });
+    });
+    return () => {
+      window.cancelAnimationFrame(focusFrame);
+      document.removeEventListener('keydown', trapFocus);
+      window.requestAnimationFrame(() => {
+        const fallback = document.querySelector<HTMLElement>(
+          '.game-room:not([inert]) button[aria-label="更多"]',
+        );
+        const target =
+          previousFocus?.isConnected && previousFocus !== document.body
+            ? previousFocus
+            : fallback;
+        target?.focus({ preventScroll: true });
+      });
+    };
+  }, []);
+
+  return (
+    <div
+      ref={overlayRef}
+      className="room-fullscreen-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-label={label}
+      tabIndex={-1}
+    >
+      {children}
+    </div>
+  );
 }
 
 export default function App() {
@@ -464,9 +537,33 @@ export default function App() {
           />
           <Route path="/game/:roomId/rewards" element={<Rewards />} />
           <Route path="/game/:roomId/leaderboards" element={<Leaderboards />} />
+          <Route
+            path="/game/:roomId/send-packet"
+            element={
+              <RoomFullscreenOverlay label="发红包">
+                <SendRedPacket
+                  paymentPinSet={session.security.paymentPinSet}
+                  ownerUid={session.uid}
+                />
+              </RoomFullscreenOverlay>
+            }
+          />
+          <Route
+            path="/game/:roomId/tip"
+            element={
+              <RoomFullscreenOverlay label="打赏">
+                <TipSupport
+                  ownerUid={session.uid}
+                  paymentPinSet={session.security.paymentPinSet}
+                  nickname={session.nickname}
+                  avatarUrl={session.avatarUrl}
+                />
+              </RoomFullscreenOverlay>
+            }
+          />
         </Routes>
       )}
-      <SupportInboxToast />
+      {!backgroundLocation && <SupportInboxToast />}
     </>
   );
 }

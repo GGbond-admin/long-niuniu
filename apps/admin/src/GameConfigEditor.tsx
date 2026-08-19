@@ -452,6 +452,23 @@ function RoundForm({
             }
           />
         </Field>
+        <Field
+          label="封盘重推确认窗口"
+          hint="庄家可发送 /重推 取消整局、退款并重新开局的秒数"
+        >
+          <input
+            type="number"
+            min={3}
+            max={30}
+            value={value.repostWindowSeconds ?? ''}
+            onChange={(event) =>
+              onChange({
+                ...value,
+                repostWindowSeconds: Number(event.target.value),
+              })
+            }
+          />
+        </Field>
       </Section>
       <Section title="竞标金额范围">
         <Field
@@ -490,7 +507,7 @@ function RoundForm({
       <Section title="发包方式">
         <Field
           label="红包渠道"
-          hint="TNG=运营粘贴链接、玩家跳转外部抢包；内部红包=投骰后小助手自动发包，玩家群内直抢并即时入余额"
+          hint="TNG=运营粘贴链接、玩家跳转外部抢包；系统红包=投骰后由至尊牛牛小助手自动发包，玩家群内直抢并即时入余额"
         >
           <select
             value={value.packetChannel === 'INTERNAL' ? 'INTERNAL' : 'TNG'}
@@ -499,7 +516,7 @@ function RoundForm({
             }
           >
             <option value="TNG">TNG 链接</option>
-            <option value="INTERNAL">内部红包（小助手直发）</option>
+            <option value="INTERNAL">系统红包（至尊牛牛小助手）</option>
           </select>
         </Field>
       </Section>
@@ -894,6 +911,10 @@ function serializeConfig(key: string, draft: Row): Row {
       continuationWindowSeconds: intOrThrow(
         String(draft.continuationWindowSeconds ?? ''),
         '续庄窗口',
+      ),
+      repostWindowSeconds: intOrThrow(
+        String(draft.repostWindowSeconds ?? ''),
+        '封盘重推确认窗口',
       ),
       bankerBidMinCents:
         typeof draft.bankerBidMinCents === 'string'

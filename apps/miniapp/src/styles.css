@@ -5740,15 +5740,17 @@ img.feed-assistant-avatar {
   cursor: default;
 }
 .wx-rp.opened {
-  background: linear-gradient(180deg, #b0b0b0 0%, #8f8f8f 62%, #7a7a7a 100%);
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
-  filter: grayscale(0.15);
+  background: linear-gradient(180deg, #ff554a 0%, #ff4d43 68%, #f3473e 100%);
+  box-shadow:
+    0 12px 30px rgba(76, 12, 9, 0.22),
+    inset 0 1px 0 rgba(255, 255, 255, 0.15);
+  filter: none;
 }
 .wx-rp-niuniu {
   background: linear-gradient(180deg, #ff554a 0%, #ff4d43 68%, #f3473e 100%);
 }
 .wx-rp-niuniu.opened {
-  background: linear-gradient(180deg, #b0b0b0 0%, #8f8f8f 62%, #7a7a7a 100%);
+  background: linear-gradient(180deg, #ff554a 0%, #ff4d43 68%, #f3473e 100%);
 }
 .wx-rp-body {
   position: absolute;
@@ -5769,8 +5771,8 @@ img.feed-assistant-avatar {
   pointer-events: none;
 }
 .wx-rp.opened .wx-rp-body::after {
-  border-bottom-color: rgba(70, 70, 70, 0.35);
-  box-shadow: 0 2px 2px rgba(40, 40, 40, 0.12);
+  border-bottom-color: rgba(132, 34, 27, 0.32);
+  box-shadow: 0 2px 2px rgba(121, 28, 23, 0.12);
 }
 /* 封口圆章 */
 .wx-rp-icon {
@@ -5798,7 +5800,7 @@ img.feed-assistant-avatar {
   font: 500 27px/1 'Noto Serif SC', 'Songti SC', serif;
 }
 .wx-rp.opened .wx-rp-icon {
-  display: none;
+  display: block;
 }
 .wx-rp-copy {
   position: absolute;
@@ -5810,7 +5812,7 @@ img.feed-assistant-avatar {
   text-align: center;
 }
 .wx-rp.opened .wx-rp-copy {
-  top: 34%;
+  top: 31%;
 }
 .wx-rp-copy strong {
   display: block;
@@ -5824,7 +5826,7 @@ img.feed-assistant-avatar {
   white-space: nowrap;
 }
 .wx-rp.opened .wx-rp-copy strong {
-  color: #f2f2f2;
+  color: #f6d493;
 }
 .wx-rp-copy small {
   display: block;
@@ -5835,7 +5837,7 @@ img.feed-assistant-avatar {
   line-height: 1.3;
 }
 .wx-rp.opened .wx-rp-copy small {
-  color: rgba(255, 255, 255, 0.78);
+  color: rgba(255, 231, 183, 0.68);
 }
 /* 左下角仅标注红包类型 */
 .wx-rp-foot {
@@ -5854,7 +5856,7 @@ img.feed-assistant-avatar {
   letter-spacing: 0.06em;
 }
 .wx-rp.opened .wx-rp-foot {
-  color: rgba(255, 255, 255, 0.72);
+  color: rgba(255, 230, 180, 0.86);
 }
 .wx-rp-foot .wx-rp-brand {
   display: block;
@@ -5862,6 +5864,483 @@ img.feed-assistant-avatar {
 .wx-rp-detail,
 .wx-rp-top {
   display: none;
+}
+
+/* 红包统一入口：聊天卡片只负责打开封面，领取、TNG 跳转和详情均在弹窗内完成 */
+.wx-rp-dialog {
+  position: fixed;
+  inset: 0;
+  z-index: 2200;
+  display: grid;
+  place-items: center;
+  padding: max(24px, env(safe-area-inset-top)) 20px max(24px, env(safe-area-inset-bottom));
+  overflow: hidden;
+  background: rgba(3, 3, 5, 0.76);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  animation: wx-rp-dialog-fade 0.18s ease both;
+}
+.wx-rp-dialog-stack {
+  width: min(320px, calc(100vw - 40px));
+  display: grid;
+  justify-items: center;
+  gap: 18px;
+}
+.wx-rp-dialog-panel {
+  position: relative;
+  isolation: isolate;
+  width: 100%;
+  height: min(450px, calc(100dvh - 126px));
+  min-height: 400px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid rgba(255, 212, 151, 0.15);
+  border-radius: 15px;
+  color: #fff1d8;
+  background:
+    radial-gradient(110% 72% at 50% 0%, rgba(255, 126, 94, 0.58), transparent 60%),
+    linear-gradient(160deg, #f65142 0%, #e83b31 54%, #d42f28 100%);
+  box-shadow:
+    0 28px 74px rgba(0, 0, 0, 0.56),
+    0 4px 18px rgba(125, 18, 12, 0.28),
+    inset 0 1px 0 rgba(255, 255, 255, 0.16);
+  animation: wx-rp-dialog-pop 0.24s cubic-bezier(0.2, 0.82, 0.28, 1.08) both;
+}
+.wx-rp-dialog-panel::before {
+  content: '';
+  position: absolute;
+  z-index: -1;
+  inset: 0;
+  opacity: 0.28;
+  background-image:
+    linear-gradient(115deg, transparent 0 46%, rgba(255, 255, 255, 0.08) 47%, transparent 49%),
+    radial-gradient(circle at 18% 20%, rgba(255, 229, 179, 0.2) 0 1px, transparent 1.5px);
+  background-size: 100% 100%, 24px 24px;
+  pointer-events: none;
+}
+.wx-rp-dialog-flap {
+  position: absolute;
+  z-index: 0;
+  top: 55%;
+  left: -12%;
+  width: 124%;
+  height: 34%;
+  border: 1px solid rgba(111, 17, 13, 0.18);
+  border-top: 0;
+  border-radius: 0 0 52% 52%;
+  background: linear-gradient(180deg, rgba(249, 74, 61, 0.94), rgba(218, 47, 39, 0.98));
+  box-shadow:
+    0 12px 18px rgba(100, 12, 9, 0.16),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  pointer-events: none;
+}
+.wx-rp-dialog-sender {
+  position: relative;
+  z-index: 2;
+  min-height: 66px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  padding: 22px 24px 8px;
+  color: rgba(255, 238, 207, 0.82);
+  font-size: 12px;
+  line-height: 1.3;
+}
+.wx-rp-dialog-sender > span {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+.wx-rp-dialog-sender b {
+  max-width: 116px;
+  overflow: hidden;
+  color: #fff0cf;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wx-rp-dialog-sender .wx-rp-sender-avatar {
+  width: 24px;
+  height: 24px;
+  flex-basis: 24px;
+  border-radius: 50%;
+}
+.wx-rp-dialog-sender .wx-rp-sender-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.wx-rp-dialog-sender > em {
+  flex: 0 0 auto;
+  padding: 3px 6px;
+  border: 1px solid rgba(255, 231, 184, 0.25);
+  border-radius: 999px;
+  color: #ffe4a5;
+  background: rgba(92, 18, 12, 0.16);
+  font-size: 9px;
+  font-style: normal;
+  font-weight: 750;
+  letter-spacing: 0.06em;
+}
+.wx-rp-dialog-content {
+  position: relative;
+  z-index: 2;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 13px;
+  padding: 4px 24px 32px;
+  text-align: center;
+}
+.wx-rp-dialog-greeting {
+  max-width: 250px;
+  color: #fff0d1;
+  font: 650 20px/1.45 'Noto Serif SC', 'Songti SC', serif;
+  letter-spacing: 0.035em;
+  text-wrap: balance;
+  transition: opacity 0.22s ease, transform 0.22s ease;
+}
+.wx-rp-dialog-greeting.is-opening {
+  opacity: 0.78;
+  transform: translateY(-2px);
+}
+.wx-rp-dialog-open-stage {
+  position: relative;
+  width: 116px;
+  height: 96px;
+  display: grid;
+  place-items: center;
+  isolation: isolate;
+  perspective: 520px;
+}
+.wx-rp-dialog-open-stage::before,
+.wx-rp-dialog-open-stage::after {
+  content: '';
+  position: absolute;
+  z-index: 0;
+  border-radius: 50%;
+  pointer-events: none;
+  opacity: 0;
+}
+.wx-rp-dialog-open-stage::before {
+  inset: 8px 18px;
+  border: 1px solid rgba(255, 224, 145, 0.58);
+}
+.wx-rp-dialog-open-stage::after {
+  inset: 17px 27px;
+  background: radial-gradient(
+    circle,
+    rgba(255, 225, 139, 0.54) 0%,
+    rgba(255, 207, 104, 0.18) 48%,
+    transparent 74%
+  );
+  filter: blur(5px);
+}
+.wx-rp-dialog-open-stage.is-opening::before {
+  animation: wx-rp-dialog-open-ring 0.9s ease-out infinite;
+}
+.wx-rp-dialog-open-stage.is-opening::after {
+  animation: wx-rp-dialog-open-glow 0.9s ease-in-out infinite;
+}
+.wx-rp-dialog-open {
+  position: relative;
+  z-index: 1;
+  width: 80px;
+  height: 80px;
+  margin: 0;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border: 2px solid rgba(255, 245, 211, 0.7);
+  border-radius: 50%;
+  color: #5e3a1e;
+  background:
+    radial-gradient(circle at 34% 24%, #fff8db 0 8%, transparent 9%),
+    linear-gradient(145deg, #ffeab5 0%, #f5c86e 57%, #d79532 100%);
+  box-shadow:
+    inset 0 3px 4px rgba(255, 255, 255, 0.7),
+    inset 0 -6px 10px rgba(134, 75, 18, 0.24),
+    0 10px 24px rgba(91, 20, 11, 0.34);
+  font: 700 32px/1 'Noto Serif SC', 'Songti SC', serif;
+  cursor: pointer;
+  transform-style: preserve-3d;
+  will-change: transform;
+  -webkit-tap-highlight-color: transparent;
+  transition: transform 0.14s ease, filter 0.14s ease;
+}
+.wx-rp-dialog-open > span {
+  position: relative;
+  z-index: 2;
+  transform: translateZ(2px);
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.38);
+}
+.wx-rp-dialog-open::before {
+  content: '';
+  position: absolute;
+  inset: -22% 48% -22% -48%;
+  z-index: 1;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(255, 255, 255, 0.6),
+    transparent
+  );
+  transform: translateX(-130%) rotate(16deg);
+}
+.wx-rp-dialog-open::after {
+  content: '';
+  position: absolute;
+  inset: 7px;
+  border: 1px solid rgba(102, 60, 22, 0.2);
+  border-radius: inherit;
+}
+.wx-rp-dialog-open:active {
+  transform: scale(0.92) rotateY(18deg);
+  filter: brightness(1.04);
+}
+.wx-rp-dialog-open:disabled {
+  cursor: wait;
+}
+.wx-rp-dialog-open.is-opening {
+  filter: brightness(1.07) saturate(1.06);
+  animation: wx-rp-dialog-open-turn 0.9s cubic-bezier(0.42, 0, 0.24, 1) infinite;
+}
+.wx-rp-dialog-open.is-opening::before {
+  animation: wx-rp-dialog-open-shine 0.9s ease-in-out infinite;
+}
+.wx-rp-dialog-content > small {
+  color: rgba(255, 237, 203, 0.68);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.wx-rp-dialog-received {
+  padding: 4px 9px;
+  border: 1px solid rgba(255, 231, 184, 0.2);
+  border-radius: 999px;
+  color: rgba(255, 234, 194, 0.74);
+  background: rgba(105, 19, 13, 0.12);
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+  animation: wx-rp-dialog-received-in 0.32s ease-out both;
+}
+.wx-rp-dialog-status {
+  max-width: 270px;
+  color: #fff3dc;
+  font: 650 23px/1.38 'Noto Serif SC', 'Songti SC', serif;
+  letter-spacing: 0.025em;
+  text-wrap: balance;
+}
+.wx-rp-dialog-status.wx-rp-dialog-amount {
+  position: relative;
+  isolation: isolate;
+  color: #ffe29d;
+  font: 700 36px/1.1 'Noto Sans SC', 'PingFang SC', sans-serif;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+  text-shadow:
+    0 2px 0 rgba(111, 50, 15, 0.25),
+    0 0 24px rgba(255, 218, 127, 0.4);
+  animation: wx-rp-dialog-amount-in 0.52s cubic-bezier(0.2, 0.82, 0.25, 1.18) both;
+}
+.wx-rp-dialog-status.wx-rp-dialog-amount::before {
+  content: '';
+  position: absolute;
+  z-index: -1;
+  top: 50%;
+  left: 50%;
+  width: 190px;
+  height: 94px;
+  border-radius: 50%;
+  background: radial-gradient(
+    ellipse,
+    rgba(255, 222, 138, 0.34) 0%,
+    rgba(255, 207, 100, 0.12) 48%,
+    transparent 72%
+  );
+  transform: translate(-50%, -50%) scale(0.55);
+  animation: wx-rp-dialog-amount-glow 0.72s ease-out both;
+}
+.wx-rp-dialog-content > p {
+  max-width: 230px;
+  margin: 3px 0 0;
+  overflow: hidden;
+  color: rgba(255, 235, 198, 0.52);
+  font-size: 12px;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wx-rp-dialog-loader {
+  width: 46px;
+  height: 46px;
+  border: 3px solid rgba(255, 232, 187, 0.2);
+  border-top-color: #ffe6aa;
+  border-radius: 50%;
+  animation: wx-rp-dialog-spin 0.78s linear infinite;
+}
+.wx-rp-dialog-footer {
+  position: relative;
+  z-index: 3;
+  flex: 0 0 auto;
+  min-height: 70px;
+  display: grid;
+  align-content: center;
+  padding: 5px 22px 7px;
+  background:
+    linear-gradient(180deg, rgba(168, 26, 20, 0), rgba(165, 27, 21, 0.24) 32%),
+    rgba(181, 35, 27, 0.2);
+}
+.wx-rp-dialog-secondary {
+  min-height: 38px;
+  margin-bottom: 1px;
+  border: 1px solid rgba(255, 228, 174, 0.24);
+  border-radius: 999px;
+  color: #ffe5b2;
+  background: rgba(100, 14, 10, 0.12);
+  font-size: 12px;
+  font-weight: 650;
+}
+.wx-rp-dialog-details {
+  min-height: 48px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  border: 0;
+  color: rgba(255, 231, 191, 0.9);
+  background: transparent;
+  font-size: 13px;
+  font-weight: 500;
+}
+.wx-rp-dialog-details span {
+  margin-top: -1px;
+  font-size: 19px;
+  font-weight: 300;
+}
+.wx-rp-dialog-details:disabled {
+  opacity: 0.4;
+}
+.wx-rp-dialog-close {
+  width: 48px;
+  height: 48px;
+  display: grid;
+  place-items: center;
+  padding: 0 0 3px;
+  border: 1px solid rgba(255, 255, 255, 0.62);
+  border-radius: 50%;
+  color: rgba(255, 255, 255, 0.9);
+  background: rgba(9, 9, 11, 0.14);
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.22);
+  font: 300 31px/1 sans-serif;
+  transition: transform 0.14s ease, background 0.14s ease;
+}
+.wx-rp-dialog-close:active {
+  transform: scale(0.92);
+  background: rgba(255, 255, 255, 0.08);
+}
+.wx-rp-dialog-close:disabled {
+  opacity: 0.38;
+}
+@keyframes wx-rp-dialog-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes wx-rp-dialog-pop {
+  from { opacity: 0; transform: translateY(16px) scale(0.96); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+@keyframes wx-rp-dialog-spin {
+  to { transform: rotate(360deg); }
+}
+@keyframes wx-rp-dialog-open-turn {
+  0% { transform: rotateY(0deg) scale(1); }
+  38% { transform: rotateY(168deg) scale(1.08); }
+  62% { transform: rotateY(220deg) scale(1.08); }
+  100% { transform: rotateY(360deg) scale(1); }
+}
+@keyframes wx-rp-dialog-open-ring {
+  0% { opacity: 0; transform: scale(0.72); }
+  34% { opacity: 0.78; }
+  100% { opacity: 0; transform: scale(1.32); }
+}
+@keyframes wx-rp-dialog-open-glow {
+  0%, 100% { opacity: 0.28; transform: scale(0.86); }
+  50% { opacity: 0.9; transform: scale(1.18); }
+}
+@keyframes wx-rp-dialog-open-shine {
+  0%, 18% { transform: translateX(-130%) rotate(16deg); }
+  72%, 100% { transform: translateX(235%) rotate(16deg); }
+}
+@keyframes wx-rp-dialog-received-in {
+  from { opacity: 0; transform: translateY(6px) scale(0.9); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+@keyframes wx-rp-dialog-amount-in {
+  0% { opacity: 0; filter: blur(4px); transform: translateY(12px) scale(0.58); }
+  64% { opacity: 1; filter: blur(0); transform: translateY(-2px) scale(1.1); }
+  100% { opacity: 1; filter: blur(0); transform: translateY(0) scale(1); }
+}
+@keyframes wx-rp-dialog-amount-glow {
+  0% { opacity: 0; transform: translate(-50%, -50%) scale(0.55); }
+  46% { opacity: 1; }
+  100% { opacity: 0.62; transform: translate(-50%, -50%) scale(1.12); }
+}
+@media (max-height: 620px) {
+  .wx-rp-dialog {
+    padding-top: 14px;
+    padding-bottom: 14px;
+  }
+  .wx-rp-dialog-stack {
+    gap: 12px;
+  }
+  .wx-rp-dialog-panel {
+    height: calc(100dvh - 94px);
+    min-height: 340px;
+  }
+  .wx-rp-dialog-sender {
+    min-height: 54px;
+    padding-top: 14px;
+  }
+  .wx-rp-dialog-content {
+    gap: 9px;
+    padding-bottom: 20px;
+  }
+  .wx-rp-dialog-open {
+    width: 68px;
+    height: 68px;
+    font-size: 28px;
+  }
+  .wx-rp-dialog-open-stage {
+    width: 104px;
+    height: 82px;
+  }
+  .wx-rp-dialog-close {
+    width: 42px;
+    height: 42px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .wx-rp-dialog,
+  .wx-rp-dialog-panel,
+  .wx-rp-dialog-loader,
+  .wx-rp-dialog-open-stage::before,
+  .wx-rp-dialog-open-stage::after,
+  .wx-rp-dialog-open,
+  .wx-rp-dialog-open::before,
+  .wx-rp-dialog-received,
+  .wx-rp-dialog-amount,
+  .wx-rp-dialog-amount::before {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
 }
 
 /* 群内转账气泡：微信转账样式（缩小版） */
@@ -7561,6 +8040,27 @@ img.feed-assistant-avatar {
 .plus-icon.filled svg {
   width: 26px;
   height: 26px;
+}
+
+/* 房内全屏功能保持 GameRoom 挂载，避免关闭并重建实时 WebSocket。 */
+.room-fullscreen-overlay {
+  position: fixed;
+  z-index: 200;
+  top: var(--app-viewport-offset-top, 0px);
+  right: 0;
+  left: 0;
+  width: min(100%, 480px);
+  height: var(--app-viewport-height, 100dvh);
+  margin-inline: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  background: #0e0e10;
+}
+.room-fullscreen-overlay > .cash-page,
+.room-fullscreen-overlay > .tip-page {
+  min-height: 100%;
 }
 
 /* ——— 发红包 / 转账：克制极简 ——— */

@@ -41,6 +41,8 @@ export interface RoomObserver {
   role: string;
 }
 
+export type RoomChatGameAction = 'bid' | 'bet' | 'all_in' | 'withdraw';
+
 export interface RoomChatMessage {
   id: string;
   /**
@@ -65,6 +67,8 @@ export interface RoomChatMessage {
   from: { uid: string; nickname: string; avatarUrl?: string | null } | null;
   /** 玩家端发送时的短期关联 ID；用于确认回显，不参与消息幂等。 */
   requestId?: string;
+  /** 仅真实执行成功的游戏指令携带；禁止前端仅凭数字文本猜测为下注。 */
+  gameAction?: RoomChatGameAction;
   at: string;
 }
 

@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { api } from '../api';
 import { goBack } from '../lib/nav';
@@ -44,7 +44,15 @@ export default function TipSupport({
   const [error, setError] = useState('');
   const [pinOpen, setPinOpen] = useState(false);
   const [pinError, setPinError] = useState('');
+  const mountedRef = useRef(true);
   const previewName = nickname?.trim() || `玩家${ownerUid.slice(-4)}`;
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   const displayAmount = useMemo(() => {
     const n = Number(amount);
@@ -75,19 +83,29 @@ export default function TipSupport({
       const requestId = pendingRequestId(requestKey, ownerUid);
       const receipt = await api.tipSupport(roomId, amount, requestId, paymentPin);
       completeRequest(requestKey, requestId, ownerUid);
+      if (!mountedRef.current) return;
       setPinOpen(false);
-      navigate(`/game/${roomId}/play`, {
-        replace: true,
-        state: {
-          tipNotice: {
-            nickname: receipt.nickname,
-            amountCents: receipt.amountCents,
-            message: receipt.message,
-            avatarUrl: receipt.avatarUrl,
+      const openedOverRoom = Boolean(
+        (location.state as { backgroundLocation?: unknown } | null)?.backgroundLocation,
+      );
+      if (openedOverRoom) {
+        // 群聊仍挂载且会收到 tip_thanks；真实回退可移除覆盖层历史，避免 play→play。
+        navigate(-1);
+      } else {
+        navigate(`/game/${roomId}/play`, {
+          replace: true,
+          state: {
+            tipNotice: {
+              nickname: receipt.nickname,
+              amountCents: receipt.amountCents,
+              message: receipt.message,
+              avatarUrl: receipt.avatarUrl,
+            },
           },
-        },
-      });
+        });
+      }
     } catch (e) {
+      if (!mountedRef.current) return;
       const code = (e as Error & { code?: string }).code ?? (e as Error).message;
       if (code === 'PAYMENT_PIN_REQUIRED') {
         setPinOpen(false);
@@ -103,7 +121,7 @@ export default function TipSupport({
       setPinOpen(false);
       setError(TIP_ERROR[code] ?? code ?? '转账失败');
     } finally {
-      setBusy(false);
+      if (mountedRef.current) setBusy(false);
     }
   }
 

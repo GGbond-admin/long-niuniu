@@ -8,19 +8,41 @@ const memory = vi.hoisted(() => ({
     roundId: string;
     type: string;
     payload?: unknown;
+    createdAt?: Date;
   }>,
+  cancelRound: vi.fn(),
+  ensureWaitingRound: vi.fn(),
+  startRound: vi.fn(),
+  transition: vi.fn(),
 }));
 
 vi.mock('../lib/prisma.js', () => ({
   prisma: {
     roundEvent: {
-      findFirst: vi.fn(async ({ where }: { where: { roundId: string; type: string } }) =>
-        memory.events.find(
+      findFirst: vi.fn(async ({
+        where,
+        orderBy,
+      }: {
+        where: { roundId: string; type: string };
+        orderBy?:
+          | { createdAt?: 'asc' | 'desc' }
+          | Array<{ createdAt?: 'asc' | 'desc'; id?: 'asc' | 'desc' }>;
+      }) => {
+        const rows = memory.events.filter(
           (event) => event.roundId === where.roundId && event.type === where.type,
-        ) ?? null,
-      ),
+        );
+        const createdAtOrder = Array.isArray(orderBy)
+          ? orderBy.find((entry) => entry.createdAt)?.createdAt
+          : orderBy?.createdAt;
+        if (createdAtOrder === 'desc') rows.reverse();
+        return rows[0] ?? null;
+      }),
       create: vi.fn(async ({ data }: { data: Omit<(typeof memory.events)[number], 'id'> }) => {
-        const row = { id: `event-${memory.events.length + 1}`, ...data };
+        const row = {
+          id: `event-${memory.events.length + 1}`,
+          createdAt: new Date(),
+          ...data,
+        };
         memory.events.push(row);
         return row;
       }),
@@ -50,14 +72,24 @@ vi.mock('./game.js', () => ({
     phase: 'SENDING_PACKET',
     bankerId: 'banker-1',
   })),
-  cancelRound: vi.fn(),
+  cancelRound: memory.cancelRound,
+  ensureWaitingRound: memory.ensureWaitingRound,
+  startRound: memory.startRound,
   placeBankerBid: vi.fn(),
   placeBet: vi.fn(),
   withdrawBet: vi.fn(),
-  GameError: class GameError extends Error {},
+  GameError: class GameError extends Error {
+    code: string;
+    constructor(code: string) {
+      super(code);
+      this.code = code;
+    }
+  },
 }));
 
-vi.mock('./gameBus.js', () => ({ gameBus: { transition: vi.fn() } }));
+vi.mock('./gameBus.js', () => ({
+  gameBus: { transition: memory.transition },
+}));
 vi.mock('./gameSettings.js', () => ({
   getMessageTemplatesForRoom: vi.fn(async () => ({
     bankerDice: '【庄家开骰】 {{dice}}',
@@ -84,7 +116,11 @@ vi.mock('./roomHub.js', () => ({
   }),
 }));
 
-import { runBankerDiceCeremony } from './chatCommands.js';
+import {
+  confirmedChatGameAction,
+  handleRoomChatCommand,
+  runBankerDiceCeremony,
+} from './chatCommands.js';
 
 async function runCeremony() {
   const pending = runBankerDiceCeremony({ roomId: 'room-1', userId: 'banker-1' });
@@ -92,20 +128,48 @@ async function runCeremony() {
   return pending;
 }
 
-describe('庄家投骰仪式恢复与放行', () => {
+function repostWindow(endsAt: Date) {
+  memory.events.push({
+    id: 'repost-window',
+    roundId: 'round-1',
+    type: 'BANKER_REPOST_WINDOW',
+    payload: { endsAt: endsAt.toISOString(), seconds: 8 },
+    createdAt: new Date(),
+  });
+}
+
+describe('庄家投骰与整局重推', () => {
   beforeEach(() => {
     vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-19T05:00:00.000Z'));
     memory.assistantEnabled = true;
     memory.chats.length = 0;
     memory.events.length = 0;
+    repostWindow(new Date(Date.now() - 1));
+    memory.cancelRound.mockReset();
+    memory.cancelRound.mockResolvedValue({ phase: 'CANCELLED' });
+    memory.ensureWaitingRound.mockReset();
+    memory.ensureWaitingRound.mockResolvedValue({
+      id: 'round-2',
+      roomId: 'room-1',
+      phase: 'WAITING',
+    });
+    memory.startRound.mockReset();
+    memory.startRound.mockResolvedValue({
+      id: 'round-2',
+      roomId: 'room-1',
+      phase: 'BANKER_BID',
+    });
+    memory.transition.mockReset();
   });
 
-  it('复用中断前已落库的点数，完成文字后才标记可发包', async () => {
+  it('确认窗口结束后完成投骰，文字播报完成才标记可发包', async () => {
     memory.events.push({
       id: 'existing-dice',
       roundId: 'round-1',
       type: 'BANKER_DICE',
       payload: { dice: [2, 5, 6] },
+      createdAt: new Date(),
     });
 
     const result = await runCeremony();
@@ -142,26 +206,100 @@ describe('庄家投骰仪式恢复与放行', () => {
       roundId: 'round-1',
       type: 'BANKER_DICE',
       payload: { dice: [1, 2, 3] },
+      createdAt: new Date(),
     });
 
     const pending = runBankerDiceCeremony({ roomId: 'room-1', userId: 'banker-1' });
-
-    // 两颗间隔 1400ms：推进到第三颗已发出，但尚未到公布前停顿结束
     await vi.advanceTimersByTimeAsync(1_400);
-    expect(memory.chats.filter((m) => m.type === 'DICE')).toHaveLength(2);
-    expect(memory.chats.some((m) => m.type === 'SYSTEM')).toBe(false);
+    expect(memory.chats.filter((message) => message.type === 'DICE')).toHaveLength(2);
+    expect(memory.chats.some((message) => message.type === 'SYSTEM')).toBe(false);
 
     await vi.advanceTimersByTimeAsync(1_400);
-    expect(memory.chats.filter((m) => m.type === 'DICE')).toHaveLength(3);
-    expect(memory.chats.some((m) => m.type === 'SYSTEM')).toBe(false);
-
-    // 落地后再停 1500ms 才播报
+    expect(memory.chats.filter((message) => message.type === 'DICE')).toHaveLength(3);
     await vi.advanceTimersByTimeAsync(1_499);
-    expect(memory.chats.some((m) => m.type === 'SYSTEM')).toBe(false);
+    expect(memory.chats.some((message) => message.type === 'SYSTEM')).toBe(false);
 
     await vi.advanceTimersByTimeAsync(1);
-    const result = await pending;
-    expect(result).toMatchObject({ kind: 'ok' });
-    expect(memory.chats.some((m) => m.content.includes('【庄家开骰】'))).toBe(true);
+    await expect(pending).resolves.toMatchObject({ kind: 'ok' });
+    expect(memory.chats.some((message) => message.content.includes('【庄家开骰】'))).toBe(true);
+  });
+
+  it('封盘确认窗口内禁止提前投骰', async () => {
+    memory.events.length = 0;
+    repostWindow(new Date(Date.now() + 8_000));
+
+    await expect(runCeremony()).resolves.toEqual({
+      kind: 'error',
+      message: '封盘确认中，还剩 8 秒；如需取消退款并重开，请发送 /重推',
+    });
+    expect(memory.events.some((event) => event.type === 'BANKER_DICE')).toBe(false);
+  });
+
+  it('/重推会取消退款并立即开启下一局，不会重新投骰', async () => {
+    memory.events.length = 0;
+    repostWindow(new Date(Date.now() + 8_000));
+
+    const result = await handleRoomChatCommand({
+      roomId: 'room-1',
+      userId: 'banker-1',
+      content: '/重推',
+    });
+
+    expect(result).toEqual({ kind: 'ok', action: 'repost', echo: '/重推' });
+    expect(confirmedChatGameAction(result)).toBeUndefined();
+    expect(memory.cancelRound).toHaveBeenCalledWith('round-1', '庄家重推', 'banker-1');
+    expect(memory.ensureWaitingRound).toHaveBeenCalledWith('room-1');
+    expect(memory.startRound).toHaveBeenCalledWith('round-2');
+    expect(memory.transition).toHaveBeenNthCalledWith(1, {
+      roundId: 'round-1',
+      roomId: 'room-1',
+      from: 'SENDING_PACKET',
+      to: 'CANCELLED',
+    });
+    expect(memory.transition).toHaveBeenNthCalledWith(2, {
+      roundId: 'round-2',
+      roomId: 'room-1',
+      from: 'WAITING',
+      to: 'BANKER_BID',
+    });
+    expect(memory.events.some((event) => event.type === 'BANKER_DICE')).toBe(false);
+  });
+
+  it('重推窗口结束后不能取消本局', async () => {
+    const result = await handleRoomChatCommand({
+      roomId: 'room-1',
+      userId: 'banker-1',
+      content: '重推',
+    });
+
+    expect(result).toEqual({
+      kind: 'error',
+      message: '重推确认时间已结束，请继续完成庄家投骰',
+    });
+    expect(memory.cancelRound).not.toHaveBeenCalled();
+  });
+
+  it('已经开始投骰后不能再重推', async () => {
+    memory.events.length = 0;
+    repostWindow(new Date(Date.now() + 8_000));
+    memory.events.push({
+      id: 'started-dice',
+      roundId: 'round-1',
+      type: 'BANKER_DICE',
+      payload: { dice: [3, 3, 3] },
+      createdAt: new Date(),
+    });
+
+    await expect(
+      handleRoomChatCommand({
+        roomId: 'room-1',
+        userId: 'banker-1',
+        content: '/重推',
+      }),
+    ).resolves.toEqual({
+      kind: 'error',
+      message: '本局已经开始投骰，不能再重推',
+    });
+    expect(memory.cancelRound).not.toHaveBeenCalled();
   });
 });

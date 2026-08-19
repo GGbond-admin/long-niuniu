@@ -38,6 +38,7 @@ type ChatMsg = {
   content: string;
   from: { uid: string; nickname: string; avatarUrl?: string | null } | null;
   requestId?: string;
+  gameAction?: 'bid' | 'bet' | 'all_in' | 'withdraw';
   at: string;
 };
 
@@ -113,8 +114,8 @@ type FeedItem =
       avatar?: string | null;
       text: string;
       emoji?: boolean;
-      /** 纯数字/梭哈指令：自己的下注或竞庄，用蓝色高亮 */
-      amount?: boolean;
+      /** 仅服务端确认执行成功的竞庄/下注指令，用蓝色高亮。 */
+      gameAction?: 'bid' | 'bet' | 'all_in' | 'withdraw';
       time?: string;
     }
   | { kind: 'banner'; id: string; image: string; alt: string }
@@ -187,11 +188,25 @@ const BANNER_ALT: Record<string, string> = {
 };
 
 const ASSISTANT_AVATAR = '/avatars/assistant.jpg';
+const ASSISTANT_NAME = '至尊牛牛小助手';
 const GAME_PACKET_GREETING = '恭喜发财，大吉大利';
+const RED_PACKET_OPEN_ANIMATION_MS = 900;
 const LEADERBOARD_EMBLEM = '/game-ui/leaderboard-emblem-128.png';
 const REWARDS_EMBLEM = '/game-ui/rewards-emblem-128.png';
 /** 大群只渲染最近消息窗口，历史由后端持久化，重连时再取最近一段。 */
 const CLIENT_CHAT_LIMIT = 100;
+
+function waitForRedPacketOpeningAnimation() {
+  if (
+    typeof window === 'undefined'
+    || window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  ) {
+    return Promise.resolve();
+  }
+  return new Promise<void>((resolve) => {
+    window.setTimeout(resolve, RED_PACKET_OPEN_ANIMATION_MS);
+  });
+}
 
 const PACKET_ERROR_TEXT: Record<string, string> = {
   PACKET_EMPTY: '来晚啦，红包已被抢光',
@@ -245,14 +260,19 @@ function parseBetAcceptanceNotice(value: unknown): BetAcceptanceNotice | undefin
   };
 }
 
-function isAmountCommand(value: string) {
-  return /^(0|sh\s*\d+(?:\.\d{1,2})?|\d+(?:\.\d{1,2})?)$/i.test(value.trim());
-}
-
 const FEED_NEAR_BOTTOM_PX = 4;
 
 function isFeedNearBottom(el: HTMLElement) {
   return el.scrollHeight - el.scrollTop - el.clientHeight <= FEED_NEAR_BOTTOM_PX;
+}
+
+/** 只有旧列表最后仍存在的消息之后出现了新 ID，才算真正新增了底部消息。 */
+function hasAppendedFeedItems(previousIds: string[], nextIds: string[]): boolean {
+  for (let index = previousIds.length - 1; index >= 0; index -= 1) {
+    const survivingIndex = nextIds.lastIndexOf(previousIds[index]!);
+    if (survivingIndex >= 0) return survivingIndex < nextIds.length - 1;
+  }
+  return false;
 }
 
 type FeedViewportAnchor = Array<{ id: string; offset: number }>;
@@ -573,7 +593,7 @@ const phases: Record<string, string> = {
   WAITING: '等待开局',
   BANKER_BID: '庄家竞标中',
   BETTING: '闲家下注中',
-  SENDING_PACKET: '等待小助手发包',
+  SENDING_PACKET: '等待系统发包',
   CLAIMING: '红包领取中',
   CLAIM_EXPIRED: '认额核对中',
   SETTLING: '成绩计算中',
@@ -581,7 +601,7 @@ const phases: Record<string, string> = {
   CANCELLED: '本局取消',
 };
 
-/** 空闲/预览用完整一局演示：小助手播报、@庄家、对局红包 vs 玩家拼手气红包 */
+/** 空闲/预览用完整一局演示：系统播报、@庄家、对局红包 vs 玩家拼手气红包 */
 const DEMO_FEED: FeedItem[] = [
   {
     kind: 'system',
@@ -602,8 +622,8 @@ const DEMO_FEED: FeedItem[] = [
     kind: 'chat',
     id: 'demo-c2',
     mine: false,
-    name: '小美',
-    avatar: '/avatars/glam-01.jpg',
+    name: ASSISTANT_NAME,
+    avatar: ASSISTANT_AVATAR,
     text: '8800',
     time: '21:41',
   },
@@ -679,7 +699,7 @@ const DEMO_FEED: FeedItem[] = [
   {
     kind: 'system',
     id: 'demo-dice-prompt',
-    text: '🎲 请庄家 @小美 于 60 秒内投出 3 颗骰子。\n如需重开本局，可发送 /重推。',
+    text: '🎲 封盘后先保留重推确认时间。\n庄家发送 /重推＝取消整局、原路退款并重新开局；不重推则倒计时后投骰。',
     time: '21:42',
   },
   {
@@ -718,7 +738,7 @@ const DEMO_FEED: FeedItem[] = [
   {
     kind: 'system',
     id: 'demo-wait',
-    text: '⏳ 等待小助手在后台完成 TNG 发包\n请耐心等待，期间请勿退出本页面，以免错过抢包。',
+    text: '⏳ 等待系统在后台完成 TNG 发包\n请耐心等待，期间请勿退出本页面，以免错过抢包。',
     time: '21:42',
   },
   {
@@ -730,8 +750,8 @@ const DEMO_FEED: FeedItem[] = [
     claimable: true,
     demo: true,
     asChat: true,
-    name: '小助手',
-    avatar: ASSISTANT_AVATAR,
+    name: '小美',
+    avatar: '/avatars/glam-01.jpg',
   },
   {
     kind: 'banner',
@@ -742,7 +762,7 @@ const DEMO_FEED: FeedItem[] = [
   {
     kind: 'system',
     id: 'demo-claim-start',
-    text: '🧧 小助手已发包，开始抢包\n仅本局庄家与已下注闲家可领取。\n红包将在 30 秒后过期。',
+    text: '🧧 红包已发出，开始抢包\n仅本局庄家与已下注闲家可领取。\n红包将在 30 秒后过期。',
     time: '21:43',
   },
   {
@@ -766,7 +786,7 @@ const DEMO_FEED: FeedItem[] = [
   {
     kind: 'system',
     id: 'demo-next',
-    text: '📣 下一局准备中。上方为演示流程：竞标 → @宣布庄家 → 下注 → 小助手发包 → 抢包 → 结算。',
+    text: '📣 下一局准备中。上方为演示流程：竞标 → @宣布庄家 → 下注 → 系统发包 → 抢包 → 结算。',
     time: '21:44',
   },
 ];
@@ -1026,6 +1046,30 @@ type PlayLocationState = {
 };
 
 type GroupPacketDetail = Awaited<ReturnType<typeof api.groupPacket>>;
+type GamePacketDetail = Awaited<ReturnType<typeof api.gamePacket>>;
+
+type PacketDialogStatus =
+  | 'loading'
+  | 'claimable'
+  | 'opening'
+  | 'claimed'
+  | 'gone'
+  | 'waiting'
+  | 'ineligible'
+  | 'external'
+  | 'error';
+
+type PacketDialogState = {
+  packetId: string;
+  kind: 'game' | 'group';
+  channel?: 'TNG' | 'INTERNAL';
+  greeting: string;
+  sender: { name: string; avatar?: string | null };
+  status: PacketDialogStatus;
+  amountCents?: string;
+  externalUrl?: string;
+  error?: string;
+};
 
 export default function GameRoom({
   session,
@@ -1038,6 +1082,7 @@ export default function GameRoom({
   const navigate = useNavigate();
   const location = useLocation();
   const [searchParams] = useSearchParams();
+  const roomRootRef = useRef<HTMLDivElement>(null);
   /** 演示流仅供内部预览；地址加 ?demo=1 显式开启 */
   const showDemoFeed = searchParams.get('demo') === '1';
   const [state, setState] = useState<RoomState | null>(null);
@@ -1074,6 +1119,14 @@ export default function GameRoom({
   const packetClaimsRef = useRef<Record<string, string>>(packetClaims);
   const packetDetailCacheRef = useRef<Record<string, GroupPacketDetail>>({});
 
+  useLayoutEffect(() => {
+    const root = roomRootRef.current;
+    if (!root) return;
+    if (freezeFeed) root.setAttribute('inert', '');
+    else root.removeAttribute('inert');
+    return () => root.removeAttribute('inert');
+  }, [freezeFeed]);
+
   function updatePacketClaims(
     updater: (prev: Record<string, string>) => Record<string, string>,
   ) {
@@ -1106,11 +1159,7 @@ export default function GameRoom({
       return changed ? next : prev;
     });
   }
-  const [rpOpening, setRpOpening] = useState<null | {
-    packetId: string;
-    greeting: string;
-    sender: { name: string; avatar?: string | null };
-  }>(null);
+  const [packetDialog, setPacketDialog] = useState<PacketDialogState | null>(null);
   const [rpBusy, setRpBusy] = useState(false);
   const streamRef = useRef<HTMLDivElement>(null);
   const socketRef = useRef<WebSocket | null>(null);
@@ -1212,19 +1261,33 @@ export default function GameRoom({
     if (round.phase === 'BANKER_BID') return round.bidEndsAt ?? null;
     if (round.phase === 'BETTING') return round.betEndsAt ?? null;
     if (round.phase === 'CLAIMING') return round.claimEndsAt ?? null;
+    if (round.phase === 'SENDING_PACKET' && round.canRepostRound) {
+      return round.repostEndsAt ?? null;
+    }
     return null;
   })();
   const deadlineReached = useDeadlineReached(deadline);
   const bidWindowClosed = phase === 'BANKER_BID' && deadlineReached;
+  const repostWindowOpen =
+    phase === 'SENDING_PACKET'
+    && state?.round?.canRepostRound === true
+    && !deadlineReached;
   const continuation = state?.continuation;
   const packetDiceDone =
-    phase === 'SENDING_PACKET' && (!!state?.round?.diceThrown || diceSent);
+    phase === 'SENDING_PACKET'
+    && (
+      !!state?.round?.diceThrown
+      || state?.round?.diceStarted === true
+      || diceSent
+    );
   const phaseLabel =
     bidWindowClosed
       ? '竞标最终确认'
+      : repostWindowOpen
+        ? '封盘重推确认'
       : phase === 'SENDING_PACKET'
         ? packetDiceDone
-          ? '等待小助手发包'
+          ? '等待系统发包'
           : state?.me.isBanker
             ? '请完成庄家投骰'
             : '等待庄家投骰'
@@ -1232,8 +1295,11 @@ export default function GameRoom({
   const phaseAside =
     bidWindowClosed
       ? { value: '确认', label: '锁庄' }
-      : deadline
-        ? { value: <RemainingValue endsAt={deadline} />, label: '秒' }
+      : deadline && (phase !== 'SENDING_PACKET' || repostWindowOpen)
+        ? {
+            value: <RemainingValue endsAt={deadline} />,
+            label: phase === 'SENDING_PACKET' ? '重推' : '秒',
+          }
         : phase === 'SENDING_PACKET'
           ? packetDiceDone
             ? { value: '准备', label: '发包' }
@@ -1250,10 +1316,15 @@ export default function GameRoom({
       return `下注 ${rm(r.betMinCents)}~${rm(r.betMaxCents)} · 梭哈 ≥${rm(r.shMinCents)}（上限为余额）`;
     }
     if (phase === 'SENDING_PACKET') {
-      if (packetDiceDone) return '庄家投骰已完成，正在等待小助手发包';
+      if (repostWindowOpen) {
+        return state?.me.isBanker
+          ? '倒计时内发送 /重推，可取消整局、退款并重新开局'
+          : '封盘确认中；庄家可选择取消本局并退款重开';
+      }
+      if (packetDiceDone) return '庄家投骰已完成，正在等待系统发包';
       return state?.me.isBanker
-        ? '已封盘，请投骰；完成后由小助手发包'
-        : '已封盘，等待庄家投骰；完成后由小助手发包';
+        ? '重推确认已结束，请完成庄家投骰'
+        : '已封盘，等待庄家投骰；完成后由系统发包';
     }
     if (phase === 'CLAIMING') {
       const isParticipant =
@@ -1266,7 +1337,7 @@ export default function GameRoom({
     if (phase === 'SETTLING') return '核对完成，正在计算本局成绩 · 可正常发言';
     if (phase === 'WAITING' || !phase) return '凑齐人数后自动开局';
     return '系统自动结算';
-  }, [phase, state, packetDiceDone, bidWindowClosed]);
+  }, [phase, state, packetDiceDone, bidWindowClosed, repostWindowOpen]);
 
   const liveBusy =
     !!state?.round &&
@@ -1422,24 +1493,20 @@ export default function GameRoom({
           packetId: packet.id,
           title: packet.greeting,
           subtitle: canOpen
-            ? '点击领取'
+            ? '点击打开红包'
             : canView
-              ? `已抢到 RM ${rm(state!.me.claimedAmountCents!)}，点击查看`
-              : isCurrent && state?.round?.phase === 'CLAIM_EXPIRED'
-                ? '红包已过期，点击查看'
-                : isCurrent
-                  ? '未参与本局，无法领取'
-                  : isPublishingCurrentRound
-                    ? '红包已发出，等待开抢'
-                    : '红包已结束，点击查看',
+              ? `已领取 RM ${rm(state!.me.claimedAmountCents!)} · 点击查看`
+              : isPublishingCurrentRound
+                ? '红包已发出 · 点击查看'
+                : '点击查看红包',
           endsAt: canOpen ? deadline : null,
-          claimable: canOpen || canView,
+          claimable: canOpen,
           opened: canView || viewEnded,
           view: viewEnded,
           waiting: isPublishingCurrentRound,
           demo: false,
           asChat: true,
-          name: '小助手',
+          name: ASSISTANT_NAME,
           avatar: ASSISTANT_AVATAR,
         });
       } else if (msg.type === 'USER_PACKET') {
@@ -1476,7 +1543,7 @@ export default function GameRoom({
           avatar: msg.from?.avatarUrl,
           text: msg.content,
           emoji: msg.type === 'EMOJI',
-          amount: msg.type !== 'EMOJI' && isAmountCommand(msg.content),
+          gameAction: msg.type !== 'EMOJI' ? msg.gameAction : undefined,
           time: formatTime(msg.at),
         });
       }
@@ -1499,19 +1566,17 @@ export default function GameRoom({
         packetId: state.round.packetId,
         title: '恭喜发财，大吉大利',
         subtitle: canOpen
-          ? '点击领取'
+          ? '点击打开红包'
           : canView
-            ? `已抢到 RM ${rm(state.me.claimedAmountCents!)}，点击查看`
-            : state.round.phase === 'CLAIM_EXPIRED'
-              ? '红包已过期，点击查看'
-              : '未参与本局，无法领取',
+            ? `已领取 RM ${rm(state.me.claimedAmountCents!)} · 点击查看`
+            : '点击查看红包',
         endsAt: canOpen ? deadline : null,
-        claimable: canOpen || canView,
+        claimable: canOpen,
         opened: canView || viewEnded,
         view: viewEnded,
         demo: false,
         asChat: true,
-        name: '小助手',
+        name: ASSISTANT_NAME,
         avatar: ASSISTANT_AVATAR,
       };
       let claimStartIndex = -1;
@@ -2143,7 +2208,11 @@ export default function GameRoom({
         programmaticFeedScrollRef.current = false;
         lastScrollTopRef.current = nextScrollTop;
         lastScrollHeightRef.current = el.scrollHeight;
-        if (!stickToBottomRef.current) {
+        if (isFeedNearBottom(el)) {
+          stickToBottomRef.current = true;
+          feedViewportAnchorRef.current = null;
+          markNewBelow(false);
+        } else if (!stickToBottomRef.current) {
           feedViewportAnchorRef.current = captureFeedViewport(el, feedIdsRef.current);
         }
         return;
@@ -2194,7 +2263,13 @@ export default function GameRoom({
             () => { programmaticFeedScrollRef.current = true; },
           );
         }
-        feedViewportAnchorRef.current = captureFeedViewport(el, feedIdsRef.current);
+        if (isFeedNearBottom(el)) {
+          stickToBottomRef.current = true;
+          feedViewportAnchorRef.current = null;
+          markNewBelow(false);
+        } else {
+          feedViewportAnchorRef.current = captureFeedViewport(el, feedIdsRef.current);
+        }
       }
       lastScrollTopRef.current = el.scrollTop;
       lastScrollHeightRef.current = el.scrollHeight;
@@ -2223,7 +2298,12 @@ export default function GameRoom({
       el.scrollTop = restoredScrollTop;
       lastScrollTopRef.current = restoredScrollTop;
       lastScrollHeightRef.current = el.scrollHeight;
-      feedViewportAnchorRef.current = captureFeedViewport(el, feedIdsRef.current);
+      const restoredAtBottom = isFeedNearBottom(el);
+      stickToBottomRef.current = restoredAtBottom;
+      feedViewportAnchorRef.current = restoredAtBottom
+        ? null
+        : captureFeedViewport(el, feedIdsRef.current);
+      if (restoredAtBottom) markNewBelow(false);
       let settleFrame = 0;
       const restoreFrame = window.requestAnimationFrame(() => {
         settleFrame = window.requestAnimationFrame(() => {
@@ -2232,14 +2312,18 @@ export default function GameRoom({
             roomFeatureScrollTop,
             Math.max(0, el.scrollHeight - el.clientHeight),
           );
-          stickToBottomRef.current = false;
           if (Math.abs(el.scrollTop - settledScrollTop) > 0.5) {
             programmaticFeedScrollRef.current = true;
           }
           el.scrollTop = settledScrollTop;
           lastScrollTopRef.current = settledScrollTop;
           lastScrollHeightRef.current = el.scrollHeight;
-          feedViewportAnchorRef.current = captureFeedViewport(el, feedIdsRef.current);
+          const settledAtBottom = isFeedNearBottom(el);
+          stickToBottomRef.current = settledAtBottom;
+          feedViewportAnchorRef.current = settledAtBottom
+            ? null
+            : captureFeedViewport(el, feedIdsRef.current);
+          if (settledAtBottom) markNewBelow(false);
           roomFeatureScrollTopRef.current = null;
         });
       });
@@ -2271,6 +2355,10 @@ export default function GameRoom({
     const el = streamRef.current;
     if (!el) return;
     const nextFeedIds = feed.map((item) => item.id);
+    const appendedBelow = hasAppendedFeedItems(
+      feedIdsRef.current,
+      nextFeedIds,
+    );
 
     // 贴底时同步改 scrollTop，避免新消息先入画再 smooth 上滑，把正在看的内容顶走。
     if (!didInitialScrollRef.current || stickToBottomRef.current) {
@@ -2309,8 +2397,14 @@ export default function GameRoom({
     }
     lastScrollTopRef.current = el.scrollTop;
     lastScrollHeightRef.current = el.scrollHeight;
-    feedViewportAnchorRef.current = captureFeedViewport(el, nextFeedIds);
-    markNewBelow(true);
+    if (isFeedNearBottom(el)) {
+      stickToBottomRef.current = true;
+      feedViewportAnchorRef.current = null;
+      markNewBelow(false);
+    } else {
+      feedViewportAnchorRef.current = captureFeedViewport(el, nextFeedIds);
+      if (appendedBelow) markNewBelow(true);
+    }
   }, [loading, freezeFeed, feed.length, feedTailId, feedHeadId]);
 
   useEffect(() => {
@@ -2541,7 +2635,9 @@ export default function GameRoom({
     freezeCurrentFeedPosition();
   }
 
-  function openRoomFeature(feature: 'leaderboards' | 'rewards') {
+  function openRoomFeature(
+    feature: 'leaderboards' | 'rewards' | 'send-packet' | 'tip',
+  ) {
     if (!roomId) return;
     prepareRoomFeatureOpen();
     disposeChatInputFocus();
@@ -2565,7 +2661,16 @@ export default function GameRoom({
     });
   }
 
-  /** 首次领取才播放短动效；已领取/已结束的红包进入独立详情页。 */
+  function patchPacketDialog(
+    packetId: string,
+    patch: Partial<Omit<PacketDialogState, 'packetId'>>,
+  ) {
+    setPacketDialog((current) =>
+      current?.packetId === packetId ? { ...current, ...patch } : current,
+    );
+  }
+
+  /** 所有玩家红包先展示红包封面，再由用户明确选择领取或查看详情。 */
   async function openUserPacket(item: {
     packetId: string;
     greeting: string;
@@ -2576,148 +2681,163 @@ export default function GameRoom({
     if (rpBusy) return;
     freezeCurrentFeedPosition();
     const { packetId } = item;
-    const existing = packetClaims[packetId];
+    const existing = packetClaimsRef.current[packetId];
     const sender = { name: item.name, avatar: item.avatar };
+    setError('');
+    setPacketDialog({
+      packetId,
+      kind: 'group',
+      greeting: item.greeting,
+      sender,
+      status: existing === 'GONE' ? 'gone' : existing ? 'claimed' : 'loading',
+      amountCents: existing && existing !== 'GONE' ? existing : undefined,
+    });
 
-    const openResult = (
-      detail: GroupPacketDetail | null,
-      amountCents?: string,
-      gone = false,
-    ) => {
-      if (detail) packetDetailCacheRef.current[packetId] = detail;
-      const ownClaim = detail?.claims.find((claimEntry) => claimEntry.uid === myUid);
-      const resolvedAmount = amountCents ?? ownClaim?.amountCents;
+    const applyDetail = (detail: GroupPacketDetail) => {
+      packetDetailCacheRef.current[packetId] = detail;
+      const ownClaim = detail.claims.find((claimEntry) => claimEntry.uid === myUid);
+      const amountCents = ownClaim?.amountCents ?? (existing !== 'GONE' ? existing : undefined);
       if (ownClaim) {
         updatePacketClaims((prev) => ({ ...prev, [packetId]: ownClaim.amountCents }));
       }
-      openPacketResult({
-        packetId,
-        kind: 'group',
-        greeting: item.greeting,
-        sender,
-        amountCents: resolvedAmount,
-        gone: gone && !resolvedAmount,
+      const gone =
+        existing === 'GONE' || detail.remainingCount <= 0 || detail.status !== 'ACTIVE';
+      patchPacketDialog(packetId, {
+        status: amountCents ? 'claimed' : gone ? 'gone' : 'claimable',
+        amountCents,
       });
     };
 
-    setRpBusy(true);
-    setError('');
+    const cached = packetDetailCacheRef.current[packetId];
+    if (cached) {
+      applyDetail(cached);
+      return;
+    }
     try {
-      if (existing) {
-        const cached = packetDetailCacheRef.current[packetId] ?? null;
-        if (cached) {
-          openResult(cached, existing === 'GONE' ? undefined : existing, existing === 'GONE');
-          return;
-        }
-        const detail = await api.groupPacket(packetId).catch(() => null);
-        openResult(detail, existing === 'GONE' ? undefined : existing, existing === 'GONE');
-        return;
-      }
-
-      setRpOpening({ packetId, greeting: item.greeting, sender });
-      const openingStartedAt = Date.now();
-      let claimedAmount: string;
-      try {
-        const result = await api.claimGroupPacket(packetId);
-        claimedAmount = result.amountCents;
-        updatePacketClaims((prev) => ({ ...prev, [packetId]: result.amountCents }));
-      } catch (claimError) {
-        const code =
-          (claimError as { code?: string }).code ?? (claimError as Error).message;
-        setRpOpening(null);
-        if (code === 'ALREADY_CLAIMED') {
-          const detail = await api.groupPacket(packetId).catch(() => null);
-          openResult(detail);
-          return;
-        }
-        if (code === 'PACKET_EMPTY' || code === 'PACKET_EXPIRED') {
-          updatePacketClaims((prev) => ({ ...prev, [packetId]: 'GONE' }));
-          const detail = await api.groupPacket(packetId).catch(() => null);
-          openResult(detail, undefined, true);
-          return;
-        }
-        setError(packetErrorText(claimError));
-        return;
-      }
-
-      const remainingMs = Math.max(0, 380 - (Date.now() - openingStartedAt));
-      await new Promise<void>((resolve) => window.setTimeout(resolve, remainingMs));
-      setRpOpening(null);
-      openResult(packetDetailCacheRef.current[packetId] ?? null, claimedAmount);
-    } finally {
-      setRpOpening(null);
-      setRpBusy(false);
+      applyDetail(await api.groupPacket(packetId));
+    } catch {
+      patchPacketDialog(packetId, {
+        status: existing === 'GONE' ? 'gone' : existing ? 'claimed' : 'claimable',
+      });
     }
   }
 
-  function viewGamePacket(packetId: string, mineCents?: string) {
-    openPacketResult({
+  /** 牌局红包（包括 TNG）同样先展示封面，不再从聊天卡片直接跳转。 */
+  async function openGamePacketDialog(
+    packetId: string,
+    greeting = GAME_PACKET_GREETING,
+  ) {
+    if (!packetId || rpBusy) return;
+    freezeCurrentFeedPosition();
+    setError('');
+
+    const isCurrent = state?.round?.packetId === packetId;
+    const currentPhase = isCurrent ? state?.round?.phase : undefined;
+    const currentAmount = isCurrent ? state?.me.claimedAmountCents ?? undefined : undefined;
+    const currentBanker = isCurrent ? state?.round?.banker : null;
+    const initialSender = currentBanker
+      ? { name: currentBanker.nickname, avatar: currentBanker.avatarUrl }
+      : { name: ASSISTANT_NAME, avatar: ASSISTANT_AVATAR };
+    const currentStatus: PacketDialogStatus = currentAmount
+      ? 'claimed'
+      : currentPhase === 'SENDING_PACKET'
+        ? 'waiting'
+        : currentPhase === 'CLAIMING' && state?.me.canClaim
+          ? 'claimable'
+          : currentPhase === 'CLAIMING'
+            ? 'ineligible'
+            : 'loading';
+
+    setPacketDialog({
       packetId,
       kind: 'game',
-      greeting: GAME_PACKET_GREETING,
-      sender: { name: '小助手', avatar: ASSISTANT_AVATAR },
-      amountCents: mineCents,
+      channel: isCurrent ? state?.round?.packetChannel : undefined,
+      greeting,
+      sender: initialSender,
+      status: currentStatus,
+      amountCents: currentAmount,
     });
+
+    try {
+      const detail = await api.gamePacket(packetId);
+      const ownClaim = detail.claims.find((claimEntry) => claimEntry.uid === myUid);
+      const amountCents = ownClaim?.amountCents ?? currentAmount;
+      const status: PacketDialogStatus = amountCents
+        ? 'claimed'
+        : detail.phase === 'SENDING_PACKET'
+          ? 'waiting'
+          : detail.phase === 'CLAIMING' && isCurrent && state?.me.canClaim
+            ? 'claimable'
+            : detail.phase === 'CLAIMING' && isCurrent
+              ? 'ineligible'
+              : 'gone';
+      patchPacketDialog(packetId, {
+        channel: detail.channel,
+        sender: detail.banker
+          ? { name: detail.banker.nickname, avatar: detail.banker.avatarUrl }
+          : initialSender,
+        status,
+        amountCents,
+      });
+    } catch {
+      patchPacketDialog(packetId, {
+        status: currentStatus === 'loading' ? 'gone' : currentStatus,
+      });
+    }
   }
 
-  async function claim(packetId?: string) {
-    const activePacketId = state?.round?.packetId;
-    if (!activePacketId || (packetId && packetId !== activePacketId)) {
-      // 已结束的红包点开直接看名单，不再报错
-      if (packetId) {
-        viewGamePacket(packetId);
-        return;
-      }
-      setError('红包已结束');
+  async function claimDialogPacket() {
+    const dialog = packetDialog;
+    if (!dialog || rpBusy) return;
+    if (dialog.status === 'external' && dialog.externalUrl) {
+      openExternalLink(dialog.externalUrl);
       return;
     }
-    const isInternal = state.round?.packetChannel === 'INTERNAL';
-    if (!state.me.canClaim) {
-      // 内部红包：已抢过的点开直接看结果
-      if (isInternal && state.me.claimedAmountCents) {
-        viewGamePacket(activePacketId, state.me.claimedAmountCents);
-        return;
-      }
-      setError('仅本局庄家与已下注闲家可领取红包');
-      return;
-    }
-    setBusy(true);
+    if (dialog.status !== 'claimable' && dialog.status !== 'error') return;
+
+    const { packetId } = dialog;
+    setRpBusy(true);
     setError('');
+    patchPacketDialog(packetId, { status: 'opening', error: undefined });
+    const openingAnimation = waitForRedPacketOpeningAnimation();
+
     try {
-      if (!isInternal) {
-        const { url } = await api.claimPacket(activePacketId);
-        if (url) openExternalLink(url);
+      if (dialog.kind === 'group') {
+        const result = await api.claimGroupPacket(packetId);
+        await openingAnimation;
+        updatePacketClaims((prev) => ({ ...prev, [packetId]: result.amountCents }));
+        patchPacketDialog(packetId, {
+          status: 'claimed',
+          amountCents: result.amountCents,
+        });
+        void api.groupPacket(packetId).then((detail) => {
+          packetDetailCacheRef.current[packetId] = detail;
+        }).catch(() => undefined);
         return;
       }
 
-      // 内部红包：小助手直发，金额随机拆分并即时入余额
-      freezeCurrentFeedPosition();
-      setRpOpening({
-        packetId: activePacketId,
-        greeting: GAME_PACKET_GREETING,
-        sender: { name: '小助手', avatar: ASSISTANT_AVATAR },
-      });
-      const openingStartedAt = Date.now();
-      let claimedAmount: string;
-      try {
-        const result = await api.claimPacket(activePacketId);
-        claimedAmount = result.amountCents ?? '0';
-      } catch (claimError) {
-        setRpOpening(null);
-        const code =
-          (claimError as { code?: string }).code ?? (claimError as Error).message;
-        if (code === 'ALREADY_CLAIMED' && state.me.claimedAmountCents) {
-          viewGamePacket(activePacketId, state.me.claimedAmountCents);
-          return;
-        }
-        setError(packetErrorText(claimError));
+      const result = await api.claimPacket(packetId);
+      await openingAnimation;
+      if (result.url) {
+        patchPacketDialog(packetId, {
+          channel: 'TNG',
+          status: 'external',
+          externalUrl: result.url,
+        });
+        openExternalLink(result.url);
         return;
       }
-      // 领取接口已经成功，先在本地立即切成「已打开」；完整房态在后台校准，
-      // 不再让第二次网络往返阻塞变暗效果和详情页打开。
+
+      const claimedAmount = result.amountCents;
+      if (!claimedAmount) throw new Error('红包领取结果异常，请重试');
+      patchPacketDialog(packetId, {
+        channel: 'INTERNAL',
+        status: 'claimed',
+        amountCents: claimedAmount,
+      });
       startTransition(() => {
         setState((current) =>
-          current?.round?.packetId === activePacketId
+          current?.round?.packetId === packetId
             ? {
                 ...current,
                 me: {
@@ -2730,21 +2850,71 @@ export default function GameRoom({
         );
       });
       void refresh().catch(() => undefined);
-      const remainingMs = Math.max(0, 380 - (Date.now() - openingStartedAt));
-      await new Promise((resolve) => window.setTimeout(resolve, remainingMs));
-      setRpOpening(null);
-      viewGamePacket(activePacketId, claimedAmount);
-    } catch (e) {
-      const err = e as Error & { code?: string };
-      if (err.code === 'NOT_ELIGIBLE_TO_CLAIM' || err.message.includes('NOT_ELIGIBLE')) {
-        setError('仅本局庄家与已下注闲家可领取红包');
-      } else {
-        setError(err.message || '领取失败');
+    } catch (claimError) {
+      await openingAnimation;
+      const code =
+        (claimError as { code?: string }).code ?? (claimError as Error).message;
+      if (dialog.kind === 'group' && code === 'ALREADY_CLAIMED') {
+        const detail = await api.groupPacket(packetId).catch(() => null);
+        const ownClaim = detail?.claims.find((entry) => entry.uid === myUid);
+        if (detail) packetDetailCacheRef.current[packetId] = detail;
+        if (ownClaim) {
+          updatePacketClaims((prev) => ({ ...prev, [packetId]: ownClaim.amountCents }));
+        }
+        patchPacketDialog(packetId, {
+          status: ownClaim ? 'claimed' : 'gone',
+          amountCents: ownClaim?.amountCents,
+        });
+        return;
       }
+      if (dialog.kind === 'game' && code === 'ALREADY_CLAIMED') {
+        const detail: GamePacketDetail | null = await api.gamePacket(packetId).catch(() => null);
+        const ownClaim = detail?.claims.find((entry) => entry.uid === myUid);
+        patchPacketDialog(packetId, {
+          channel: detail?.channel ?? dialog.channel,
+          sender: detail?.banker
+            ? { name: detail.banker.nickname, avatar: detail.banker.avatarUrl }
+            : dialog.sender,
+          status: ownClaim ? 'claimed' : 'gone',
+          amountCents: ownClaim?.amountCents,
+        });
+        return;
+      }
+      if (code === 'PACKET_EMPTY' || code === 'PACKET_EXPIRED') {
+        if (dialog.kind === 'group') {
+          updatePacketClaims((prev) => ({ ...prev, [packetId]: 'GONE' }));
+        }
+        patchPacketDialog(packetId, { status: 'gone', amountCents: undefined });
+        return;
+      }
+      if (
+        code === 'NOT_ELIGIBLE_TO_CLAIM' ||
+        String((claimError as Error).message).includes('NOT_ELIGIBLE')
+      ) {
+        patchPacketDialog(packetId, { status: 'ineligible' });
+        return;
+      }
+      patchPacketDialog(packetId, {
+        status: 'error',
+        error: packetErrorText(claimError),
+      });
     } finally {
-      setRpOpening(null);
-      setBusy(false);
+      setRpBusy(false);
     }
+  }
+
+  function viewPacketDialogDetails() {
+    if (!packetDialog) return;
+    const detail = packetDialog;
+    setPacketDialog(null);
+    openPacketResult({
+      packetId: detail.packetId,
+      kind: detail.kind,
+      greeting: detail.greeting,
+      sender: detail.sender,
+      amountCents: detail.amountCents,
+      gone: detail.status === 'gone' && !detail.amountCents,
+    });
   }
 
   const canBid = phase === 'BANKER_BID' && !bidWindowClosed;
@@ -2760,13 +2930,20 @@ export default function GameRoom({
   const claimLocked = phase === 'CLAIMING';
   const chatMuted = claimLocked;
   const canThrowDice =
-    phase === 'SENDING_PACKET' && !!state?.me.isBanker && !state?.round?.diceThrown && !diceSent;
+    phase === 'SENDING_PACKET'
+    && !!state?.me.isBanker
+    && !state?.round?.diceThrown
+    && !state?.round?.diceStarted
+    && !repostWindowOpen
+    && !diceSent;
 
   function sendDice() {
     if (
       phase !== 'SENDING_PACKET' ||
       !state?.me.isBanker ||
       state?.round?.diceThrown ||
+      state?.round?.diceStarted ||
+      repostWindowOpen ||
       diceSent
     ) {
       return;
@@ -2798,14 +2975,20 @@ export default function GameRoom({
                   ? '竞庄金额，如 8800'
                   : canBet
                     ? '下注金额，如 100'
-                    : phase === 'SENDING_PACKET' && state?.me.isBanker
-                      ? '可发消息，/重推取消本局'
+                    : repostWindowOpen && state?.me.isBanker
+                      ? '发送 /重推：取消整局、退款并重新开局'
+                      : phase === 'SENDING_PACKET' && state?.me.isBanker
+                        ? '可发送消息，等待系统继续流程'
                       : phase === 'CLAIM_EXPIRED' || phase === 'SETTLING'
                         ? '可发言（数字也会当聊天发出）'
                         : '发送消息…';
 
   return (
-    <div className="game-room">
+    <div
+      ref={roomRootRef}
+      className="game-room"
+      aria-hidden={freezeFeed ? true : undefined}
+    >
       <div className="game-room-top">
         <header className="game-room-header">
           <button className="chat-back" type="button" onClick={leaveAndGoBack} aria-label="返回">
@@ -2962,7 +3145,7 @@ export default function GameRoom({
                 <div className="feed-assistant" key={item.id}>
                   <img className="feed-assistant-avatar" src={ASSISTANT_AVATAR} alt="" aria-hidden />
                   <div className="feed-assistant-body">
-                    <div className="feed-assistant-name">至尊牛牛小助手</div>
+                    <div className="feed-assistant-name">{ASSISTANT_NAME}</div>
                     <div className="feed-assistant-bubble">
                       <AssistantCopy text={item.text} ownTokens={ownMentionTokens} />
                       {item.time && <time>{item.time}</time>}
@@ -2976,7 +3159,7 @@ export default function GameRoom({
                 <div className="feed-assistant" key={item.id}>
                   <img className="feed-assistant-avatar" src={ASSISTANT_AVATAR} alt="" aria-hidden />
                   <div className="feed-assistant-body">
-                    <div className="feed-assistant-name">至尊牛牛小助手</div>
+                    <div className="feed-assistant-name">{ASSISTANT_NAME}</div>
                     <div
                       className={`feed-assistant-bubble${item.lockText ? ' countdown-lock' : ' countdown-live'}`}
                     >
@@ -3004,7 +3187,7 @@ export default function GameRoom({
                 <div className="feed-chat theirs feed-phase-sticker-row" key={item.id}>
                   <img className="feed-assistant-avatar" src={ASSISTANT_AVATAR} alt="" aria-hidden />
                   <div className="feed-chat-body">
-                    <div className="feed-chat-name">至尊牛牛小助手</div>
+                    <div className="feed-chat-name">{ASSISTANT_NAME}</div>
                     <img
                       className="feed-phase-sticker"
                       src={item.image}
@@ -3052,7 +3235,7 @@ export default function GameRoom({
                     {!item.mine && <div className="feed-chat-name">{item.name}</div>}
                     <button
                       type="button"
-                      className={`wx-rp wx-rp-standard ${opened || gone || isDemo ? 'opened' : ''}`}
+                      className="wx-rp wx-rp-standard"
                       onClick={() => {
                         if (isDemo) return;
                         void openUserPacket({
@@ -3066,28 +3249,22 @@ export default function GameRoom({
                       disabled={isDemo || rpBusy}
                     >
                       <div className="wx-rp-body">
-                        {!opened && !gone && !isDemo && (
-                          <span className="wx-rp-icon" aria-hidden />
-                        )}
+                        <span className="wx-rp-icon" aria-hidden />
                         <div className="wx-rp-copy">
                           <strong>{item.greeting}</strong>
                           <small>
                             {isDemo
                               ? '演示红包'
                               : opened
-                                ? `已领取 RM ${rm(claimed!)}`
+                                ? `已领取 RM ${rm(claimed!)} · 点击查看`
                                 : gone
-                                  ? '红包已被领完'
-                                  : item.mine
-                                    ? '我发出的红包 · 点击领取'
-                                    : '点击拆红包'}
+                                  ? '点击查看红包'
+                                  : '点击打开红包'}
                           </small>
                         </div>
                       </div>
                       <div className="wx-rp-foot">
-                        <span className="wx-rp-brand">
-                          {opened || gone ? '已开过' : '普通红包'}
-                        </span>
+                        <span className="wx-rp-brand">普通红包</span>
                       </div>
                     </button>
                   </div>
@@ -3123,14 +3300,22 @@ export default function GameRoom({
               );
             }
             if (item.kind === 'chat') {
-              const ownBet = item.mine && !!item.amount;
+              const ownBet = item.mine && !!item.gameAction;
+              const ownActionLabel =
+                item.gameAction === 'bid'
+                  ? '我的竞庄'
+                  : item.gameAction === 'all_in'
+                    ? '我的梭哈'
+                    : item.gameAction === 'withdraw'
+                      ? '撤回下注'
+                      : '我的下注';
               return (
                 <div className={`feed-chat ${item.mine ? 'mine' : 'theirs'}${ownBet ? ' own-bet' : ''}`} key={item.id}>
                   {!item.mine && <ChatAvatar url={item.avatar} name={item.name} />}
                   <div className="feed-chat-body">
                     {(!item.mine || ownBet) && (
                       <div className={`feed-chat-name${ownBet ? ' own-bet' : ''}`}>
-                        {ownBet ? (canBid ? '我的竞庄' : '我的下注') : item.name}
+                        {ownBet ? ownActionLabel : item.name}
                       </div>
                     )}
                     <div className={`feed-chat-bubble ${item.emoji ? 'emoji' : ''} ${ownBet ? 'is-bet' : ''}`}>
@@ -3142,25 +3327,22 @@ export default function GameRoom({
               );
             }
             if (item.kind === 'packet') {
-              const senderName = item.name ?? '小助手';
+              const senderName = ASSISTANT_NAME;
               const interactive = !!item.asChat && !item.demo;
-              const dimmed = !!item.opened || !!item.waiting || !item.claimable;
-              const clickable =
-                !item.waiting && (!!item.claimable || (!!item.view && !!item.packetId));
               return (
                 <div className="feed-chat theirs" key={item.id}>
-                  <ChatAvatar url={item.avatar ?? ASSISTANT_AVATAR} name={senderName} />
+                  <ChatAvatar url={ASSISTANT_AVATAR} name={senderName} />
                   <div className="feed-chat-body">
                     <div className="feed-chat-name">{senderName}</div>
                     {interactive ? (
                       <button
                         type="button"
-                        className={`wx-rp wx-rp-niuniu ${dimmed ? 'opened' : ''}`}
-                        disabled={busy || rpBusy || !clickable}
+                        className="wx-rp wx-rp-niuniu"
+                        disabled={busy || rpBusy || !item.packetId}
                         onClick={() =>
-                          item.view && item.packetId
-                            ? viewGamePacket(item.packetId)
-                            : void claim(item.packetId)
+                          item.packetId
+                            ? void openGamePacketDialog(item.packetId, item.title)
+                            : undefined
                         }
                       >
                         <div className="wx-rp-body">
@@ -3185,7 +3367,7 @@ export default function GameRoom({
                         </div>
                       </button>
                     ) : (
-                      <div className={`wx-rp wx-rp-niuniu ${dimmed ? 'opened' : ''}`}>
+                      <div className="wx-rp wx-rp-niuniu">
                         <div className="wx-rp-body">
                           <span className="wx-rp-icon" aria-hidden />
                           <div className="wx-rp-copy">
@@ -3309,15 +3491,19 @@ export default function GameRoom({
                 </span>
                 <span>
                   <strong>
-                    {phase === 'SENDING_PACKET' && state?.me.isBanker
-                      ? '本局已经完成投骰'
+                    {repostWindowOpen && state?.me.isBanker
+                      ? '重推确认中'
+                      : phase === 'SENDING_PACKET' && state?.me.isBanker
+                        ? '本局已经完成投骰'
                       : '投骰暂不可用'}
                   </strong>
                   <small>
-                    {phase !== 'SENDING_PACKET'
+                    {repostWindowOpen && state?.me.isBanker
+                      ? '发送 /重推将取消本局、退款并重新开局'
+                      : phase !== 'SENDING_PACKET'
                       ? '进入庄家投骰阶段后才可使用'
                       : state?.me.isBanker
-                        ? '等待小助手继续发包流程'
+                        ? '等待系统继续发包流程'
                         : '仅本局庄家可在投骰阶段使用'}
                   </small>
                 </span>
@@ -3330,14 +3516,14 @@ export default function GameRoom({
               icon: <RedPacketIcon />,
               iconClass: 'packet filled',
               label: '发红包',
-              onClick: () => navigate(`/game/${roomId}/send-packet`),
+              onClick: () => openRoomFeature('send-packet'),
             },
             {
               key: 'tip',
               icon: <TransferIcon />,
               iconClass: 'tip filled',
               label: '打赏',
-              onClick: () => navigate(`/game/${roomId}/tip`),
+              onClick: () => openRoomFeature('tip'),
             },
           ]}
         />
@@ -3377,9 +3563,17 @@ export default function GameRoom({
           document.body,
         )}
 
-      {rpOpening &&
+      {packetDialog &&
         createPortal(
-          <RedPacketOpening data={rpOpening} />,
+          <RedPacketDialog
+            data={packetDialog}
+            busy={rpBusy}
+            onClose={() => {
+              if (!rpBusy) setPacketDialog(null);
+            }}
+            onClaim={() => void claimDialogPacket()}
+            onDetails={viewPacketDialogDetails}
+          />,
           document.body,
         )}
     </div>
@@ -3473,36 +3667,178 @@ function RedPacketSenderAvatar({
   );
 }
 
-function RedPacketOpening({
+function RedPacketDialog({
   data,
+  busy,
+  onClose,
+  onClaim,
+  onDetails,
 }: {
-  data: {
-    packetId: string;
-    greeting: string;
-    sender: { name: string; avatar?: string | null };
-  };
+  data: PacketDialogState;
+  busy: boolean;
+  onClose: () => void;
+  onClaim: () => void;
+  onDetails: () => void;
 }) {
+  const isTng = data.channel === 'TNG';
+  const opening = data.status === 'opening';
+  const pending = data.status === 'loading' || data.status === 'opening';
+  const canClaim = data.status === 'claimable';
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !busy) onClose();
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [busy, onClose]);
+
+  let statusTitle = '';
+  let statusHint = '';
+  if (data.status === 'loading') {
+    statusTitle = '正在查看红包';
+    statusHint = '请稍候…';
+  } else if (data.status === 'opening') {
+    statusTitle = isTng ? '正在打开 TNG 红包' : '正在拆红包';
+    statusHint = isTng ? '即将前往 TNG 领取' : '好运正在赶来…';
+  } else if (data.status === 'claimed') {
+    statusTitle = `RM ${rm(data.amountCents ?? '0')}`;
+    statusHint = '已领取，可查看领取详情';
+  } else if (data.status === 'gone') {
+    statusTitle = '手慢了，红包已抢完';
+    statusHint = '可以查看大家的领取记录';
+  } else if (data.status === 'waiting') {
+    statusTitle = '红包还未开抢';
+    statusHint = '开始抢包后即可领取';
+  } else if (data.status === 'ineligible') {
+    statusTitle = '本局红包仅限参与玩家';
+    statusHint = '庄家与已下注闲家可领取';
+  } else if (data.status === 'external') {
+    statusTitle = 'TNG 红包已打开';
+    statusHint = '请在 TNG 页面完成领取';
+  } else if (data.status === 'error') {
+    statusTitle = '红包打开失败';
+    statusHint = data.error || '请稍后重试';
+  }
+
   return (
-    <div className="wx-rp-opening" role="status" aria-live="polite" aria-label="正在拆红包">
-      <div className="wx-rp-opening-stage">
-        <div className="wx-rp-opening-packet">
-          <div className="wx-rp-opening-flap" aria-hidden />
-          <div className="wx-rp-opening-copy">
-            <span className="wx-rp-opening-sender">
+    <div
+      className="wx-rp-dialog"
+      role="dialog"
+      aria-modal="true"
+      aria-label="红包"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget && !busy) onClose();
+      }}
+    >
+      <div className="wx-rp-dialog-stack">
+        <section className={`wx-rp-dialog-panel status-${data.status}`}>
+          <div className="wx-rp-dialog-flap" aria-hidden />
+          <header className="wx-rp-dialog-sender">
+            <span>
               <RedPacketSenderAvatar url={data.sender.avatar} name={data.sender.name} />
-              {data.sender.name} 的红包
+              <b>{data.sender.name}</b>
+              发出的{data.kind === 'game' ? '牛牛红包' : '红包'}
             </span>
-            <strong>{data.greeting}</strong>
+            {isTng && <em>TNG</em>}
+          </header>
+
+          <div className="wx-rp-dialog-content" aria-live="polite">
+            {canClaim || opening ? (
+              <>
+                <strong className={`wx-rp-dialog-greeting${opening ? ' is-opening' : ''}`}>
+                  {data.greeting}
+                </strong>
+                <span className={`wx-rp-dialog-open-stage${opening ? ' is-opening' : ''}`}>
+                  <button
+                    type="button"
+                    className={`wx-rp-dialog-open${opening ? ' is-opening' : ''}`}
+                    onClick={onClaim}
+                    disabled={busy || opening}
+                    aria-busy={opening || undefined}
+                    aria-label={
+                      opening
+                        ? '正在打开红包'
+                        : isTng
+                          ? '打开并前往 TNG 领取'
+                          : '打开红包'
+                    }
+                  >
+                    <span>開</span>
+                  </button>
+                </span>
+                <small>
+                  {opening
+                    ? statusHint
+                    : isTng
+                      ? '点击后前往 TNG 领取'
+                      : '点击開字领取红包'}
+                </small>
+              </>
+            ) : (
+              <>
+                {data.status === 'loading' && <span className="wx-rp-dialog-loader" aria-hidden />}
+                {data.status === 'claimed' && (
+                  <span className="wx-rp-dialog-received">已领取</span>
+                )}
+                <strong
+                  className={
+                    data.status === 'claimed'
+                      ? 'wx-rp-dialog-status wx-rp-dialog-amount'
+                      : 'wx-rp-dialog-status'
+                  }
+                >
+                  {statusTitle}
+                </strong>
+                <small>{statusHint}</small>
+                {(data.status === 'claimed' || data.status === 'gone') && (
+                  <p>{data.greeting}</p>
+                )}
+              </>
+            )}
           </div>
-          <div className="wx-rp-opening-rays" aria-hidden />
-          <div className="wx-rp-opening-coin" aria-hidden>
-            <span>開</span>
-          </div>
-        </div>
-        <div className="wx-rp-opening-status">
-          <strong>正在拆红包</strong>
-          <span>好运正在赶来，请稍候…</span>
-        </div>
+
+          <footer className="wx-rp-dialog-footer">
+            {data.status === 'external' && data.externalUrl && (
+              <button
+                type="button"
+                className="wx-rp-dialog-secondary"
+                onClick={onClaim}
+              >
+                再次打开 TNG
+              </button>
+            )}
+            {data.status === 'error' && (
+              <button
+                type="button"
+                className="wx-rp-dialog-secondary"
+                onClick={onClaim}
+                disabled={busy}
+              >
+                重新打开
+              </button>
+            )}
+            <button
+              type="button"
+              className="wx-rp-dialog-details"
+              onClick={onDetails}
+              disabled={pending || busy}
+            >
+              查看领取详情
+              <span aria-hidden>›</span>
+            </button>
+          </footer>
+        </section>
+
+        <button
+          type="button"
+          className="wx-rp-dialog-close"
+          onClick={onClose}
+          disabled={busy}
+          aria-label="关闭红包"
+        >
+          ×
+        </button>
       </div>
     </div>
   );

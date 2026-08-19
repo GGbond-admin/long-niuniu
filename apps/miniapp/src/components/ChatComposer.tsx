@@ -269,7 +269,8 @@ export default function ChatComposer({
           }}
           onBlur={() => markInputFocus(false)}
           placeholder={placeholder}
-          disabled={disabled || submitting}
+          disabled={disabled}
+          aria-busy={sendBusy}
           maxLength={maxLength}
           inputMode="text"
           enterKeyHint="send"
@@ -279,7 +280,7 @@ export default function ChatComposer({
         <button
           type="submit"
           disabled={disabled || sendBusy || !value.trim()}
-          onMouseDown={(event) => event.preventDefault()}
+          onPointerDown={(event) => event.preventDefault()}
         >
           {sendLabel}
         </button>

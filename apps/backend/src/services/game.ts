@@ -882,6 +882,12 @@ export async function closeBetting(roundId: string) {
       participants,
       packetTotalCents: String(totalCents),
     });
+    await event(tx, round.id, 'BANKER_REPOST_WINDOW', {
+      endsAt: new Date(
+        Date.now() + settings.round.repostWindowSeconds * 1_000,
+      ).toISOString(),
+      seconds: settings.round.repostWindowSeconds,
+    });
     return updated;
   });
 }
@@ -996,7 +1002,7 @@ export async function publishPacket(params: {
 }
 
 /**
- * 内部红包发包：投骰完成后由小助手直发，无 TNG 链接、无发包账号。
+ * 系统红包发包：投骰完成后由至尊牛牛小助手发送，无 TNG 链接。
  * 资金留在平台备付金，抢包时逐笔转入玩家余额（见 claimInternalPacket）。
  */
 export async function publishInternalPacket(params: {
