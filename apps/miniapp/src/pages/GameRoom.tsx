@@ -1375,6 +1375,18 @@ export default function GameRoom({
   const roomFeatureScrollTopRef = useRef<number | null>(null);
   const [channelOpen, setChannelOpen] = useState(false);
   const [quickActionsOpen, setQuickActionsOpen] = useState(false);
+  /** 任务入口闲置自动收进右边缘，点一下把手先滑出、再点才展开 */
+  const [quickActionsDocked, setQuickActionsDocked] = useState(false);
+
+  useEffect(() => {
+    if (quickActionsOpen) {
+      setQuickActionsDocked(false);
+      return;
+    }
+    if (quickActionsDocked) return;
+    const timer = window.setTimeout(() => setQuickActionsDocked(true), 8_000);
+    return () => window.clearTimeout(timer);
+  }, [quickActionsOpen, quickActionsDocked]);
   /** 上翻看历史期间有新消息：不强拉回底部，浮出「有新消息」按钮 */
   const [newBelow, setNewBelow] = useState(false);
   const newBelowRef = useRef(false);
@@ -3878,7 +3890,9 @@ export default function GameRoom({
           ) : null
         )}
         <nav
-          className={`game-room-quick-actions${quickActionsOpen ? ' is-open' : ''}`}
+          className={`game-room-quick-actions${quickActionsOpen ? ' is-open' : ''}${
+            quickActionsDocked && !quickActionsOpen ? ' is-docked' : ''
+          }`}
           aria-label="房间快捷入口"
           onKeyDown={(event) => {
             if (event.key === 'Escape') setQuickActionsOpen(false);
@@ -3925,15 +3939,35 @@ export default function GameRoom({
             type="button"
             aria-expanded={quickActionsOpen}
             aria-controls="room-quick-menu"
-            aria-label={quickActionsOpen ? '收起任务入口' : '展开任务入口'}
-            onClick={() => setQuickActionsOpen((open) => !open)}
+            aria-label={
+              quickActionsDocked && !quickActionsOpen
+                ? '呼出任务入口'
+                : quickActionsOpen
+                  ? '收起任务入口'
+                  : '展开任务入口'
+            }
+            onClick={() => {
+              if (quickActionsDocked && !quickActionsOpen) {
+                setQuickActionsDocked(false);
+                return;
+              }
+              setQuickActionsOpen((open) => !open);
+            }}
           >
             <svg
-              className={quickActionsOpen ? 'is-collapse' : 'is-gift'}
+              className={
+                quickActionsDocked && !quickActionsOpen
+                  ? 'is-peek'
+                  : quickActionsOpen
+                    ? 'is-collapse'
+                    : 'is-gift'
+              }
               viewBox="0 0 24 24"
               aria-hidden="true"
             >
-              {quickActionsOpen ? (
+              {quickActionsDocked && !quickActionsOpen ? (
+                <path d="M14.75 5.75 8.5 12l6.25 6.25" />
+              ) : quickActionsOpen ? (
                 <>
                   <path d="M6.5 5.5 13 12l-6.5 6.5" />
                   <path d="M11.5 5.5 18 12l-6.5 6.5" />

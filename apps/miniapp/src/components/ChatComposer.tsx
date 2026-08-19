@@ -425,7 +425,9 @@ export default function ChatComposer({
               || invalidBidDecimal
               || invalidBidIncrement
             }
-            onPointerDown={(event) => event.preventDefault()}
+            // 用 mousedown 阻止输入框失焦（保持键盘）；不能用 pointerdown：
+            // iOS WebKit 在 pointerdown 上 preventDefault 会连 click 一起吞掉，发送键会完全失效。
+            onMouseDown={(event) => event.preventDefault()}
           >
             <SendIcon />
           </button>

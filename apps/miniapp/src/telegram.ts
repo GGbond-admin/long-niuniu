@@ -90,15 +90,7 @@ function syncTelegramSafeArea(app: TgWebApp) {
 let disposeTelegramLayout: (() => void) | null = null;
 let viewportFrame = 0;
 let composerFocused = false;
-let exitedFullscreenForKeyboard = false;
-let restoreFullscreenTimer = 0;
 let preserveTelegramHeader = false;
-
-function clearFullscreenRestoreTimer() {
-  if (!restoreFullscreenTimer) return;
-  window.clearTimeout(restoreFullscreenTimer);
-  restoreFullscreenTimer = 0;
-}
 
 function isMobileTelegram(app: TgWebApp) {
   return app.platform === 'android' || app.platform === 'android_x' || app.platform === 'ios';
@@ -169,7 +161,6 @@ function requestMobileFullscreen(app: TgWebApp) {
     || !isMobileTelegram(app)
     || !canRequestFullscreen(app)
     || app.isFullscreen
-    || composerFocused
   ) {
     return;
   }
@@ -181,48 +172,20 @@ function requestMobileFullscreen(app: TgWebApp) {
 }
 
 /**
- * 输入框聚焦时退出真全屏并锁到可视区域。
- * Telegram 全屏 + 软键盘叠在一起时，安卓/iOS WebView 经常整页黑屏，输入栏和发送键被挡住。
+ * 输入框聚焦时保持真全屏，仅按可视区域（visualViewport / Telegram viewport）
+ * 重排布局，让输入栏和发送键锁在软键盘上方。
+ * 早期为规避「全屏 + 键盘黑屏」曾在聚焦时退出全屏，但那会导致 Telegram 顶栏
+ * 反复进出、页面跳动；黑屏问题实际由可视区域适配解决，故不再退出全屏。
  */
 export function setChatInputFocus(focused: boolean) {
   composerFocused = focused;
-  const app = tg();
-  if (focused) {
-    clearFullscreenRestoreTimer();
-    if (app?.isFullscreen) {
-      exitedFullscreenForKeyboard = true;
-      try {
-        app.exitFullscreen?.();
-      } catch {
-        // ignore
-      }
-    }
-    document.body.classList.add('kb-open');
-    scheduleViewportSync();
-    return;
-  }
-
-  document.body.classList.remove('kb-open');
+  document.body.classList.toggle('kb-open', focused);
   scheduleViewportSync();
-  if (!exitedFullscreenForKeyboard || !app) return;
-  clearFullscreenRestoreTimer();
-  restoreFullscreenTimer = window.setTimeout(() => {
-    restoreFullscreenTimer = 0;
-    if (composerFocused) return;
-    exitedFullscreenForKeyboard = false;
-    requestMobileFullscreen(app);
-    scheduleViewportSync();
-  }, 280);
 }
 
-/**
- * 聊天组件因路由切换被卸载时只清理键盘状态，不再请求恢复全屏。
- * 否则全屏切换会在榜单/奖励页期间改写可视高度，返回房间后底部被整体顶起。
- */
+/** 聊天组件因路由切换被卸载时清理键盘状态 */
 export function disposeChatInputFocus() {
   composerFocused = false;
-  clearFullscreenRestoreTimer();
-  exitedFullscreenForKeyboard = false;
   document.body.classList.remove('kb-open');
   scheduleViewportSync();
 }

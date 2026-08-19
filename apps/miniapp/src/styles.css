@@ -343,6 +343,7 @@ body.kb-open .game-room-channel{
   z-index:8;
   top:14px;
   right:12px;
+  transition:transform .3s cubic-bezier(.22,.8,.34,1);
   display:flex;
   align-items:center;
   gap:8px;
@@ -469,6 +470,34 @@ body.kb-open .game-room-channel{
 .game-room-quick-toggle:active{
   transform:scale(.95);
   filter:brightness(.9) drop-shadow(0 5px 9px rgba(0,0,0,.4));
+}
+.game-room-quick-actions.is-docked{
+  transform:translate3d(calc(100% - 10px),0,0);
+}
+.game-room-quick-actions.is-docked .game-room-quick-toggle{
+  color:rgba(233,204,124,.78);
+  filter:drop-shadow(0 5px 9px rgba(0,0,0,.32));
+}
+.game-room-quick-actions.is-docked .game-room-quick-toggle span{
+  opacity:0;
+}
+.game-room-quick-toggle span{
+  transition:opacity .2s ease;
+}
+.game-room-quick-toggle svg.is-peek{
+  fill:none;
+  stroke:currentColor;
+  stroke-width:2;
+  stroke-linecap:round;
+  stroke-linejoin:round;
+  width:20px;
+  height:20px;
+  transform:translateX(-15px);
+  animation:room-quick-peek-hint 2.6s ease-in-out infinite;
+}
+@keyframes room-quick-peek-hint{
+  0%,100%{transform:translateX(-15px)}
+  50%{transform:translateX(-18px)}
 }
 .game-room-quick-menu .game-room-quick-link{
   width:52px;
@@ -673,6 +702,12 @@ body.kb-open .game-room-channel{
   .game-room-quick-link::before,
   .game-room-quick-link img,
   .feed-entry-skeleton i{
+    animation:none !important;
+  }
+  .game-room-quick-actions{
+    transition:none;
+  }
+  .game-room-quick-toggle svg.is-peek{
     animation:none !important;
   }
 }
