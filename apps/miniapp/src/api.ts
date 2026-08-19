@@ -142,14 +142,19 @@ async function upload<T>(path: string, file: File): Promise<T> {
   return res.json();
 }
 
-const joinRoomRequests = new Map<string, Promise<RoomState>>();
+/** 进房响应：房间状态 + 可选的首连 WebSocket 票据（老后端没有该字段时前端回退单独取票） */
+export type RoomJoinResponse = RoomState & {
+  wsTicket?: { ticket: string; expiresIn: number };
+};
 
-function joinRoom(roomId: string): Promise<RoomState> {
+const joinRoomRequests = new Map<string, Promise<RoomJoinResponse>>();
+
+function joinRoom(roomId: string): Promise<RoomJoinResponse> {
   const key = `${token ?? 'anonymous'}:${roomId}`;
   const existing = joinRoomRequests.get(key);
   if (existing) return existing;
 
-  const pending = request<RoomState>(`/api/game/rooms/${roomId}/join`, {
+  const pending = request<RoomJoinResponse>(`/api/game/rooms/${roomId}/join`, {
     method: 'POST',
     body: '{}',
   }, {

@@ -233,7 +233,7 @@ export default function App() {
     app?.ready();
     app?.expand();
     app?.disableVerticalSwipes?.();
-    initTelegramFullscreen({ preserveTelegramHeader: true });
+    initTelegramFullscreen();
   }, []);
 
   useEffect(() => {

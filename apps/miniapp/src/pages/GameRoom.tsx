@@ -2071,6 +2071,8 @@ export default function GameRoom({
     let hasOpenedSocket = false;
     let suppressHeartbeatRefreshUntil = 0;
     let ticketRequestInFlight = false;
+    /** 当前 WebSocket 开始握手的时间戳，用于「立即重连」判断是否已卡住 */
+    let wsConnectingSince = 0;
     setLoading(true);
     setState(null);
     setError('');
@@ -2128,6 +2130,8 @@ export default function GameRoom({
       try {
         const joined = await api.joinRoom(roomId);
         if (cancelled) return;
+        // 进房响应内嵌的首连票据：首次建连直接使用，省一次串行取票往返。
+        let inlineWsTicket: string | null = joined.wsTicket?.ticket ?? null;
         setMyUid(session.uid);
         setMyProfile({
           nickname: session.nickname || session.uid,
@@ -2621,10 +2625,14 @@ export default function GameRoom({
             reconnectTimer = null;
           }
           setConnState(hasOpenedSocket ? 'reconnecting' : 'connecting');
+          // 首次建连优先使用进房响应内嵌的票据（60 秒有效），跳过一次串行取票往返；
+          // 重连时票据大概率已过期，走原有取票流程。
+          const prefetchedTicket = inlineWsTicket;
+          inlineWsTicket = null;
           ticketRequestInFlight = true;
           let ticket: string;
           try {
-            ticket = (await api.roomWsTicket(roomId)).ticket;
+            ticket = prefetchedTicket ?? (await api.roomWsTicket(roomId)).ticket;
           } catch (error) {
             if (cancelled) return;
             const code = (error as Error & { code?: string }).code;
@@ -2660,8 +2668,10 @@ export default function GameRoom({
           }
           if (cancelled) return;
           const ws = new WebSocket(roomWsUrl(roomId, ticket));
+          wsConnectingSince = Date.now();
           socket = ws;
           socketRef.current = ws;
+          wsConnectingSince = Date.now();
           let wsConnectTimeout: number | null = null;
           let wsHeartbeatTimer: number | null = null;
           let wsPongTimeout: number | null = null;
@@ -2772,12 +2782,20 @@ export default function GameRoom({
           };
         };
         reconnectNowRef.current = () => {
-          if (
-            socket &&
-            (socket.readyState === WebSocket.OPEN ||
-              socket.readyState === WebSocket.CONNECTING)
-          ) {
-            return;
+          if (socket) {
+            if (socket.readyState === WebSocket.OPEN) return;
+            if (socket.readyState === WebSocket.CONNECTING) {
+              // 握手刚开始（<3 秒）时不打断；卡住超过 3 秒则强制断开，
+              // 由 onclose 立即触发新一轮重连，避免干等 8 秒看门狗。
+              if (Date.now() - wsConnectingSince < 3_000) return;
+              reconnectAttempts = 0;
+              try {
+                socket.close(4002, 'MANUAL_RETRY');
+              } catch {
+                // close 抛错时浏览器仍会触发 close 事件，自动重连不受影响。
+              }
+              return;
+            }
           }
           reconnectAttempts = 0;
           void connectSocket();

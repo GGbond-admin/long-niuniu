@@ -563,7 +563,12 @@ export async function gameRoomRoutes(app: FastifyInstance) {
 
   app.post('/api/game/rooms/:id/join', { preHandler: [app.authUser, app.requireKyc] }, async (req) => {
     const { id } = req.params as { id: string };
-    const userId = (req.user as { sub: string }).sub;
+    const claims = req.user as {
+      sub: string;
+      deviceId?: string;
+      deviceVersion?: number;
+    };
+    const userId = claims.sub;
     const startedAt = performance.now();
     await joinRoom(id, userId, {
       validatedHuman: true,
@@ -584,7 +589,18 @@ export async function gameRoomRoutes(app: FastifyInstance) {
         'slow game room join',
       );
     }
-    return state;
+    // 进房响应直接附带连接票据：省掉进房后串行再取一次 /ws-ticket 的往返，加快首连。
+    const wsTicket = app.jwt.sign(
+      {
+        sub: userId,
+        kind: 'user_ws',
+        roomId: id,
+        deviceId: claims.deviceId,
+        deviceVersion: claims.deviceVersion,
+      },
+      { expiresIn: '60s' },
+    );
+    return { ...state, wsTicket: { ticket: wsTicket, expiresIn: 60 } };
   });
 
   /** 60 秒房间连接票据：避免把 12 小时登录 JWT 放进 WebSocket URL/代理日志。 */
