@@ -287,10 +287,10 @@ const PACKET_ERROR_TEXT: Record<string, string> = {
   PACKET_ESCROW_UNAVAILABLE: '红包资金正在核对，请稍后重试',
   INSUFFICIENT_BALANCE: '余额不足，请先充值',
   KYC_REQUIRED: '请先完成实名认证',
-  INVALID_PACKET_AMOUNT: '红包金额超出范围（RM0.10 ~ RM10000）',
+  INVALID_PACKET_AMOUNT: '红包金额超出范围（0.10 ~ 10000）',
   INVALID_PACKET_COUNT: '红包个数需在 1 ~ 50 之间',
-  PACKET_TOO_SMALL: '金额太小，每份至少 RM0.01',
-  INVALID_TIP_AMOUNT: '打赏金额需在 RM1 ~ RM5000 之间',
+  PACKET_TOO_SMALL: '金额太小，每份至少 0.01',
+  INVALID_TIP_AMOUNT: '打赏金额需在 1 ~ 5000 之间',
 };
 
 function packetErrorText(e: unknown): string {
@@ -728,7 +728,7 @@ const DEMO_FEED: FeedItem[] = [
   {
     kind: 'system',
     id: 'demo-bid',
-    text: '🔔 第 1 局开始竞标\n请直接发送整数庄钱金额，不支持小数。\n竞标时间：30 秒\n最低：RM 100',
+    text: '🔔 第 1 局开始竞标\n请直接发送整数庄钱金额，不支持小数。\n竞标时间：30 秒\n最低：100',
     time: '21:40',
   },
   {
@@ -758,13 +758,13 @@ const DEMO_FEED: FeedItem[] = [
   {
     kind: 'system',
     id: 'demo-banker-selected',
-    text: '👑 庄家确认\n恭喜 @小美 成为第 1 局庄家！\n庄钱：RM 8800.00',
+    text: '👑 庄家确认\n恭喜 @小美 成为第 1 局庄家！\n庄钱：8800.00',
     time: '21:41',
   },
   {
     kind: 'system',
     id: 'demo-banker',
-    text: '🐂 第 1 局开注\n本局庄家：@小美\n庄钱：RM 8800.00\n下注时长：50 秒\n下注范围：RM 2.00 ~ 44.00\n梭哈：最低 RM 20.00，上限为当前余额\n\n下注请发送金额；梭哈发送 sh金额；发送 0 撤回。',
+    text: '🐂 第 1 局开注\n庄家：@小美\n庄钱：8800.00\n时长：50 秒\n下注：3.00 ~ 52.80\n梭哈：30.00 ~ 440.00\n发数字下注 · sh+数字梭哈 · 0 撤回',
     time: '21:41',
   },
   {
@@ -998,7 +998,7 @@ function RemainingCopy({
 }) {
   const remaining = useRemainingSeconds(endsAt) ?? 0;
   if (remaining <= 0 && mode === 'bid') {
-    return <>竞标最后倒数{'\n'}最低加 RM 100，也可以加更多</>;
+    return <>竞标最后倒数{'\n'}最低加 100，也可以加更多</>;
   }
   if (remaining <= 0 && mode === 'bet') {
     return <>下注时间已到{'\n'}正在封盘…</>;
@@ -1088,22 +1088,19 @@ function scoreAbsoluteAmount(cents: unknown): string {
 }
 
 function scoreOutcome(outcome: unknown): {
-  symbol: '🟢' | '🔴' | '⚪';
-  label: '赢' | '输' | '平';
+  symbol: string;
+  label: '赢' | '输' | '水';
 } {
-  if (outcome === 'PLAYER_WIN') return { symbol: '🟢', label: '赢' };
-  if (outcome === 'BANKER_WIN') return { symbol: '🔴', label: '输' };
-  return { symbol: '⚪', label: '平' };
+  if (outcome === 'PLAYER_WIN') return { symbol: '\u{1F250}\uFE0F', label: '赢' };
+  if (outcome === 'BANKER_WIN') return { symbol: '\u{1F21A}\uFE0F', label: '输' };
+  return { symbol: '\u{1F4A7}', label: '水' };
 }
 
-function scoreNetOutcome(netCents: unknown): {
-  symbol: '🟢' | '🔴' | '⚪';
-  label: '赢' | '输' | '平';
-} {
+function scoreNetLabel(netCents: unknown): '赢' | '输' | '水' {
   const net = Number(netCents ?? 0);
-  if (net > 0) return { symbol: '🟢', label: '赢' };
-  if (net < 0) return { symbol: '🔴', label: '输' };
-  return { symbol: '⚪', label: '平' };
+  if (net > 0) return '赢';
+  if (net < 0) return '输';
+  return '水';
 }
 
 function scoreCumulativeLine(params: {
@@ -1157,13 +1154,13 @@ function scoreLines(board: RoomState['lastScoreboard']): string[] {
     const name = String(line.nickname || (line.uid ? `UID ${line.uid}` : '玩家'));
     const result = scoreOutcome(line.outcome);
     const shortfall = Number(line.shortfallCents ?? 0);
-    // 庄钱赔完后排在后面的赢家一分未得，按规则叫「喝水」
-    const drank = line.outcome === 'PLAYER_WIN' && shortfall > 0 && Number(line.netCents ?? 0) === 0;
-    const shortfallText = drank
-      ? '（喝水 · 庄钱已赔完）'
-      : shortfall > 0
-        ? `（免赔 ${scoreRm(shortfall)}）`
-        : '';
+    const net = Number(line.netCents ?? 0);
+    const shortfallText =
+      line.outcome === 'PLAYER_WIN' && shortfall > 0 && net === 0
+        ? '（喝水 · 庄钱已赔完）'
+        : shortfall > 0
+          ? `（免赔 ${scoreRm(shortfall)}）`
+          : '';
     return (
       `${result.symbol} @${name} ·\n` +
       `抢 ${scoreRm(line.claimCents)} · ${line.isAllIn ? '梭哈' : '下'} ${scoreRm(line.betCents)} · ` +
@@ -1183,10 +1180,10 @@ function scoreFooter(board: RoomState['lastScoreboard']): string {
   const banker = board.bankerSummary as Record<string, unknown> | null;
   if (!banker || typeof banker !== 'object') return '';
   const name = String(banker.nickname || (banker.uid ? `UID ${banker.uid}` : '庄家'));
-  const result = scoreNetOutcome(banker.netCents);
+  const label = scoreNetLabel(banker.netCents);
   return [
-    `${result.symbol} 庄家 @${name} ·`,
-    `抢 ${scoreRm(banker.claimCents)} · ${result.label}→${scoreAbsoluteAmount(banker.netCents)}`,
+    `\u{1F451} 庄家 @${name} ·`,
+    `抢 ${scoreRm(banker.claimCents)} · ${label}→${scoreAbsoluteAmount(banker.netCents)}`,
     scoreCumulativeLine({
       beforeCents: banker.balanceBeforeCents,
       afterCents: banker.balanceAfterCents,
@@ -1706,12 +1703,12 @@ export default function GameRoom({
     }
     if (phase === 'BANKER_BID') {
       if (bidWindowClosed) return '3、2、1 已结束，正在锁定庄家';
-      if (bidFinalCountdownRunning) return '3、2、1 播报期间仍可竞标 · 最低加 RM 100';
-      return '首次报整数 · 后续最低加 RM 100，可加更多';
+      if (bidFinalCountdownRunning) return '3、2、1 播报期间仍可竞标 · 最低加 100';
+      return '首次报整数 · 后续最低加 100，可加更多';
     }
     if (phase === 'BETTING' && state?.round?.betRange) {
       const r = state.round.betRange;
-      return `下注 ${rm(r.betMinCents)}~${rm(r.betMaxCents)} · 梭哈 ≥${rm(r.shMinCents)}（上限为余额）`;
+      return `下注 ${rm(r.betMinCents)}~${rm(r.betMaxCents)} · 梭哈 ${rm(r.shMinCents)}~${rm(r.shMaxCents)}`;
     }
     if (phase === 'SENDING_PACKET') {
       if (repostWindowOpen) {
@@ -1913,7 +1910,7 @@ export default function GameRoom({
           subtitle: canOpen
             ? '点击打开红包'
             : canView
-              ? `已领取 RM ${rm(state!.me.claimedAmountCents!)} · 点击查看`
+              ? `已领取 ${rm(state!.me.claimedAmountCents!)} · 点击查看`
               : isPublishingCurrentRound
                 ? '红包已发出 · 点击查看'
                 : '点击查看红包',
@@ -1990,7 +1987,7 @@ export default function GameRoom({
         subtitle: canOpen
           ? '点击打开红包'
           : canView
-            ? `已领取 RM ${rm(state.me.claimedAmountCents!)} · 点击查看`
+            ? `已领取 ${rm(state.me.claimedAmountCents!)} · 点击查看`
             : '点击查看红包',
         endsAt: canOpen ? deadline : null,
         claimable: canOpen,
@@ -3867,7 +3864,7 @@ export default function GameRoom({
                 <small>{tipNotice.message || '感谢这份心意'}</small>
               </span>
               <em>
-                <b>RM</b> {rm(tipNotice.amountCents)}
+                <b>{rm(tipNotice.amountCents)}</b>
               </em>
               <span className="room-tip-danmaku-glint" aria-hidden />
             </div>
@@ -4132,7 +4129,7 @@ export default function GameRoom({
                             {isDemo
                               ? '演示红包'
                               : opened
-                                ? `已领取 RM ${rm(claimed!)} · 点击查看`
+                                ? `已领取 ${rm(claimed!)} · 点击查看`
                                 : gone
                                   ? '点击查看红包'
                                   : '点击打开红包'}
@@ -4164,7 +4161,7 @@ export default function GameRoom({
                           <TransferSwapIcon />
                         </span>
                         <div className="wx-transfer-copy">
-                          <strong>RM{rm(item.amountCents)}</strong>
+                          <strong>{rm(item.amountCents)}</strong>
                           <small>{item.message}</small>
                         </div>
                       </div>
@@ -4590,26 +4587,26 @@ function BetResultToast({
       </span>
       <div className="bet-result-toast-copy">
         <strong>
-          {title}<i>｜</i>RM{rm(notice.amountCents)}
+          {title}<i>｜</i>{rm(notice.amountCents)}
         </strong>
         {adjusted && acceptance ? (
           <div className="bet-adjustment-detail">
             <span>
-              输入 <b>RM{rm(acceptance.requestedAmountCents)}</b>
-              <i>当前余额 RM{rm(acceptance.liabilityBalanceCents)}</i>
+              输入 <b>{rm(acceptance.requestedAmountCents)}</b>
+              <i>当前余额 {rm(acceptance.liabilityBalanceCents)}</i>
             </span>
             <span>
               {notice.action === 'all_in'
                 ? '1:1 余额上限'
                 : `${acceptance.liabilityMultiplier} 倍余额上限`}{' '}
-              <b>RM{rm(acceptance.maxAffordableCents)}</b>
+              <b>{rm(acceptance.maxAffordableCents)}</b>
               {notice.action === 'all_in' ? null : (
-                <i>本局最高 RM{rm(acceptance.maxAcceptedCents)}</i>
+                <i>本局最高 {rm(acceptance.maxAcceptedCents)}</i>
               )}
             </span>
             <span>
-              实际接受 <b>RM{rm(notice.amountCents)}</b>
-              <i>最大赔付已预留 RM{rm(acceptance.reservedCents)}</i>
+              实际接受 <b>{rm(notice.amountCents)}</b>
+              <i>最大赔付已预留 {rm(acceptance.reservedCents)}</i>
             </span>
           </div>
         ) : (
@@ -4676,7 +4673,7 @@ function RedPacketDialog({
     statusTitle = isTng ? '正在打开 TNG 红包' : '正在拆红包';
     statusHint = isTng ? '即将前往 TNG 领取' : '好运正在赶来…';
   } else if (data.status === 'claimed') {
-    statusTitle = `RM ${rm(data.amountCents ?? '0')}`;
+    statusTitle = rm(data.amountCents ?? '0');
     statusHint = '已领取，可查看领取详情';
   } else if (data.status === 'gone') {
     statusTitle = '手慢了，红包已抢完';

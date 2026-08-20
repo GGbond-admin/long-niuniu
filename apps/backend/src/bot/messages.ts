@@ -34,22 +34,27 @@ function absoluteAmount(value: unknown): string {
   return fromCents(amount >= 0n ? amount : -amount);
 }
 
+/**  enclosed CJK 必须带 VS16，否则会被中易/Noto 画成「得」「无」方字，而不是彩色表情 */
+export const SCOREBOARD_EMOJI = {
+  win: '\u{1F250}\uFE0F',
+  lose: '\u{1F21A}\uFE0F',
+  tie: '\u{1F4A7}',
+  banker: '\u{1F451}',
+} as const;
+
 function outcomeDisplay(outcome: unknown): {
-  symbol: '🟢' | '🔴' | '⚪';
-  label: '赢' | '输' | '平';
+  symbol: string;
+  label: '赢' | '输' | '水';
 } {
-  if (outcome === 'PLAYER_WIN') return { symbol: '🟢', label: '赢' };
-  if (outcome === 'BANKER_WIN') return { symbol: '🔴', label: '输' };
-  return { symbol: '⚪', label: '平' };
+  if (outcome === 'PLAYER_WIN') return { symbol: SCOREBOARD_EMOJI.win, label: '赢' };
+  if (outcome === 'BANKER_WIN') return { symbol: SCOREBOARD_EMOJI.lose, label: '输' };
+  return { symbol: SCOREBOARD_EMOJI.tie, label: '水' };
 }
 
-function netDisplay(netCents: bigint): {
-  symbol: '🟢' | '🔴' | '⚪';
-  label: '赢' | '输' | '平';
-} {
-  if (netCents > 0n) return { symbol: '🟢', label: '赢' };
-  if (netCents < 0n) return { symbol: '🔴', label: '输' };
-  return { symbol: '⚪', label: '平' };
+function netLabel(netCents: bigint): '赢' | '输' | '水' {
+  if (netCents > 0n) return '赢';
+  if (netCents < 0n) return '输';
+  return '水';
 }
 
 function cumulativeLine(params: {
@@ -77,10 +82,11 @@ export function formatScoreboard(
 
   for (const player of players) {
     const result = outcomeDisplay(player.outcome);
-    const shortfall = BigInt(String(player.shortfallCents));
-    // 庄钱赔完后排在后面的赢家一分未得，按规则叫「喝水」
+    const shortfall = BigInt(String(player.shortfallCents ?? 0));
+    const net = BigInt(String(player.netCents ?? 0));
+    // 庄钱赔完后排在后面的赢家一分未得，仍算赢，附注「喝水」
     const shortfallText =
-      player.outcome === 'PLAYER_WIN' && shortfall > 0n && BigInt(String(player.netCents)) === 0n
+      player.outcome === 'PLAYER_WIN' && shortfall > 0n && net === 0n
         ? '（喝水 · 庄钱已赔完）'
         : shortfall > 0n
           ? `（免赔 ${fromCents(String(shortfall))}）`
@@ -101,7 +107,7 @@ export function formatScoreboard(
 
   const bankerMention = mention(banker, presentation.bankerAlias);
   const bankerNet = BigInt(String(banker.netCents));
-  const bankerResult = netDisplay(bankerNet);
+  const bankerLabel = netLabel(bankerNet);
   const bankerTrend = Array.isArray(banker.trend)
     ? banker.trend
         .filter((item): item is string | number => (
@@ -113,8 +119,8 @@ export function formatScoreboard(
     : [];
   lines.push(
     '━━━━━━━━━━━━━━━━━━',
-    `${bankerResult.symbol} <b>庄家 ${bankerMention}</b> ·`,
-    `抢 ${fromCents(String(banker.claimCents))} · ${bankerResult.label}→${absoluteAmount(bankerNet)}`,
+    `${SCOREBOARD_EMOJI.banker} <b>庄家 ${bankerMention}</b> ·`,
+    `抢 ${fromCents(String(banker.claimCents))} · ${bankerLabel}→${absoluteAmount(bankerNet)}`,
     cumulativeLine({
       beforeCents: banker.balanceBeforeCents,
       afterCents: banker.balanceAfterCents,

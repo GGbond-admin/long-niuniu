@@ -4,10 +4,11 @@
  * 规则（已与产品确认）：
  * - 免死：抢到 0.01 的一方本对判和，退回本金、不赔不赚、不抽水
  * - 自爆：普通牌型点数 ≤3 直接判输；庄闲双自爆 → 庄赢
- * - 同级比金额，金额相同平局（该对退回，不抽水）
+ * - 同级按牌型规则比较（普通比点数；对子比后两位；金牛比中间位；其余比金额），比较键相同则平局
  * - 输方按赢方牌型倍数赔付（金牛 11 倍、对子 12 倍……普通按点数倍数）
  * - 梭哈单固定 1:1：赢只拿注额、输只赔注额，牌型倍数只用于胜负判定与赔付排序
- * - 抽水只抽赢方盈利：玩家赢默认 3%、庄家赢默认 5%（可配置）；与庄家三费并存
+ * - 抽水只抽赢方盈利：闲家赢默认 3%（按该笔实付）；庄家抽水默认 5%，按本局对赌毛利
+ *   max(0, Σ庄赢实收 − Σ闲赢实付) 抽取，本局亏损不抽；与庄家三费并存
  * - 闲赢从庄池支付，庄池不足按赔付顺序逐个赔到庄钱归零（见 comparePayoutPriority），
  *   赔到一半的那位拿走剩余庄钱，其后的赢家「喝水」（paid=0，全额记 shortfall）
  * - 庄赢从下注时冻结的最大赔付预留金收取；旧单预留不足时才防御性记 shortfall
@@ -17,13 +18,14 @@ import {
   CompareResult,
   DEFAULT_HAND_CONFIG,
   HAND_LABEL,
-  HAND_RANK,
   HandConfig,
   HandResult,
   HandType,
+  compareHandStrength,
   compareHands,
   evaluateHand,
   isBust,
+  keyDigits,
   multiplierOf,
 } from './hand.js';
 import { BankerFees, DEFAULT_FEE_CONFIG, FeeConfig, bankerFees, rakeOf } from './fees.js';
@@ -35,7 +37,7 @@ export interface PlayerInput {
   claimCents: number; // 抢到的红包金额（分）
   /** 下注时已冻结的最大赔付预留金（分）；旧单缺省时按本金处理 */
   reservedCents?: number;
-  /** 下注时间（毫秒）：庄钱不足时同倍数、同点数、同红包金额者按此先后赔付 */
+  /** 下注时间（毫秒）：庄钱不足时同牌型比较键相同者按此先后赔付 */
   betPlacedAtMs?: number;
   /** 梭哈单：赔付固定 1:1，不按牌型倍数 */
   isAllIn?: boolean;
@@ -61,7 +63,7 @@ export interface PairSettlement {
   paidCents: number;
   /** 免赔 */
   shortfallCents: number;
-  /** 该笔抽水（赢方支付） */
+  /** 该笔抽水：闲赢=该笔盈利×玩家抽水；庄赢=0（庄家抽水改按本局盈利在局级收取） */
   rakeCents: number;
   /** 闲家净变动（正=赚，负=亏；不含退回本金逻辑，本金另行解冻） */
   playerNetCents: number;
@@ -73,7 +75,11 @@ export interface RoundSettlementResult {
   bankerUserId: string;
   bankerHand: HandResult;
   pairs: PairSettlement[];
-  /** 庄家盈亏（未扣费用） */
+  /** 庄家对赌毛利（实收 − 实赔，未扣抽水与三费） */
+  bankerProfitCents: number;
+  /** 庄家盈利抽水：max(0, 对赌毛利) × bankerRakeRatio */
+  bankerRakeCents: number;
+  /** 庄家盈亏（已扣庄家盈利抽水，未扣三费） */
   bankerGrossCents: number;
   /** 三项费用 */
   fees: BankerFees;
@@ -112,7 +118,7 @@ function asHandType(value: unknown): HandType {
 }
 
 /**
- * 成绩单展示用：按玩家自己的牌型等级从高到低，同级再比点数/红包金额。
+ * 成绩单展示用：按玩家自己的牌型等级从高到低，同级再按该牌型比较规则。
  * 与赔付顺序（comparePayoutPriority）同一口径，避免「排前面却没拿到钱」的观感。
  */
 export function compareScoreboardHandOrder(
@@ -120,20 +126,21 @@ export function compareScoreboardHandOrder(
   b: { handType?: unknown; points?: unknown; claimCents?: unknown },
   _config: HandConfig = DEFAULT_HAND_CONFIG,
 ): number {
-  const aHand = {
-    type: asHandType(a.handType),
-    points: Number(a.points ?? 0),
-    amountCents: Number(a.claimCents ?? 0),
+  return compareHandStrength(handFromSnapshot(b), handFromSnapshot(a));
+}
+
+function handFromSnapshot(row: {
+  handType?: unknown;
+  points?: unknown;
+  claimCents?: unknown;
+}): HandResult {
+  const amountCents = Number(row.claimCents ?? 0);
+  return {
+    type: asHandType(row.handType),
+    points: Number(row.points ?? 0),
+    digits: keyDigits(Number.isFinite(amountCents) ? Math.max(0, Math.trunc(amountCents)) : 0),
+    amountCents: Number.isFinite(amountCents) ? amountCents : 0,
   };
-  const bHand = {
-    type: asHandType(b.handType),
-    points: Number(b.points ?? 0),
-    amountCents: Number(b.claimCents ?? 0),
-  };
-  if (aHand.type !== bHand.type) return HAND_RANK[bHand.type] - HAND_RANK[aHand.type];
-  if (aHand.points !== bHand.points) return bHand.points - aHand.points;
-  if (aHand.amountCents !== bHand.amountCents) return bHand.amountCents - aHand.amountCents;
-  return 0;
 }
 
 /** 从一局不可变成绩单中还原该局庄家的走势标签。 */
@@ -150,7 +157,7 @@ export function bankerTrendLabelFromSummary(summary: unknown): string | null {
   if (handType !== HandType.NORMAL) return HAND_LABEL[handType];
   if (typeof snapshot.points !== 'number' && typeof snapshot.points !== 'string') return null;
   const points = Number(snapshot.points);
-  return Number.isInteger(points) && points >= 1 && points <= 10 ? `${points}点` : null;
+  return Number.isInteger(points) && points >= 0 && points <= 10 ? `${points}点` : null;
 }
 
 /** 单个庄家在单个房间内的走势；调用方只传入该庄家自己的历史。 */
@@ -167,17 +174,15 @@ export function continueBankerTrend(
 }
 
 /**
- * 庄钱不足时的赔付顺序（《普通下注与梭哈下注规则说明》三）：
- * 牌型等级高 → 点数大 → 红包金额大 → 下注时间早；全部相同则按入参顺序，保证结果可复现。
+ * 庄钱不足时的赔付顺序：
+ * 牌型等级高 → 同级按该牌型比较键（普通比点数，对子比后两位，金牛比中间位，其余比金额）→ 下注时间早；
+ * 全部相同则按入参顺序，保证结果可复现。
  * 按牌型等级而非后台倍数排序，改倍数不会改变赔付先后。
  * 梭哈与普通单同队排序，按各自牌型比较，不因 1:1 赔付而降级。
  */
 function comparePayoutPriority(a: PairDraft, b: PairDraft): number {
-  if (a.playerHand.type !== b.playerHand.type) {
-    return HAND_RANK[b.playerHand.type] - HAND_RANK[a.playerHand.type];
-  }
-  if (a.playerHand.points !== b.playerHand.points) return b.playerHand.points - a.playerHand.points;
-  if (a.input.claimCents !== b.input.claimCents) return b.input.claimCents - a.input.claimCents;
+  const strength = compareHandStrength(a.playerHand, b.playerHand);
+  if (strength !== 0) return -strength;
   const aPlacedAt = a.input.betPlacedAtMs ?? Number.MAX_SAFE_INTEGER;
   const bPlacedAt = b.input.betPlacedAtMs ?? Number.MAX_SAFE_INTEGER;
   if (aPlacedAt !== bPlacedAt) return aPlacedAt - bPlacedAt;
@@ -261,16 +266,20 @@ export function settleRound(params: {
     payments.set(draft.index, { paidCents, rakeCents });
   }
 
-  // 庄家赢从各自的最大赔付预留金收取，互不影响，无需排序
+  // 庄家赢从各自的最大赔付预留金收取，互不影响，无需排序；抽水不按单笔收
   for (const draft of drafts) {
     if (draft.outcome !== 'BANKER_WIN') continue;
     const capacity = Math.max(draft.input.betCents, draft.input.reservedCents ?? draft.input.betCents);
     const paidCents = Math.min(draft.payableCents, capacity);
-    const rakeCents = rakeOf(paidCents, 'BANKER', feeConfig);
-    bankerGross += paidCents - rakeCents;
-    totalRake += rakeCents;
-    payments.set(draft.index, { paidCents, rakeCents });
+    bankerGross += paidCents;
+    payments.set(draft.index, { paidCents, rakeCents: 0 });
   }
+
+  // 庄家抽水按本局对赌毛利：实收闲家赔付 − 赔付给闲家；亏损不抽
+  const bankerProfitCents = bankerGross;
+  const bankerRakeCents = rakeOf(bankerProfitCents, 'BANKER', feeConfig);
+  bankerGross -= bankerRakeCents;
+  totalRake += bankerRakeCents;
 
   // 第三步：成绩单按玩家自己的牌型倍数从大到小展示（赔付顺序已在上一步处理）
   const pairs: PairSettlement[] = drafts
@@ -331,6 +340,8 @@ export function settleRound(params: {
     bankerUserId: params.bankerUserId,
     bankerHand,
     pairs,
+    bankerProfitCents,
+    bankerRakeCents,
     bankerGrossCents: bankerGross,
     fees,
     bankerNetCents: bankerNet,
@@ -338,4 +349,19 @@ export function settleRound(params: {
     potRemainingCents: potRemaining,
     stats,
   };
+}
+
+/** 从成绩单庄家汇总读取本局庄家盈利抽水；旧局无此字段时返回 0。 */
+export function bankerRakeCentsFromSummary(summary: unknown): bigint {
+  if (!summary || typeof summary !== 'object') return 0n;
+  const raw = (summary as { rakeCents?: unknown }).rakeCents;
+  if (typeof raw === 'bigint') return raw > 0n ? raw : 0n;
+  if (typeof raw === 'number' && Number.isFinite(raw) && raw > 0) {
+    return BigInt(Math.round(raw));
+  }
+  if (typeof raw === 'string' && /^\d+$/.test(raw)) {
+    const value = BigInt(raw);
+    return value > 0n ? value : 0n;
+  }
+  return 0n;
 }

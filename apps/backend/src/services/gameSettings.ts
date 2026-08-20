@@ -178,25 +178,25 @@ export const DEFAULT_MESSAGE_TEMPLATES: MessageTemplates = {
   welcome:
     '欢迎进入【至尊牛牛】互动群\n\n这里不是旁观大厅，而是本局实时战场。\n请先完成实名与充值，凑齐人数后自动开局。\n准备好了，就留下做局。',
   bidStart:
-    '【第 {{seqNo}} 局 · 庄家竞标开启】\n\n竞标时长：{{bidSeconds}} 秒\n最低出价：RM {{minBid}}\n\n首口输入整数；已有最高价后，至少加 RM 100，也可以加更多。\n最后 5 秒有效加价，计时重置为 5 秒。\n进入 3、2、1 后仍可喊价，播报结束后锁标。',
+    '【第 {{seqNo}} 局 · 庄家竞标开启】\n\n竞标时长：{{bidSeconds}} 秒\n最低出价：{{minBid}}\n\n首口输入整数；已有最高价后，至少加 100，也可以加更多。\n最后 5 秒有效加价，计时重置为 5 秒。\n进入 3、2、1 后仍可喊价，播报结束后锁标。',
   bidPlaced:
-    '叫价更新！\n{{player}} 出价 RM {{amount}}\n当前最高：{{leader}} · RM {{high}}\n下一口最低 RM {{next}}，可以更高。',
+    '叫价更新！\n{{player}} 出价 {{amount}}\n当前最高：{{leader}} · {{high}}\n下一口最低 {{next}}，可以更高。',
   bidClosing:
-    '【竞标截止 · 最终确认】\n\n本局出价名单：\n{{bidList}}\n\n当前最高：{{leader}} · RM {{high}}\n下面开始 3、2、1 倒计时，倒计时结束立刻锁定庄家！',
+    '【竞标截止 · 最终确认】\n\n本局出价名单：\n{{bidList}}\n\n当前最高：{{leader}} · {{high}}\n下面开始 3、2、1 倒计时，倒计时结束立刻锁定庄家！',
   bidCountdownStart: '【竞标最后倒数】\n播报结束前仍可按最低加价规则继续竞标。',
   bidCountdown3: '3',
   bidCountdown2: '2',
   bidCountdown1: '1',
   bidFinalList:
-    '【竞标结束 · 最终名单】\n\n本局出价名单：\n{{bidList}}\n\n当前最高出价：{{leader}} · RM {{high}}\n锁庄前将复核资格与余额；如未通过，顺延下一位。',
+    '【竞标结束 · 最终名单】\n\n本局出价名单：\n{{bidList}}\n\n当前最高出价：{{leader}} · {{high}}\n锁庄前将复核资格与余额；如未通过，顺延下一位。',
   bankerSelected:
-    '【庄家锁定】\n恭喜 {{banker}} 拿下第 {{seqNo}} 局庄家！\n本局庄钱：RM {{pot}}\n\n庄钱已冻结入池，闲家准备开注。',
+    '【庄家锁定】\n恭喜 {{banker}} 拿下第 {{seqNo}} 局庄家！\n本局庄钱：{{pot}}\n\n庄钱已冻结入池，闲家准备开注。',
   betStart:
-    '【第 {{seqNo}} 局 · 开注】\n\n本局庄家：{{banker}}\n庄钱：RM {{pot}}\n下注时长：{{betSeconds}} 秒\n\n普通下注：RM {{betMin}} ~ {{betMax}}\n梭哈：最低 RM {{shMin}}，上限为当前余额\n\n操作说明：\n· 发送金额 = 下注\n· 发送 sh金额 = 梭哈（如 sh200）\n· 发送 0 = 撤回本局下注\n\n时间一到立刻封盘，请抓紧出手。',
+    '【第 {{seqNo}} 局 · 开注】\n庄家：{{banker}}\n庄钱：{{pot}}\n时长：{{betSeconds}} 秒\n下注：{{betMin}} ~ {{betMax}}\n梭哈：{{shMin}} ~ {{shMax}}\n发数字下注 · sh+数字梭哈 · 0 撤回',
   sealed:
     '【封盘 · 等待发包】\n下注已截止。\n请各位留在本页，勿退出，以免错过抢包。\n正在准备本局红包…',
   sealedSummary:
-    '【停止下注 · 封盘明细】\n\n庄家：{{banker}}\n庄钱：RM {{pot}}\n发包金额：RM {{packetTotal}}\n发包数量：{{packetCount}} 个\n总下注：RM {{betTotal}}\n总梭哈：RM {{shTotal}}\n\n代包手1：{{tailPackerBanker}}（庄家尾包）\n代包手2：{{tailPackerPlayer}}（闲家尾包）\n\n本局下注成功名单：\n{{betList}}',
+    '【停止下注 · 封盘明细】\n\n庄家：{{banker}}\n庄钱：{{pot}}\n发包金额：{{packetTotal}}\n发包数量：{{packetCount}} 个\n总下注：{{betTotal}}\n总梭哈：{{shTotal}}\n\n代包手1：{{tailPackerBanker}}（庄家尾包）\n代包手2：{{tailPackerPlayer}}（闲家尾包）\n\n本局下注成功名单：\n{{betList}}',
   dicePrompt:
     '【封盘确认 · {{remaining}} 秒】\n请庄家 {{banker}} 确认本局。\n· 继续本局：确认结束后须在 {{diceSeconds}} 秒内投骰，超时本局自动取消并退款\n· 重推本局：倒计时内发送 /重推，系统会取消整局、原路退回全部冻结金额，并重新开启下一局',
   betCountdown: '下注倒计时 · 还剩 {{remaining}} 秒\n未出手的抓紧了，时间到立刻封盘！',
@@ -214,11 +214,13 @@ export const DEFAULT_MESSAGE_TEMPLATES: MessageTemplates = {
   cancelled:
     '【第 {{seqNo}} 局已取消】\n原因：{{reason}}\n本局冻结金额已全部原路退回，不影响下一局。',
   continuationPrompt:
-    '【续庄询问】\n本局庄家 {{banker}}，还要继续坐庄吗？\n请在 {{window}} 秒内点击「续庄确认」。\n\n续庄规则：\n· 沿用庄钱 RM {{pot}}\n· 跳过竞标，直接开注\n· 每次竞标中标后最多续庄一次（连续最多两局）\n· 第三局必须重新竞标，原庄仍可参与并再次中标',
+    '【续庄询问】\n本局庄家 {{banker}}，还要继续坐庄吗？\n请在 {{window}} 秒内点击「续庄确认」。\n\n续庄规则：\n· 沿用庄钱 {{pot}}\n· 跳过竞标，直接开注\n· 每次竞标中标后最多续庄一次（连续最多两局）\n· 第三局必须重新竞标，原庄仍可参与并再次中标',
   bankerDice: '【庄家开骰】\n庄家：{{banker}}\n点数：{{dice}}\n牌型据此开算，请各位看结果。',
-  rewardCongrats: '【奖励到账】\n恭喜 {{player}} 获得「{{title}}」\n奖励金额：RM {{amount}}\n已发放至余额，可在钱包查看。',
+  rewardCongrats: '【奖励到账】\n恭喜 {{player}} 获得「{{title}}」\n奖励金额：{{amount}}\n已发放至余额，可在钱包查看。',
 };
 
+const LEGACY_VERBOSE_BET_START =
+  '【第 {{seqNo}} 局 · 开注】\n\n本局庄家：{{banker}}\n庄钱：RM {{pot}}\n下注时长：{{betSeconds}} 秒\n\n普通下注：RM {{betMin}} ~ {{betMax}}\n梭哈：RM {{shMin}} ~ {{shMax}}\n\n操作说明：\n· 发送金额 = 下注\n· 发送 sh金额 = 梭哈（如 sh200）\n· 发送 0 = 撤回本局下注\n\n时间一到立刻封盘，请抓紧出手。';
 const LEGACY_DECIMAL_BID_START =
   '【第 {{seqNo}} 局 · 庄家竞标开启】\n\n全员可上庄，现在开始叫价！\n竞标时长：{{bidSeconds}} 秒\n最低出价：RM {{minBid}}\n\n直接发送金额即可出价；再次发送=改价。\n有人出价后我会实时 @ 播报，欢迎继续加价。\n最后 5 秒内出现更高价，倒计时自动重置为 5 秒，直到无人加价。\n最高有效价锁定庄家。';
 const LEGACY_FREE_BID_START =
@@ -256,6 +258,19 @@ const LEGACY_REROLL_DICE_PROMPT =
 const LEGACY_STATIC_REPOST_DICE_PROMPT =
   '【封盘确认 · {{repostWindow}} 秒】\n请庄家 {{banker}} 确认本局。\n· 继续本局：倒计时结束后点击投骰\n· 重推本局：倒计时内发送 /重推，系统会取消整局、原路退回全部冻结金额，并重新开启下一局';
 
+function stripDisplayedRm(value: string): string {
+  return value.replace(/RM(?:\s+|(?=\d)|(?=\{\{))/g, '');
+}
+
+function withoutDisplayedRm(templates: MessageTemplates): MessageTemplates {
+  return Object.fromEntries(
+    Object.entries(templates).map(([key, value]) => [
+      key,
+      typeof value === 'string' ? stripDisplayedRm(value) : value,
+    ]),
+  ) as MessageTemplates;
+}
+
 function defaultMessageTemplates(gameCode: string): MessageTemplates {
   const game = GAME_CATALOG[gameCode as SupportedGameCode];
   if (!game || gameCode === SUPREME_NIUNIU_GAME_CODE) {
@@ -277,13 +292,13 @@ export async function getMessageTemplates(
   );
   // 兼容后台已保存的旧默认话术：发送者栏已统一显示「至尊牛牛小助手」，
   // 气泡正文不再重复出现另一个「小助手」身份。
-  return {
+  return withoutDisplayedRm({
     ...templates,
     sealed: templates.sealed.replace(
       '小助手正在准备本局红包…',
       '正在准备本局红包…',
     ),
-  };
+  });
 }
 
 export async function getMessageTemplatesForRoom(
@@ -490,6 +505,15 @@ export async function ensureGameConfigDefaults(): Promise<void> {
             merged = {
               ...merged,
               bidFinalList: DEFAULT_MESSAGE_TEMPLATES.bidFinalList,
+            };
+          }
+          if (
+            raw?.betStart === LEGACY_VERBOSE_BET_START
+            || (typeof raw?.betStart === 'string' && raw.betStart.includes('操作说明'))
+          ) {
+            merged = {
+              ...merged,
+              betStart: DEFAULT_MESSAGE_TEMPLATES.betStart,
             };
           }
           if (raw?.claimStart === LEGACY_CLAIM_START) {

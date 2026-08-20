@@ -102,7 +102,7 @@ export class PushService {
   async notifyRewardGranted(userId: string, title: string, amount: string) {
     const text = await renderTemplate(
       'reward_granted',
-      '🎉 恭喜！\n获得{{title}}奖励 RM{{amount}}',
+      '🎉 恭喜！\n获得{{title}}奖励 {{amount}}',
       { title, amount },
     );
     return (await sendToUser(userId, text)).success;
@@ -111,7 +111,7 @@ export class PushService {
   async notifyDepositCompleted(userId: string, amount: string) {
     const text = await renderTemplate(
       'deposit_completed',
-      '✅ 充值已到账\nRM {{amount}} 已加入您的可用余额。',
+      '✅ 充值已到账\n{{amount}} 已加入您的可用余额。',
       { amount },
     );
     return (await sendToUser(userId, text)).success;
@@ -120,7 +120,7 @@ export class PushService {
   async notifyWithdrawCompleted(userId: string, amount: string) {
     const text = await renderTemplate(
       'withdraw_completed',
-      '✅ 提现已完成\n财务已处理 RM {{amount}}，请检查您的收款账户。',
+      '✅ 提现已完成\n财务已处理 {{amount}}，请检查您的收款账户。',
       { amount },
     );
     return (await sendToUser(userId, text)).success;
@@ -134,7 +134,7 @@ export class PushService {
   ) {
     const text = await renderTemplate(
       'order_rejected',
-      '❌ {{kind}}申请已驳回\n金额：RM {{amount}}\n原因：{{reason}}',
+      '❌ {{kind}}申请已驳回\n金额：{{amount}}\n原因：{{reason}}',
       { kind, amount, reason },
     );
     return (await sendToUser(userId, text)).success;

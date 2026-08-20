@@ -86,6 +86,35 @@ describe('round-range profit pool calculations', () => {
     );
   });
 
+  it('adds round-level banker profit rake from the scoreboard and keeps legacy pair rake', () => {
+    const result = aggregateRangeFinancials(
+      [
+        round(1, {
+          bankerRakeCents: 2_500n,
+          settlements: [
+            { userId: 'p1', betCents: 10_000n, outcome: 'BANKER_WIN', rakeCents: 0n },
+            { userId: 'p2', betCents: 20_000n, outcome: 'PLAYER_WIN', rakeCents: 600n },
+          ],
+        }),
+        round(2, {
+          settlements: [
+            { userId: 'p3', betCents: 8_000n, outcome: 'BANKER_WIN', rakeCents: 400n },
+          ],
+        }),
+      ],
+      new Map([
+        ['banker', 'HUMAN'],
+        ['p1', 'HUMAN'],
+        ['p2', 'HUMAN'],
+        ['p3', 'HUMAN'],
+      ]),
+    );
+
+    expect(result.rakePlayerCents).toBe(600n);
+    expect(result.rakeBankerCents).toBe(2_900n);
+    expect(result.rakeTotalCents).toBe(3_500n);
+  });
+
   it('honors per-round tie configuration and excludes virtual users from user turnover', () => {
     const result = aggregateRangeFinancials(
       [

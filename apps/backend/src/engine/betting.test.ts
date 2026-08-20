@@ -19,38 +19,42 @@ const flatConfig = {
 };
 
 describe('动态范围（06 文档 §3）', () => {
-  it('庄钱 5000 → 下注 2~25；梭哈只保留最低额，不再按庄钱封顶', () => {
-    const r = bettingRange(toCents('5000'), 30, flatConfig);
-    expect(r.betMinCents).toBe(toCents('2'));
-    expect(r.betMaxCents).toBe(toCents('25'));
-    expect(r.shMinCents).toBe(toCents('20'));
-    expect(r.shMaxCents).toBe(0);
+  it('庄钱 25000 → 满注 0.6% 为 3~150，满梭哈 5% 为 30~1250', () => {
+    const r = bettingRange(toCents('25000'), 30, flatConfig);
+    expect(r.betMinCents).toBe(toCents('3'));
+    expect(r.betMaxCents).toBe(toCents('150'));
+    expect(r.shMinCents).toBe(toCents('30'));
+    expect(r.shMaxCents).toBe(toCents('1250'));
   });
-  it('庄钱 10000 → 下注 2~50', () => {
+  it('庄钱 10000 → 下注 3~60，梭哈 30~500', () => {
     const r = bettingRange(toCents('10000'), 30, flatConfig);
-    expect(r.betMaxCents).toBe(toCents('50'));
+    expect(r.betMaxCents).toBe(toCents('60'));
+    expect(r.shMaxCents).toBe(toCents('500'));
   });
-  it('庄钱 8540 → 下注上限 42.7（对应截图 2~42）', () => {
+  it('庄钱 8540 → 下注上限 51.24', () => {
     const r = bettingRange(toCents('8540'), 30, flatConfig);
-    expect(r.betMaxCents).toBe(toCents('42.7'));
+    expect(r.betMaxCents).toBe(toCents('51.24'));
   });
   it('人数少 → 系数上调（默认 <10 人 ×2）', () => {
-    const r = bettingRange(toCents('5000'), 8);
-    expect(r.betMaxCents).toBe(toCents('50')); // 25 × 2
+    const r = bettingRange(toCents('25000'), 8);
+    expect(r.betMaxCents).toBe(toCents('300')); // 150 × 2
+    expect(r.shMaxCents).toBe(toCents('2500')); // 1250 × 2
   });
-  it('庄钱再小也不关闭梭哈，普通下注上限仍保底到最低额', () => {
+  it('庄钱再小也不关闭梭哈，普通/梭哈上限仍保底到最低额', () => {
     const r = bettingRange(toCents('300'), 30, flatConfig);
-    expect(r.shMinCents).toBe(toCents('20'));
-    expect(validateBet(toCents('20'), true, r).ok).toBe(true);
-    expect(validateBet(toCents('300'), true, r).ok).toBe(true);
-    expect(r.betMaxCents).toBe(toCents('2'));
+    expect(r.shMinCents).toBe(toCents('30'));
+    expect(r.shMaxCents).toBe(toCents('30'));
+    expect(validateBet(toCents('30'), true, r).ok).toBe(true);
+    expect(validateBet(toCents('31'), true, r).ok).toBe(false);
+    expect(r.betMaxCents).toBe(toCents('3'));
   });
-  it('范围校验：普通受房间上限，梭哈只校验最低额', () => {
-    const r = bettingRange(toCents('5000'), 30, flatConfig);
+  it('范围校验：普通与梭哈都受房间上限', () => {
+    const r = bettingRange(toCents('25000'), 30, flatConfig);
     expect(validateBet(toCents('10'), false, r).ok).toBe(true);
-    expect(validateBet(toCents('26'), false, r).ok).toBe(false);
-    expect(validateBet(toCents('19.99'), true, r).ok).toBe(false);
-    expect(validateBet(toCents('300'), true, r).ok).toBe(true);
+    expect(validateBet(toCents('151'), false, r).ok).toBe(false);
+    expect(validateBet(toCents('29.99'), true, r).ok).toBe(false);
+    expect(validateBet(toCents('1250'), true, r).ok).toBe(true);
+    expect(validateBet(toCents('1250.01'), true, r).ok).toBe(false);
   });
 });
 
@@ -151,7 +155,7 @@ describe('最大赔付预留与自动降额', () => {
     });
   });
 
-  it('梭哈不受房间庄钱上限限制，余额充足时原额接受', () => {
+  it('梭哈超过房间满梭哈上限时降到房间上限', () => {
     const result = acceptBetAmount({
       requestedCents: BigInt(toCents('300')),
       liabilityBalanceCents: BigInt(toCents('5000')),
@@ -162,11 +166,11 @@ describe('最大赔付预留与自动降额', () => {
 
     expect(result).toMatchObject({
       ok: true,
-      acceptedCents: BigInt(toCents('300')),
-      reservedCents: BigInt(toCents('300')),
-      maxAcceptedCents: BigInt(toCents('5000')),
-      adjusted: false,
-      adjustedBy: [],
+      acceptedCents: BigInt(toCents('250')),
+      reservedCents: BigInt(toCents('250')),
+      maxAcceptedCents: BigInt(toCents('250')),
+      adjusted: true,
+      adjustedBy: ['ROOM_LIMIT'],
     });
   });
 

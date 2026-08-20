@@ -7,12 +7,12 @@ import type { GameError } from './game.js';
  */
 
 function formatRangeAmount(value: unknown): string | null {
-  if (typeof value === 'bigint') return `RM ${(Number(value) / 100).toFixed(2)}`;
+  if (typeof value === 'bigint') return (Number(value) / 100).toFixed(2);
   if (typeof value === 'string' && /^\d+$/.test(value)) {
-    return `RM ${(Number(value) / 100).toFixed(2)}`;
+    return (Number(value) / 100).toFixed(2);
   }
   if (typeof value !== 'number' || !Number.isFinite(value)) return null;
-  return `RM ${(value / 100).toFixed(2)}`;
+  return (value / 100).toFixed(2);
 }
 
 function formatWholeRinggitAmount(value: unknown): string | null {
@@ -21,9 +21,9 @@ function formatWholeRinggitAmount(value: unknown): string | null {
   else if (typeof value === 'string' && /^\d+$/.test(value)) cents = Number(value);
   else if (typeof value === 'number' && Number.isFinite(value)) cents = value;
   else return null;
-  return `RM ${(cents / 100).toLocaleString('en-MY', {
+  return (cents / 100).toLocaleString('en-MY', {
     maximumFractionDigits: 0,
-  })}`;
+  });
 }
 
 const GAME_ERROR_AMOUNT_KEY: Record<string, string> = {
@@ -57,7 +57,7 @@ const GAME_ERROR_MESSAGES: Record<string, string> = {
   AMOUNT_TOO_LARGE: '金额过大，请重新输入',
   INSUFFICIENT_BALANCE: '可用余额不足',
   BID_MUST_BE_INTEGER: '竞标金额必须是整数，请勿输入小数',
-  BID_INCREMENT_TOO_LOW: '竞标金额至少需要比当前最高价高 RM 100',
+  BID_INCREMENT_TOO_LOW: '竞标金额至少需要比当前最高价高 100',
   BID_OUT_OF_RANGE: '竞标金额超出范围',
   BET_OUT_OF_RANGE: '下注金额超出范围',
   BELOW_BET_MIN: '低于最低下注金额',

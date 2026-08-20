@@ -31,6 +31,8 @@ describe('单局结算（06 文档 §6 / 04 文档 T01–T08）', () => {
     expect(pair.rakeCents).toBe(toCents('3.6'));
     expect(pair.playerNetCents).toBe(toCents('116.4'));
     expect(pair.bankerNetCents).toBe(-toCents('120'));
+    expect(r.bankerProfitCents).toBe(-toCents('120'));
+    expect(r.bankerRakeCents).toBe(0);
   });
 
   it('T02 闲赢但庄池不足 → 实付=庄池，免赔>0', () => {
@@ -138,6 +140,7 @@ describe('单局结算（06 文档 §6 / 04 文档 T01–T08）', () => {
 
   it('从单局成绩单快照提取庄家走势标签', () => {
     expect(bankerTrendLabelFromSummary({ handType: 'NORMAL', points: 9 })).toBe('9点');
+    expect(bankerTrendLabelFromSummary({ handType: 'NORMAL', points: 0 })).toBe('0点');
     expect(bankerTrendLabelFromSummary({ handType: 'BAOZI', points: 10 })).toBe('豹子');
     expect(bankerTrendLabelFromSummary({ handType: 'NORMAL', points: null })).toBeNull();
     expect(bankerTrendLabelFromSummary({ handType: 'NORMAL', points: 2.5 })).toBeNull();
@@ -160,6 +163,54 @@ describe('单局结算（06 文档 §6 / 04 文档 T01–T08）', () => {
     const byUser = new Map(r.pairs.map((pair) => [pair.userId, pair]));
     expect(byUser.get('big')!.paidCents).toBe(toCents('100'));
     expect(byUser.get('small')!.paidCents).toBe(0);
+  });
+
+  it('对子后两位相同再比前位：9.22 先于 1.22 赔付', () => {
+    const r = settleRound({
+      bankerUserId: 'banker',
+      bankerClaimCents: toCents('0.02'),
+      potCents: toCents('120'),
+      players: [
+        { userId: 'low', betCents: toCents('10'), claimCents: toCents('1.22') },
+        { userId: 'high', betCents: toCents('10'), claimCents: toCents('9.22') },
+      ],
+      handConfig,
+    });
+    const byUser = new Map(r.pairs.map((pair) => [pair.userId, pair]));
+    expect(byUser.get('high')!.paidCents).toBe(toCents('120'));
+    expect(byUser.get('low')!.paidCents).toBe(0);
+  });
+
+  it('对子先比后两位：0.22 先于 5.11 赔付', () => {
+    const r = settleRound({
+      bankerUserId: 'banker',
+      bankerClaimCents: toCents('0.02'),
+      potCents: toCents('120'), // 只够赔一位 12x
+      players: [
+        { userId: 'front', betCents: toCents('10'), claimCents: toCents('5.11') },
+        { userId: 'tail', betCents: toCents('10'), claimCents: toCents('0.22') },
+      ],
+      handConfig,
+    });
+    const byUser = new Map(r.pairs.map((pair) => [pair.userId, pair]));
+    expect(byUser.get('tail')!.paidCents).toBe(toCents('120'));
+    expect(byUser.get('front')!.paidCents).toBe(0);
+  });
+
+  it('金牛只比中间位：0.90 先于 10.80 赔付（前后不算）', () => {
+    const r = settleRound({
+      bankerUserId: 'banker',
+      bankerClaimCents: toCents('0.02'),
+      potCents: toCents('110'),
+      players: [
+        { userId: 'amount', betCents: toCents('10'), claimCents: toCents('10.80') },
+        { userId: 'middle', betCents: toCents('10'), claimCents: toCents('0.90') },
+      ],
+      handConfig,
+    });
+    const byUser = new Map(r.pairs.map((pair) => [pair.userId, pair]));
+    expect(byUser.get('middle')!.paidCents).toBe(toCents('110'));
+    expect(byUser.get('amount')!.paidCents).toBe(0);
   });
 
   it('倍数点数红包金额全同：下注时间早者先赔', () => {
@@ -225,8 +276,10 @@ describe('单局结算（06 文档 §6 / 04 文档 T01–T08）', () => {
     expect(pair.paidCents).toBe(toCents('100'));
     expect(pair.shortfallCents).toBe(0);
     expect(pair.playerNetCents).toBe(-toCents('100'));
-    expect(pair.rakeCents).toBe(toCents('5'));
-    expect(pair.bankerNetCents).toBe(toCents('95'));
+    expect(pair.rakeCents).toBe(0);
+    expect(pair.bankerNetCents).toBe(toCents('100'));
+    expect(r.bankerRakeCents).toBe(toCents('5'));
+    expect(r.bankerGrossCents).toBe(toCents('95'));
   });
 
   it('庄钱不足：梭哈与普通同队排序，按各自牌型等级排（梭哈豹子先于普通牛牛）', () => {
@@ -313,8 +366,62 @@ describe('单局结算（06 文档 §6 / 04 文档 T01–T08）', () => {
       handConfig,
     });
     expect(bankerWin.pairs[0].outcome).toBe('BANKER_WIN');
-    // 庄家赢 RM50000 → 抽水 5% = RM2500
-    expect(bankerWin.pairs[0].rakeCents).toBe(toCents('2500'));
+    // 庄家赢 RM50000 → 抽水 5% = RM2500，记在局级 bankerRakeCents
+    expect(bankerWin.pairs[0].rakeCents).toBe(0);
+    expect(bankerWin.bankerRakeCents).toBe(toCents('2500'));
+  });
+
+  it('庄家抽水按本局对赌毛利：实收200实赔50 → 毛利150抽7.5，不是按赢的那笔200抽10', () => {
+    const r = settleRound({
+      bankerUserId: 'banker',
+      bankerClaimCents: toCents('3.42'), // 普通 9 点
+      potCents: toCents('100000'),
+      players: [
+        {
+          userId: 'lose',
+          betCents: toCents('200'),
+          claimCents: toCents('1.30'), // 普通 4 点 → 庄赢
+          reservedCents: toCents('200'),
+        },
+        {
+          userId: 'win',
+          betCents: toCents('50'),
+          claimCents: toCents('5.40'), // 普通 9 点金额更大 → 闲赢
+        },
+      ],
+      handConfig,
+    });
+    const byUser = new Map(r.pairs.map((pair) => [pair.userId, pair]));
+    expect(byUser.get('lose')!.outcome).toBe('BANKER_WIN');
+    expect(byUser.get('lose')!.paidCents).toBe(toCents('200'));
+    expect(byUser.get('lose')!.rakeCents).toBe(0);
+    expect(byUser.get('win')!.outcome).toBe('PLAYER_WIN');
+    expect(byUser.get('win')!.paidCents).toBe(toCents('50'));
+    expect(byUser.get('win')!.rakeCents).toBe(toCents('1.5'));
+    expect(r.bankerProfitCents).toBe(toCents('150'));
+    expect(r.bankerRakeCents).toBe(toCents('7.5'));
+    expect(r.totalRakeCents).toBe(toCents('9'));
+    expect(r.bankerGrossCents).toBe(toCents('142.5'));
+  });
+
+  it('本局庄家对赌亏损时不抽庄家水', () => {
+    const r = settleRound({
+      bankerUserId: 'banker',
+      bankerClaimCents: toCents('3.42'),
+      potCents: toCents('100000'),
+      players: [
+        {
+          userId: 'lose',
+          betCents: toCents('10'),
+          claimCents: toCents('1.30'),
+          reservedCents: toCents('10'),
+        },
+        { userId: 'win', betCents: toCents('100'), claimCents: toCents('5.40') },
+      ],
+      handConfig,
+    });
+    expect(r.bankerProfitCents).toBe(-toCents('90'));
+    expect(r.bankerRakeCents).toBe(0);
   });
 
   it('T03 闲输按庄家（赢方）倍数：庄对子12x 注10 → 闲-120，庄净+114，抽水6', () => {
@@ -338,8 +445,10 @@ describe('单局结算（06 文档 §6 / 04 文档 T01–T08）', () => {
     expect(pair.payableCents).toBe(toCents('120'));
     expect(pair.paidCents).toBe(toCents('120'));
     expect(pair.playerNetCents).toBe(-toCents('120'));
-    expect(pair.bankerNetCents).toBe(toCents('114'));
-    expect(pair.rakeCents).toBe(toCents('6'));
+    expect(pair.bankerNetCents).toBe(toCents('120'));
+    expect(pair.rakeCents).toBe(0);
+    expect(r.bankerRakeCents).toBe(toCents('6'));
+    expect(r.bankerGrossCents).toBe(toCents('114'));
   });
 
   it('需求文档场景：庄家金牛11x 注3 → 闲家扣 3×11=33', () => {
@@ -363,8 +472,10 @@ describe('单局结算（06 文档 §6 / 04 文档 T01–T08）', () => {
     expect(pair.payableCents).toBe(toCents('33'));
     expect(pair.paidCents).toBe(toCents('33'));
     expect(pair.playerNetCents).toBe(-toCents('33'));
-    expect(pair.rakeCents).toBe(toCents('1.65'));
-    expect(pair.bankerNetCents).toBe(toCents('31.35'));
+    expect(pair.rakeCents).toBe(0);
+    expect(pair.bankerNetCents).toBe(toCents('33'));
+    expect(r.bankerRakeCents).toBe(toCents('1.65'));
+    expect(r.bankerGrossCents).toBe(toCents('31.35'));
   });
 
   it('兼容旧单：预留金不足时按预留上限收取，差额防御性记免赔', () => {
@@ -387,7 +498,8 @@ describe('单局结算（06 文档 §6 / 04 文档 T01–T08）', () => {
     expect(pair.paidCents).toBe(toCents('13'));
     expect(pair.shortfallCents).toBe(toCents('20'));
     expect(pair.playerNetCents).toBe(-toCents('13'));
-    expect(pair.rakeCents).toBe(toCents('0.65')); // 按实收抽
+    expect(pair.rakeCents).toBe(0);
+    expect(r.bankerRakeCents).toBe(toCents('0.65'));
   });
 
   it('免死（0.01）：闲家抢到判和退本；庄家抢到全场判和', () => {

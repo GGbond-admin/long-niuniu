@@ -115,7 +115,7 @@ export default function Leaderboards() {
   const updatedAt = formatUpdatedAt(data?.boards[board]?.generatedAt);
 
   const score = (value: string) =>
-    board === 'points' ? `RM ${rm(value)}` : `${value}${board === 'banker' ? ' 局' : ' 次'}`;
+    board === 'points' ? rm(value) : `${value}${board === 'banker' ? ' 局' : ' 次'}`;
 
   return (
     <div className="page subpage feature-scroll-page lb-page" ref={pageScrollRef}>

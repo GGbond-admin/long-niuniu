@@ -1,6 +1,6 @@
 import type { RoundScoreboard } from '@prisma/client';
 import { describe, expect, it } from 'vitest';
-import { formatScoreboard } from './messages.js';
+import { formatScoreboard, SCOREBOARD_EMOJI } from './messages.js';
 
 describe('成绩单文案', () => {
   it('用不同符号区分赢输平，并只展示抢、下、本局与累计金额', () => {
@@ -61,24 +61,23 @@ describe('成绩单文案', () => {
 
     const text = formatScoreboard(scoreboard).join('\n');
 
-    expect(text).not.toContain('🟢 赢 · 🔴 输 · ⚪ 平');
     expect(text).toContain(
-      '🟢 <b>@赢家</b> ·\n抢 1.11 · 下 8.00 · 赢→131.92',
+      `${SCOREBOARD_EMOJI.win} <b>@赢家</b> ·\n抢 1.11 · 下 8.00 · 赢→131.92`,
     );
     expect(text).toContain(
       '上局 5001.11 · 本局 5133.03',
     );
     expect(text).toContain(
-      '🔴 <b>@输家</b> ·\n抢 0.22 · 梭哈 2.00 · 输→23.28',
+      `${SCOREBOARD_EMOJI.lose} <b>@输家</b> ·\n抢 0.22 · 梭哈 2.00 · 输→23.28`,
     );
     expect(text).toContain(
       '上局 5004.55 · 本局 4981.27',
     );
     expect(text).toContain(
-      '⚪ <b>@平家</b> ·\n抢 2.80 · 下 10.00 · 平→0.00',
+      `${SCOREBOARD_EMOJI.tie} <b>@平家</b> ·\n抢 2.80 · 下 10.00 · 水→0.00`,
     );
     expect(text).toContain(
-      '🔴 <b>庄家 @庄家</b> ·\n抢 0.70 · 输→50.00',
+      `${SCOREBOARD_EMOJI.banker} <b>庄家 @庄家</b> ·\n抢 0.70 · 输→50.00`,
     );
     expect(text).not.toContain('积分：');
     expect(text).not.toContain('上庄费');
@@ -223,5 +222,38 @@ describe('成绩单文案', () => {
     } as unknown as RoundScoreboard;
 
     expect(formatScoreboard(scoreboard).join('\n')).not.toContain('庄家走势');
+  });
+
+  it('庄钱赔完后未获赔的赢家标记为喝水', () => {
+    const scoreboard = {
+      seqNo: 13,
+      playerLines: [
+        {
+          uid: '1004',
+          nickname: '喝水玩家',
+          claimCents: '88',
+          betCents: '500',
+          outcome: 'PLAYER_WIN',
+          netCents: '0',
+          shortfallCents: '8500',
+          balanceBeforeCents: '200000',
+          balanceAfterCents: '200000',
+        },
+      ],
+      bankerSummary: {
+        uid: '2001',
+        nickname: '庄家',
+        claimCents: '70',
+        netCents: '0',
+        balanceBeforeCents: '100000',
+        balanceAfterCents: '100000',
+      },
+    } as unknown as RoundScoreboard;
+
+    const text = formatScoreboard(scoreboard).join('\n');
+    expect(text).toContain(
+      `${SCOREBOARD_EMOJI.win} <b>@喝水玩家</b> ·\n抢 0.88 · 下 5.00 · 赢→0.00（喝水 · 庄钱已赔完）`,
+    );
+    expect(text).toContain(`${SCOREBOARD_EMOJI.banker} <b>庄家 @庄家</b>`);
   });
 });

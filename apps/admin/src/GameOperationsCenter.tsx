@@ -123,10 +123,10 @@ function scoreboardMoney(value: unknown) {
   return value == null ? '—' : `RM ${rm(String(value))}`;
 }
 
-function scoreboardOutcome(outcome: unknown) {
-  if (outcome === 'PLAYER_WIN') return { symbol: '🟢', label: '赢' };
-  if (outcome === 'BANKER_WIN') return { symbol: '🔴', label: '输' };
-  return { symbol: '⚪', label: '平' };
+function scoreboardOutcome(line: { outcome?: unknown }) {
+  if (line.outcome === 'PLAYER_WIN') return { symbol: '🉐', label: '赢' };
+  if (line.outcome === 'BANKER_WIN') return { symbol: '🈚️', label: '输' };
+  return { symbol: '💧', label: '水' };
 }
 
 const packetModeLabel: Record<string, string> = {
@@ -244,7 +244,7 @@ const scoreboardHandLabels: Record<string, string> = {
 function scoreboardResultSummary(line: Row) {
   const hand = scoreboardHandLabels[String(line.handType ?? '')] ?? String(line.handType ?? '—');
   const points = Number.isFinite(Number(line.points)) ? `${Number(line.points)} 点` : '';
-  return `${hand}${points ? ` · ${points}` : ''} · ${scoreboardOutcome(line.outcome).label}`;
+  return `${hand}${points ? ` · ${points}` : ''} · ${scoreboardOutcome(line).label}`;
 }
 
 const bannerLabels: Record<string, string> = {
@@ -2314,6 +2314,18 @@ export default function GameOperationsCenter({ admin }: { admin: Admin }) {
                           {rm(scoreboard.bankerSummary.balanceAfterCents ?? 0)}
                           {' · '}
                           毛输赢 {scoreboardMoney(scoreboard.bankerSummary.grossCents)}
+                          {scoreboard.bankerSummary.profitCents != null && (
+                            <>
+                              {' '}
+                              · 对赌毛利 {scoreboardMoney(scoreboard.bankerSummary.profitCents)}
+                            </>
+                          )}
+                          {scoreboard.bankerSummary.rakeCents != null && (
+                            <>
+                              {' '}
+                              · 盈利抽水 {scoreboardMoney(scoreboard.bankerSummary.rakeCents)}
+                            </>
+                          )}
                           {' · '}
                           上庄费 {scoreboardMoney(scoreboard.bankerSummary.fees?.seatFeeCents)}
                           {' · '}

@@ -11,7 +11,7 @@ export interface FeeConfig {
   packetPerHeadCents: number;
   /** 玩家（闲家）赢抽水比例（只抽赢方盈利），默认 3% */
   playerRakeRatio: number;
-  /** 庄家赢抽水比例（只抽赢方盈利），默认 5% */
+  /** 庄家盈利抽水比例：按本局对赌毛利抽取，亏损不抽，默认 5% */
   bankerRakeRatio: number;
   /**
    * @deprecated 旧版单一抽水比例。仅用于历史局配置快照兼容：
@@ -76,7 +76,7 @@ export function rakeRatioFor(side: RakeSide, config: FeeConfig = DEFAULT_FEE_CON
   return config.bankerRakeRatio ?? config.rakeRatio ?? DEFAULT_FEE_CONFIG.bankerRakeRatio;
 }
 
-/** 抽水：只抽赢方盈利（玩家赢/庄家赢比例可分别配置） */
+/** 抽水：只抽赢方盈利。闲家按该笔实付；庄家按本局对赌毛利，亏损不抽。 */
 export function rakeOf(
   profitCents: number,
   side: RakeSide,

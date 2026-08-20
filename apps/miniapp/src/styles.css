@@ -164,7 +164,20 @@
 .game-room-action-row .primary-action,.game-room-actions>.primary-action{margin-top:0}
 .game-room-action-row .btn{margin:0;padding:12px 8px;font-size:13px}
 .scoreboard-bubble{text-align:left!important}
-.scoreboard-bubble pre{margin:0;white-space:pre-wrap;word-break:break-word;font:inherit;font-size:12px;line-height:1.55}
+.scoreboard-bubble pre{
+  margin:0;
+  white-space:pre-wrap;
+  overflow-wrap:anywhere;
+  word-break:normal;
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  font-size:13px;
+  line-height:1.55;
+  letter-spacing:0;
+  word-spacing:0;
+  font-variant-numeric:lining-nums;
+  font-variant-east-asian:proportional-width;
+  font-feature-settings:"fwid" 0;
+}
 
 .rules-card{padding:14px 16px;border:1px solid var(--border);border-radius:var(--radius);background:#161618;color:var(--text-secondary);font-size:13px;line-height:1.65}.rules-card p+p,.rules-card ul,.rules-card ol{margin-top:10px}.rules-card ul{padding-left:18px}.rules-card li+li{margin-top:6px}.rules-card strong{color:var(--text);font-weight:600}.rules-ol{padding-left:18px}.rules-ol>li+li{margin-top:12px}.rules-ol>li>p{margin-top:4px}.rules-block .section-top{margin-bottom:8px}
 
@@ -178,6 +191,7 @@
   max-height:var(--app-viewport-height, 100dvh);
   display:flex;
   flex-direction:column;
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
   background:
     radial-gradient(120% 80% at 50% -10%, rgba(201,169,98,.16), transparent 55%),
     linear-gradient(180deg, #141312 0%, #0b0b0c 42%, #080808 100%);
@@ -250,10 +264,11 @@ body.kb-open .game-room-channel{
 }
 .game-room-header{
   display:grid;
-  grid-template-columns:44px minmax(0,1fr) auto;
+  grid-template-columns:44px minmax(0,1fr) 44px;
   align-items:center;
-  gap:8px;
-  padding:6px 10px;
+  gap:0;
+  min-height:48px;
+  padding:2px 6px;
   border-bottom:1px solid rgba(232,213,168,.12);
   /* 聊天滚动区上方不用毛玻璃：backdrop blur 会逐帧重绘导致低端机卡顿 */
   background:rgba(19,19,21,.98);
@@ -262,12 +277,22 @@ body.kb-open .game-room-channel{
   width:44px;
   height:44px;
 }
-.game-room-title{min-width:0}
+.game-room-title{
+  min-width:0;
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  justify-content:center;
+  gap:1px;
+  text-align:center;
+}
 .game-room-title strong{
   display:block;
+  max-width:100%;
   font-size:15px;
   font-weight:700;
   letter-spacing:-.01em;
+  line-height:1.2;
   overflow:hidden;
   text-overflow:ellipsis;
   white-space:nowrap;
@@ -275,13 +300,17 @@ body.kb-open .game-room-channel{
 .game-room-title small{
   display:inline-flex;
   align-items:center;
-  gap:5px;
-  margin-top:3px;
+  justify-content:center;
+  gap:4px;
+  margin-top:0;
   color:var(--success);
-  font-size:11px;
+  font-size:10px;
+  font-weight:500;
+  line-height:1.2;
+  white-space:nowrap;
 }
 .game-room-title small i{
-  width:6px;height:6px;border-radius:50%;
+  width:5px;height:5px;border-radius:50%;
   background:var(--success);
   box-shadow:0 0 8px rgba(110,231,183,.55);
 }
@@ -293,6 +322,7 @@ body.kb-open .game-room-channel{
 .game-room-header-actions{
   display:flex;
   align-items:center;
+  justify-content:center;
 }
 .game-room-refresh{
   width:44px;
@@ -1229,17 +1259,25 @@ body.kb-open .game-room-channel{
   border-radius:16px;
   border-top-left-radius:5px;
   background:rgba(255,255,255,.05);
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  letter-spacing:0;
+  word-spacing:0;
+  font-variant-numeric:lining-nums;
+  font-variant-east-asian:proportional-width;
+  font-feature-settings:"fwid" 0;
 }
 .feed-assistant-bubble p{
-  color:var(--text-secondary);
+  color:#fff;
   font-size:12px;
   line-height:1.55;
   white-space:pre-wrap;
+  overflow-wrap:break-word;
+  word-break:normal;
 }
 .feed-assistant-bubble time{
   display:block;
   margin-top:4px;
-  color:var(--text-tertiary);
+  color:rgba(255,255,255,.42);
   font-size:10px;
   text-align:right;
 }
@@ -2050,9 +2088,7 @@ body.kb-open .game-room-channel{
   box-shadow:0 10px 28px rgba(0,0,0,.45);
 }
 
-.game-room-header{padding:5px 10px;gap:8px}
-.game-room-title strong{font-size:14px}
-.game-room-title small{margin-top:2px;font-size:11px}
+.game-room-header{padding:2px 6px;gap:0}
 .game-room-refresh{padding:6px 10px;font-size:11px}
 .game-room-phase{
   margin:8px 10px 0;
@@ -5404,10 +5440,10 @@ img.feed-chat-avatar {
 }
 .feed-assistant-bubble.countdown-lock .countdown-lock-text {
   margin: 0;
-  font-variant-numeric: tabular-nums;
+  font-variant-numeric: lining-nums;
 }
 .feed-assistant-bubble.countdown-live p {
-  font-variant-numeric: tabular-nums;
+  font-variant-numeric: lining-nums;
 }
 
 /* 底部工具抽屉：骰子 / 表情 / 贴纸 分页 */
@@ -5946,7 +5982,7 @@ img.feed-assistant-avatar {
   padding: 8px 12px;
   border-radius: 6px;
   background: #2c2c2e !important;
-  color: #f5f5f5 !important;
+  color: #fff !important;
   border: 0 !important;
   font-size: 15px;
   line-height: 1.4;
@@ -5954,7 +5990,7 @@ img.feed-assistant-avatar {
 }
 .feed-chat.mine .feed-chat-bubble {
   background: #3a3428 !important;
-  color: #f5f0e6 !important;
+  color: #fff !important;
 }
 .feed-chat.mine .feed-chat-bubble:not(.emoji) {
   /* 短消息不再缩成很窄的“折叠块”，长消息保持完整换行。 */
@@ -5975,6 +6011,7 @@ img.feed-assistant-avatar {
   padding: 8px 12px;
   border-radius: 6px;
   background: #2c2c2e;
+  color: #fff;
   font-size: 14px;
   line-height: 1.45;
 }
@@ -6063,9 +6100,9 @@ img.feed-assistant-avatar {
   font-size:12px;
 }
 
-/* 互动群整体字号：原先 10–12px 偏小气，统一抬一档 */
-.game-room .game-room-title strong{font-size:17px}
-.game-room .game-room-title small{font-size:12px}
+/* 互动群顶栏：标题与状态叠放居中，避免左右留白浪费 */
+.game-room .game-room-title strong{font-size:15px}
+.game-room .game-room-title small{font-size:10px}
 .game-room .game-room-phase{
   align-items:center;
   gap:8px;
@@ -6123,13 +6160,36 @@ img.feed-assistant-avatar {
   padding:10px 14px;
   border-radius:10px;
 }
+.game-room .feed-assistant-bubble,
+.game-room .feed-assistant-bubble p,
+.game-room .scoreboard-bubble,
+.game-room .scoreboard-bubble pre{
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif !important;
+  letter-spacing:0 !important;
+  word-spacing:0;
+  font-variant-numeric:lining-nums;
+  font-variant-east-asian:proportional-width;
+  font-feature-settings:"fwid" 0;
+}
 .game-room .feed-assistant-bubble{
   font-size:15px;
   line-height:1.55;
   padding:10px 14px;
   border-radius:10px;
+  color:#fff;
 }
-.game-room .feed-assistant-bubble p{font-size:15px;line-height:1.55}
+.game-room .feed-assistant-bubble p,
+.game-room .feed-chat-bubble,
+.game-room .feed-chat-bubble p{
+  color:#fff;
+  letter-spacing:0 !important;
+  font-variant-numeric:lining-nums;
+}
+.game-room .feed-assistant-bubble p{font-size:15px;line-height:1.55;overflow-wrap:break-word;word-break:normal}
+.game-room .feed-assistant-bubble time,
+.game-room .feed-chat-bubble time{
+  color:rgba(255,255,255,.42);
+}
 .game-room .feed-assistant-bubble.countdown-lock{
   display:inline-flex;
   width:fit-content;

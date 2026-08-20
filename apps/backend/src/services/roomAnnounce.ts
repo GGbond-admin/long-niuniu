@@ -11,6 +11,7 @@ import {
 } from '../bot/messages.js';
 import { prisma } from '../lib/prisma.js';
 import { cancelReasonText } from './errorMessages.js';
+import { countEligiblePlayers } from './eligiblePlayers.js';
 import {
   getMessageTemplatesForRoom,
   parseSettingsSnapshot,
@@ -217,14 +218,14 @@ export async function buildRoundAnnounceMessages(params: {
     const live = countdown(
       'bid',
       round.bidEndsAt,
-      '竞标倒计时 · 还剩 {{remaining}} 秒\n首次报整数，后续每次固定加 RM 100。',
+      '竞标倒计时 · 还剩 {{remaining}} 秒\n首次报整数，后续每次至少加 100。',
     );
     if (live) messages.push(live);
     return messages;
   }
 
   if (params.to === RoundPhase.BETTING) {
-    const players = Math.max(1, round.bets.length + (banker ? 1 : 0));
+    const players = await countEligiblePlayers(round.room.id);
     const range = settings
       ? bettingRange(Number(round.potCents), Math.max(players, 1), settings.betting)
       : null;
@@ -248,10 +249,10 @@ export async function buildRoundAnnounceMessages(params: {
             banker: bankerLabel,
             pot,
             betSeconds: settings?.round.betDurationSeconds ?? 50,
-            betMin: fromCents(range?.betMinCents ?? 200),
+            betMin: fromCents(range?.betMinCents ?? 300),
             betMax: fromCents(range?.betMaxCents ?? 0),
-            shMin: fromCents(range?.shMinCents ?? 2_000),
-            shMax: '各自余额',
+            shMin: fromCents(range?.shMinCents ?? 3_000),
+            shMax: fromCents(range?.shMaxCents ?? 0),
           }),
         ),
       ),

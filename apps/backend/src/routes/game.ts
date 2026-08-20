@@ -3,6 +3,7 @@ import type { FastifyInstance, FastifyReply } from 'fastify';
 import type { WebSocket } from 'ws';
 import { z } from 'zod';
 import { HAND_LABEL } from '../engine/hand.js';
+import { bankerRakeCentsFromSummary } from '../engine/settlement.js';
 import { safeDecryptSecret } from '../lib/crypto.js';
 import { prisma } from '../lib/prisma.js';
 import {
@@ -992,6 +993,7 @@ export async function adminGameRoutes(app: FastifyInstance) {
       pendingKyc,
       pendingDeposits,
       pendingWithdrawals,
+      pendingWithdrawAccounts,
       activeRounds,
       packetTransit,
       todaySettlements,
@@ -1002,6 +1004,7 @@ export async function adminGameRoutes(app: FastifyInstance) {
       prisma.kyc.count({ where: { status: 'PENDING' } }),
       prisma.depositOrder.count({ where: { status: 'PENDING' } }),
       prisma.withdrawOrder.count({ where: { status: 'PENDING' } }),
+      prisma.withdrawAccount.count({ where: { status: 'PENDING' } }),
       prisma.round.count({
         where: {
           phase: {
@@ -1031,6 +1034,7 @@ export async function adminGameRoutes(app: FastifyInstance) {
       pendingKyc,
       pendingDeposits,
       pendingWithdrawals,
+      pendingWithdrawAccounts,
       activeRounds,
       packetTransitCents: String(packetTransit?.balanceCents ?? 0n),
       todaySettlements,
@@ -2159,7 +2163,8 @@ export async function adminGameRoutes(app: FastifyInstance) {
       const [
         settleSum,
         rakePlayerSum,
-        rakeBankerSum,
+        rakeBankerPairSum,
+        bankerScoreboards,
         rakeLedger,
         seatFees,
         serviceFees,
@@ -2185,6 +2190,10 @@ export async function adminGameRoutes(app: FastifyInstance) {
         prisma.settlement.aggregate({
           where: { createdAt: window, outcome: 'BANKER_WIN' },
           _sum: { rakeCents: true },
+        }),
+        prisma.roundScoreboard.findMany({
+          where: { round: { settledAt: window } },
+          select: { bankerSummary: true },
         }),
         platformCredit('PLATFORM_RAKE'),
         platformCredit('PLATFORM_FEES', ['fee_banker_seat']),
@@ -2238,7 +2247,13 @@ export async function adminGameRoutes(app: FastifyInstance) {
         shortfallCents: String(settleSum._sum.shortfallCents ?? 0n),
         rakeCents: String(rakeLedger._sum.amountCents ?? 0n),
         rakePlayerCents: String(rakePlayerSum._sum.rakeCents ?? 0n),
-        rakeBankerCents: String(rakeBankerSum._sum.rakeCents ?? 0n),
+        rakeBankerCents: String(
+          (rakeBankerPairSum._sum.rakeCents ?? 0n) +
+            bankerScoreboards.reduce(
+              (sum, row) => sum + bankerRakeCentsFromSummary(row.bankerSummary),
+              0n,
+            ),
+        ),
         seatFeeCents: String(seatFees._sum.amountCents ?? 0n),
         serviceFeeCents: String(serviceFees._sum.amountCents ?? 0n),
         packetFeeCents: String(packetFees._sum.amountCents ?? 0n),

@@ -76,6 +76,7 @@ vi.mock('../engine/betting.js', () => ({
 vi.mock('../lib/prisma.js', () => ({
   prisma: {
     round: { findUnique: vi.fn(async () => fixture.round) },
+    roomMember: { count: vi.fn(async () => 15) },
     user: {
       findUnique: vi.fn(async () => ({
         uid: 'banker',
@@ -119,6 +120,15 @@ describe('阶段机器人播报顺序', () => {
       'bet-start',
       'countdown:bet',
     ]);
+  });
+
+  it('开注范围按在场合格人数计算，不用已下注人数', async () => {
+    const { bettingRange } = await import('../engine/betting.js');
+    await buildRoundAnnounceMessages({
+      roundId: 'round-1',
+      to: RoundPhase.BETTING,
+    });
+    expect(bettingRange).toHaveBeenCalledWith(500_000, 15, fixture.settings.betting);
   });
 
   it('封盘时只提示投骰，等待发包留到开骰之后', async () => {

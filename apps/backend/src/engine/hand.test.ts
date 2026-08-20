@@ -21,14 +21,17 @@ describe('点数计算（06 文档 §1.1）', () => {
   it('2.80 → 2+8+0=10 → 10点（牛牛）', () => {
     expect(pointsOf(toCents('2.80'))).toBe(10);
   });
-  it('27.23 → 2+7+2+3=14 → 4点（多位整数全数字求和）', () => {
-    expect(pointsOf(toCents('27.23'))).toBe(4);
+  it('27.23 → 三位 7+2+3=12 → 2点', () => {
+    expect(pointsOf(toCents('27.23'))).toBe(2);
   });
-  it('总和个位为 0 → 10点', () => {
+  it('三位和刚好 10 → 10点', () => {
     expect(pointsOf(toCents('1.09'))).toBe(10); // 1+0+9=10
   });
-  it('相加为 20 仍记 10 点（点数表无 0 点）', () => {
-    expect(pointsOf(toCents('9.83'))).toBe(10); // 9+8+3=20
+  it('三位和为 20 → 0点', () => {
+    expect(pointsOf(toCents('9.83'))).toBe(0); // 9+8+3=20
+  });
+  it('1.28 → 1+2+8=11 → 1点', () => {
+    expect(pointsOf(toCents('1.28'))).toBe(1);
   });
   it('0.09 → 9点', () => {
     expect(pointsOf(toCents('0.09'))).toBe(9);
@@ -51,8 +54,11 @@ describe('牌型判定（06 文档 §1.2）', () => {
     expect(handTypeOf(toCents('3.21'))).toBe(HandType.FANSHUN);
     expect(handTypeOf(toCents('2.10'))).toBe(HandType.FANSHUN);
   });
-  it('反顺：0.98 为规则钦定特例', () => {
+  it('反顺：0.98 按规则列为倒顺，且小于 2.10', () => {
     expect(handTypeOf(toCents('0.98'))).toBe(HandType.FANSHUN);
+    expect(compareHands(evaluateHand(toCents('2.10')), evaluateHand(toCents('0.98')))).toBe(
+      CompareResult.BANKER_WIN,
+    );
   });
   it('反顺：仅递减但不连续不算，如 9.51 / 3.10', () => {
     expect(handTypeOf(toCents('9.51'))).toBe(HandType.NORMAL);
@@ -93,10 +99,10 @@ describe('牌型判定（06 文档 §1.2）', () => {
     expect(handTypeOf(toCents('0.55'))).toBe(HandType.DUIZI); // 和为 10 但对子优先
     expect(handTypeOf(toCents('1.36'))).toBe(HandType.NIUNIU); // 递增但不连续 → 牛牛
   });
-  it('相加为 20 不是牛牛，按普通 10 点', () => {
+  it('相加为 20 不是牛牛，按普通 0 点', () => {
     const hand = evaluateHand(toCents('9.83'));
     expect(hand.type).toBe(HandType.NORMAL);
-    expect(hand.points).toBe(10);
+    expect(hand.points).toBe(0);
   });
   it('免死：0.01 固定判免死', () => {
     expect(handTypeOf(toCents('0.01'))).toBe(HandType.MIANSI);
@@ -117,6 +123,84 @@ describe('比牌（06 文档 §2）', () => {
     const player = evaluateHand(toCents('1.11'));
     expect(compareHands(banker, player)).toBe(CompareResult.PLAYER_WIN);
   });
+  it('豹子对豹子比金额：9.99 赢 1.11', () => {
+    const banker = evaluateHand(toCents('1.11'));
+    const player = evaluateHand(toCents('9.99'));
+    expect(compareHands(banker, player)).toBe(CompareResult.PLAYER_WIN);
+  });
+  it('满牛对满牛比金额：88.00 赢 5.00', () => {
+    const banker = evaluateHand(toCents('5.00'));
+    const player = evaluateHand(toCents('88.00'));
+    expect(compareHands(banker, player)).toBe(CompareResult.PLAYER_WIN);
+  });
+  it('顺子对顺子比金额：7.89 赢 0.12', () => {
+    const banker = evaluateHand(toCents('0.12'));
+    const player = evaluateHand(toCents('7.89'));
+    expect(compareHands(banker, player)).toBe(CompareResult.PLAYER_WIN);
+  });
+  it('倒顺对倒顺比金额：9.87 赢 2.10', () => {
+    const banker = evaluateHand(toCents('2.10'));
+    const player = evaluateHand(toCents('9.87'));
+    expect(compareHands(banker, player)).toBe(CompareResult.PLAYER_WIN);
+  });
+  it('对子对对子只比后两位：1.99 赢 9.11', () => {
+    const banker = evaluateHand(toCents('9.11'));
+    const player = evaluateHand(toCents('1.99'));
+    expect(banker.type).toBe(HandType.DUIZI);
+    expect(player.type).toBe(HandType.DUIZI);
+    expect(compareHands(banker, player)).toBe(CompareResult.PLAYER_WIN);
+  });
+  it('对子后两位相同再比前位：9.22 赢 1.22', () => {
+    const banker = evaluateHand(toCents('1.22'));
+    const player = evaluateHand(toCents('9.22'));
+    expect(compareHands(banker, player)).toBe(CompareResult.PLAYER_WIN);
+  });
+  it('对子后两位与前位都相同才平局：1.22 平 1.22', () => {
+    expect(compareHands(evaluateHand(toCents('1.22')), evaluateHand(toCents('1.22')))).toBe(
+      CompareResult.TIE,
+    );
+  });
+  it('对子先比后两位：8.99 赢 9.88', () => {
+    expect(compareHands(evaluateHand(toCents('9.88')), evaluateHand(toCents('8.99')))).toBe(
+      CompareResult.PLAYER_WIN,
+    );
+  });
+  it('对子完整排序：后两位 99>88>…>11，同后两位再比前位', () => {
+    const ordered = [
+      '8.99', '0.99', '9.88', '0.88', '9.77', '0.55', '9.22', '1.22', '9.11', '0.11',
+    ];
+    for (let i = 0; i < ordered.length - 1; i += 1) {
+      expect(compareHands(evaluateHand(toCents(ordered[i])), evaluateHand(toCents(ordered[i + 1])))).toBe(
+        CompareResult.BANKER_WIN,
+      );
+    }
+  });
+  it('金牛对金牛只比中间位：0.90 赢 10.80', () => {
+    const banker = evaluateHand(toCents('10.80'));
+    const player = evaluateHand(toCents('0.90'));
+    expect(banker.type).toBe(HandType.JINNIU);
+    expect(player.type).toBe(HandType.JINNIU);
+    expect(compareHands(banker, player)).toBe(CompareResult.PLAYER_WIN);
+  });
+  it('金牛中间位相同则平局，前后不算：0.50 平 10.50', () => {
+    const banker = evaluateHand(toCents('0.50'));
+    const player = evaluateHand(toCents('10.50'));
+    expect(compareHands(banker, player)).toBe(CompareResult.TIE);
+  });
+  it('普通先比点数：0.09（9点）赢 1.30（4点），即使金额更小', () => {
+    const banker = evaluateHand(toCents('1.30'));
+    const player = evaluateHand(toCents('0.09'));
+    expect(banker.type).toBe(HandType.NORMAL);
+    expect(player.type).toBe(HandType.NORMAL);
+    expect(compareHands(banker, player)).toBe(CompareResult.PLAYER_WIN);
+  });
+  it('普通同点再比金额：3.42 赢 1.26（同为 9 点）', () => {
+    const banker = evaluateHand(toCents('1.26'));
+    const player = evaluateHand(toCents('3.42'));
+    expect(banker.points).toBe(9);
+    expect(player.points).toBe(9);
+    expect(compareHands(banker, player)).toBe(CompareResult.PLAYER_WIN);
+  });
   it('同级比金额：2.80 赢 1.09（均为牛牛）', () => {
     const banker = evaluateHand(toCents('1.09'));
     const player = evaluateHand(toCents('2.80'));
@@ -127,10 +211,15 @@ describe('比牌（06 文档 §2）', () => {
     const player = evaluateHand(toCents('2.80'));
     expect(compareHands(banker, player)).toBe(CompareResult.BANKER_WIN);
   });
-  it('牛牛等级高于普通：2.80 赢 9.83（普通 10 点，金额更大也输）', () => {
+  it('牛牛等级高于普通：2.80 赢 9.83（普通 0 点）', () => {
     const banker = evaluateHand(toCents('9.83'));
     const player = evaluateHand(toCents('2.80'));
     expect(compareHands(banker, player)).toBe(CompareResult.PLAYER_WIN);
+  });
+  it('普通 9 点大于 0 点：3.42 赢 9.83', () => {
+    expect(compareHands(evaluateHand(toCents('9.83')), evaluateHand(toCents('3.42')))).toBe(
+      CompareResult.PLAYER_WIN,
+    );
   });
   it('金额完全相同 → 平局', () => {
     const a = evaluateHand(toCents('2.80'));
@@ -143,8 +232,8 @@ describe('牌型倍数', () => {
   it('牛牛默认 10 倍', () => {
     expect(multiplierOf(evaluateHand(toCents('2.35')))).toBe(10);
   });
-  it('普通 10 点仍走点数倍数表（默认 4 倍）', () => {
-    expect(multiplierOf(evaluateHand(toCents('9.83')))).toBe(4);
+  it('普通 0 点走点数倍数表（默认 1 倍）', () => {
+    expect(multiplierOf(evaluateHand(toCents('9.83')))).toBe(1);
   });
 });
 
@@ -178,6 +267,12 @@ describe('自爆（06 文档 §2.1）', () => {
     const h = evaluateHand(toCents('1.10'));
     expect(h.type).toBe(HandType.NORMAL);
     expect(h.points).toBe(2);
+    expect(isBust(h)).toBe(true);
+  });
+  it('普通 0 点视为自爆', () => {
+    const h = evaluateHand(toCents('9.83'));
+    expect(h.type).toBe(HandType.NORMAL);
+    expect(h.points).toBe(0);
     expect(isBust(h)).toBe(true);
   });
   it('4 点普通牌型不自爆：1.30', () => {

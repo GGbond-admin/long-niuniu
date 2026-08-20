@@ -470,14 +470,14 @@ export default function SettlementWizard({
               <span>逐笔实收汇总</span>
             </article>
             <article>
-              <small>庄家赢抽水</small>
+              <small>庄家盈利抽水</small>
               <strong>{signedRm(preview.financials.rakeBankerCents)}</strong>
-              <span>逐笔实收汇总</span>
+              <span>本局对赌毛利 × 5%（亏损不抽）</span>
             </article>
             <article className="total">
               <small>总抽水利润</small>
               <strong>{signedRm(preview.financials.rakeTotalCents)}</strong>
-              <span>玩家赢 + 庄家赢</span>
+              <span>闲家赢 + 庄家盈利</span>
             </article>
             <article className="expense">
               <small>公司支出 · {(preview.expenseBps / 100).toFixed(2)}%</small>

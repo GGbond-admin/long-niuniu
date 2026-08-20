@@ -236,14 +236,14 @@ describe('非竞标/下注阶段纯数字当普通聊天', () => {
       kind: 'error',
       action: 'bet',
       amountCents: '500',
-      message: '低于最低下注金额 RM 10.00',
+      message: '低于最低下注金额 10.00',
     });
     expect(privateBetConfirmationFor(result)).toEqual({
       type: 'bet_confirmation',
       status: 'failed',
       action: 'bet',
       amountCents: '500',
-      reason: '低于最低下注金额 RM 10.00',
+      reason: '低于最低下注金额 10.00',
     });
   });
 
@@ -345,7 +345,7 @@ describe('非竞标/下注阶段纯数字当普通聊天', () => {
     });
     expect(result).toEqual({
       kind: 'error',
-      message: '下一口最低 RM 4,100',
+      message: '下一口最低 4,100',
     });
   });
 

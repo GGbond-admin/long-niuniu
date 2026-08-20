@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { Prisma, type RoundPhase, type SettleOutcome, type UserKind } from '@prisma/client';
 import { prisma } from '../lib/prisma.js';
+import { bankerRakeCentsFromSummary } from '../engine/settlement.js';
 import { parseSettingsSnapshot } from './gameSettings.js';
 import {
   ProfitPoolError,
@@ -29,6 +30,8 @@ export interface RangeRoundRow {
   configSnapshot: Prisma.JsonValue | null;
   finishedAt: Date | null;
   settlements: RangeSettlementRow[];
+  /** 新局成绩单上的本局庄家盈利抽水；旧局缺省时为 0，改走 settlement.BANKER_WIN.rakeCents */
+  bankerRakeCents?: bigint;
 }
 
 export interface RangeFinancials {
@@ -148,6 +151,7 @@ export function aggregateRangeFinancials(
     }
 
     let bankerTurnover = 0n;
+    rakeBankerCents += round.bankerRakeCents ?? 0n;
     for (const settlement of round.settlements) {
       if (settlement.outcome === 'PLAYER_WIN') rakePlayerCents += settlement.rakeCents;
       if (settlement.outcome === 'BANKER_WIN') rakeBankerCents += settlement.rakeCents;
@@ -303,6 +307,7 @@ export async function computeProfitPoolRange(
         bankerId: true,
         configSnapshot: true,
         finishedAt: true,
+        scoreboard: { select: { bankerSummary: true } },
         settlements: {
           select: {
             userId: true,
@@ -365,7 +370,13 @@ export async function computeProfitPoolRange(
       })
     : [];
   const userKinds = new Map(participants.map((user) => [user.id, user.kind]));
-  const financials = aggregateRangeFinancials(rounds, userKinds);
+  const financials = aggregateRangeFinancials(
+    rounds.map((round) => ({
+      ...round,
+      bankerRakeCents: bankerRakeCentsFromSummary(round.scoreboard?.bankerSummary),
+    })),
+    userKinds,
+  );
 
   const rawConfig =
     config?.value && typeof config.value === 'object' && !Array.isArray(config.value)

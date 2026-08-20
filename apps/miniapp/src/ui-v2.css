@@ -21,8 +21,8 @@
   --blur: 20px;
   --page-x: 16px;
   --dock-h: 72px;
-  --font-display: 'DM Sans', 'Noto Sans SC', sans-serif;
-  --font-ui: 'Noto Sans SC', 'DM Sans', sans-serif;
+  --font-display: 'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Noto Sans SC', sans-serif;
+  --font-ui: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans SC', sans-serif;
   --text: var(--ink);
   --text-secondary: var(--ink-soft);
   --text-tertiary: var(--ink-mute);
@@ -1521,7 +1521,7 @@ body.tg-native-back-visible :is(
 }
 
 .game-room-header {
-  padding-inline: 16px !important;
+  padding-inline: 6px !important;
 }
 
 .cash-nav,

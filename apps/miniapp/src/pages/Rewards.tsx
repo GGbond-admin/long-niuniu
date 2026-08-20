@@ -219,7 +219,7 @@ export default function Rewards() {
           </div>
           <div>
             <small>今日入账</small>
-            <b className="gold">{error ? '—' : `RM ${rm(String(summary.purse))}`}</b>
+            <b className="gold">{error ? '—' : rm(String(summary.purse))}</b>
           </div>
         </div>
       </section>
@@ -288,7 +288,7 @@ export default function Rewards() {
                         <strong>{item.title}</strong>
                         <em className={`rw-status ${status.key}`}>{status.label}</em>
                       </div>
-                      <b className="rw-amount">RM {rm(item.amountCents)}</b>
+                      <b className="rw-amount">{rm(item.amountCents)}</b>
                     </div>
                     <div className="rw-track">
                       <i style={{ width: `${percentage}%` }} />
@@ -350,7 +350,7 @@ export default function Rewards() {
                   <strong>{winner.nickname}</strong>
                   <small>{winner.title}</small>
                 </div>
-                <b>+RM {rm(winner.amountCents)}</b>
+                <b>+{rm(winner.amountCents)}</b>
               </div>
             ))}
           </div>

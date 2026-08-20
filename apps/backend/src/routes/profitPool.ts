@@ -1,5 +1,6 @@
 /** 按房间局号范围的称桶利润池、不可变快照与代理网络 API。权限：SUPER / FINANCE。 */
 import type { FastifyInstance, FastifyReply } from 'fastify';
+import type { Prisma } from '@prisma/client';
 import { z } from 'zod';
 import { prisma } from '../lib/prisma.js';
 import {
@@ -14,7 +15,7 @@ import {
   unbindAgentPlayer,
   updateAgent,
 } from '../services/profitPool.js';
-import { houseInviteLinks } from '../services/houseInviter.js';
+import { HOUSE_INVITER_NOTE, houseInviteLinks } from '../services/houseInviter.js';
 import {
   distributeProfitPoolBatch,
   generateProfitPoolBatch,
@@ -140,6 +141,45 @@ const userOptionQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(20).default(8),
 });
 
+/**
+ * 代理/玩家选择器过滤条件。
+ * 排除官方邀请号时必须显式包含 adminNote IS NULL：
+ * PostgreSQL 里 `NOT (admin_note = 'HOUSE_INVITER')` 对 NULL 为 unknown，普通用户会被整批滤掉。
+ */
+export function profitPoolUserOptionWhere(q: string): Prisma.UserWhereInput {
+  const query = q.trim();
+  const tgIdCandidate = query && /^\d{1,19}$/.test(query) ? BigInt(query) : undefined;
+  const tgId =
+    tgIdCandidate !== undefined && tgIdCandidate <= 9_223_372_036_854_775_807n
+      ? tgIdCandidate
+      : undefined;
+  const search: Prisma.UserWhereInput | undefined = query
+    ? {
+        OR: [
+          { uid: { contains: query } },
+          { nickname: { contains: query, mode: 'insensitive' } },
+          {
+            tgUsername: {
+              contains: query.replace(/^@/, ''),
+              mode: 'insensitive',
+            },
+          },
+          { tgDisplayName: { contains: query, mode: 'insensitive' } },
+          ...(tgId ? [{ tgId }] : []),
+        ],
+      }
+    : undefined;
+  return {
+    kind: 'HUMAN',
+    AND: [
+      {
+        OR: [{ adminNote: null }, { adminNote: { not: HOUSE_INVITER_NOTE } }],
+      },
+      ...(search ? [search] : []),
+    ],
+  };
+}
+
 export async function adminProfitPoolRoutes(app: FastifyInstance) {
   const guard = {
     preHandler: [app.authAdmin, app.requireAdminRoles('SUPER', 'FINANCE')],
@@ -228,32 +268,8 @@ export async function adminProfitPoolRoutes(app: FastifyInstance) {
    */
   app.get('/api/admin/profit-pool/user-options', guard, async (req) => {
     const { q, limit } = userOptionQuerySchema.parse(req.query);
-    const tgIdCandidate = q && /^\d{1,19}$/.test(q) ? BigInt(q) : undefined;
-    const tgId =
-      tgIdCandidate !== undefined && tgIdCandidate <= 9_223_372_036_854_775_807n
-        ? tgIdCandidate
-        : undefined;
     const users = await prisma.user.findMany({
-      where: {
-        kind: 'HUMAN',
-        NOT: { adminNote: 'HOUSE_INVITER' },
-        ...(q
-          ? {
-              OR: [
-                { uid: { contains: q } },
-                { nickname: { contains: q, mode: 'insensitive' as const } },
-                {
-                  tgUsername: {
-                    contains: q.replace(/^@/, ''),
-                    mode: 'insensitive' as const,
-                  },
-                },
-                { tgDisplayName: { contains: q, mode: 'insensitive' as const } },
-                ...(tgId ? [{ tgId }] : []),
-              ],
-            }
-          : {}),
-      },
+      where: profitPoolUserOptionWhere(q),
       select: {
         id: true,
         uid: true,

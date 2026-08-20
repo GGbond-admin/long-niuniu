@@ -131,8 +131,8 @@ async function rejectInsufficientContinuationLocked(params: {
     `round:${previous.id}:continuation:insufficient`,
     [
       '【续庄余额不足】',
-      `庄家 ${mention(funding)} 续庄需冻结 RM ${fromCents(requiredCents)}，`
-        + `当前可用 RM ${fromCents(availableCents)}，下一局立即转入公开竞标。`,
+      `庄家 ${mention(funding)} 续庄需冻结 ${fromCents(requiredCents)}，`
+        + `当前可用 ${fromCents(availableCents)}，下一局立即转入公开竞标。`,
     ].join('\n'),
     { force: true },
   );

@@ -1,5 +1,6 @@
 import { Fragment, useEffect, useRef, useState, type ReactNode } from 'react';
-import { del, downloadAuthorized, hasToken, logout, openProtectedUpload, patch, post, put, request, rm, setAdminToken } from './api';
+import { del, downloadAuthorized, hasToken, logout, patch, post, put, request, rm, setAdminToken } from './api';
+import FinanceCenter from './FinanceCenter';
 import GameConfigEditor from './GameConfigEditor';
 import GameOperationsCenter from './GameOperationsCenter';
 import ProfitPoolCenter from './ProfitPoolCenter';
@@ -10,7 +11,7 @@ const DEFAULT_GAME_CODE = 'SUPREME_NIUNIU';
 
 type Admin = { id: string; username: string; role: 'SUPER' | 'OPERATOR' | 'REVIEWER' | 'FINANCE' };
 type Page =
-  | 'dashboard' | 'gameOps' | 'virtualPlayers' | 'users' | 'kyc' | 'deposits' | 'withdrawals' | 'payments' | 'rooms' | 'rounds'
+  | 'dashboard' | 'gameOps' | 'virtualPlayers' | 'users' | 'kyc' | 'payments' | 'rooms' | 'rounds'
   | 'tng' | 'finance' | 'profitPool' | 'rewards' | 'rebates' | 'leaderboards' | 'messaging'
   | 'support' | 'config' | 'bots' | 'admins' | 'audit';
 type Row = Record<string, any>;
@@ -20,15 +21,13 @@ const pageTitles: Record<Page, [string, string]> = {
   gameOps: ['游戏运营中心', '游戏目录 → 互动群运营台（小助手 / 牌局 / TNG）'],
   virtualPlayers: ['虚拟玩家', '互动群假人：能力开关、资金、自动参与与代操作'],
   users: ['用户中心', '点选用户即可调账、改资料、看流水与牌局'],
-  kyc: ['实名审核', '核对 TNG 姓名与提款银行资料'],
-  deposits: ['充值管理', '充值工单与收款账户统一处理'],
-  withdrawals: ['提现管理', '提现工单与收款账户审核'],
+  kyc: ['资料审核', '实名认证与提款账户待审'],
   payments: ['支付通道', 'VPay 商户设置、回调白名单与通知地址'],
   rooms: ['游戏入口管理', '一款游戏对应一个互动群；当前仅支持至尊牛牛'],
   rounds: ['对局控制台', '竞标、下注、发包、认额与结算'],
   tng: ['TNG 红包台账', '发包账号、在途金额与认额差异'],
-  finance: ['钱包财务', '平台科目、全量流水与人工调账'],
-  profitPool: ['代理与利润池', '按局数结算、永久锁局、代理利润大屏与专属看板'],
+  finance: ['钱包财务', '科目总览、收支图表与全部充提订单'],
+  profitPool: ['代理与利润池', '按局数结算、永久锁局、代理网络与专属看板'],
   rewards: ['每日奖励', '棋牌、庄家与特别奖励配置'],
   rebates: ['推广返水', '三级有效流水与日结佣金'],
   leaderboards: ['排行榜', '积分、棋牌、打桩三榜快照'],
@@ -41,10 +40,10 @@ const pageTitles: Record<Page, [string, string]> = {
 };
 
 const roleMenus: Record<Admin['role'], Page[]> = {
-  SUPER: ['dashboard', 'users', 'kyc', 'deposits', 'withdrawals', 'payments', 'gameOps', 'tng', 'finance', 'profitPool', 'rebates', 'messaging', 'support', 'bots', 'admins', 'audit'],
-  OPERATOR: ['dashboard', 'users', 'kyc', 'withdrawals', 'gameOps', 'tng', 'messaging', 'support'],
-  REVIEWER: ['dashboard', 'users', 'kyc', 'withdrawals', 'gameOps', 'support'],
-  FINANCE: ['dashboard', 'users', 'deposits', 'withdrawals', 'payments', 'gameOps', 'tng', 'finance', 'profitPool', 'rebates'],
+  SUPER: ['dashboard', 'users', 'kyc', 'payments', 'gameOps', 'tng', 'finance', 'profitPool', 'rebates', 'messaging', 'support', 'bots', 'admins', 'audit'],
+  OPERATOR: ['dashboard', 'users', 'kyc', 'gameOps', 'tng', 'messaging', 'support'],
+  REVIEWER: ['dashboard', 'users', 'kyc', 'gameOps', 'support'],
+  FINANCE: ['dashboard', 'users', 'kyc', 'payments', 'gameOps', 'tng', 'finance', 'profitPool', 'rebates'],
 };
 
 const roleLabels: Record<Admin['role'], string> = {
@@ -67,15 +66,14 @@ const badgeLabels: Record<string, string> = {
 const groups: Array<[string, Page[]]> = [
   ['总览', ['dashboard']],
   ['会员', ['users', 'kyc']],
-  // 按日常操作频率排序：工单类在前，账务/分成居中，通道设置最后
-  ['资金', ['deposits', 'withdrawals', 'tng', 'profitPool', 'finance', 'payments']],
+  ['资金', ['tng', 'profitPool', 'finance', 'payments']],
   ['游戏', ['gameOps']],
   ['增长', ['rebates', 'messaging', 'support']],
   ['系统', ['bots', 'admins', 'audit']],
 ];
 
 const icons: Record<Page, string> = {
-  dashboard: '⌁', gameOps: '◈', virtualPlayers: '♟', users: '◎', kyc: '◇', deposits: '＋', withdrawals: '↗', payments: '⇄', rooms: '▦',
+  dashboard: '⌁', gameOps: '◈', virtualPlayers: '♟', users: '◎', kyc: '◇', payments: '⇄', rooms: '▦',
   rounds: '◉', tng: '◫', finance: '¥', profitPool: '◍', rewards: '✦', rebates: '%', leaderboards: '♛',
   messaging: '✉', support: '◌', config: '⚙', bots: '◆', admins: '♙', audit: '≡',
 };
@@ -165,6 +163,8 @@ function Shell({ admin }: { admin: Admin }) {
   const [page, setPage] = useState<Page>(() => allowed[0] ?? 'dashboard');
   const [collapsed, setCollapsed] = useState(false);
   const [supportFocusUserId, setSupportFocusUserId] = useState<string | null>(null);
+  const [userFocus, setUserFocus] = useState<{ userId: string; tab?: UserDetailTab } | null>(null);
+  const [financeFocus, setFinanceFocus] = useState<'deposits' | 'withdrawals' | 'payees' | null>(null);
   const [supportToasts, setSupportToasts] = useState<SupportToastItem[]>([]);
   const [supportUnreadTotal, setSupportUnreadTotal] = useState(0);
   const supportBaseline = useRef<Map<string, number> | null>(null);
@@ -174,6 +174,18 @@ function Shell({ admin }: { admin: Admin }) {
 
   function go(target: Page) {
     if (allowed.includes(target)) setPage(target);
+  }
+
+  function openUserCenter(userId: string, tab?: UserDetailTab) {
+    if (!allowed.includes('users')) return;
+    setUserFocus({ userId, tab });
+    setPage('users');
+  }
+
+  function openFinance(tab?: 'deposits' | 'withdrawals' | 'payees') {
+    if (!allowed.includes('finance')) return;
+    if (tab) setFinanceFocus(tab);
+    setPage('finance');
   }
 
   function openSupportThread(userId: string) {
@@ -275,7 +287,7 @@ function Shell({ admin }: { admin: Admin }) {
           <div className="top-actions"><span className="system-live"><i /> 系统在线</span><time>{new Date().toLocaleDateString('zh-MY')}</time></div>
         </header>
         <div className="content">
-          {current === 'dashboard' && <Dashboard allowed={allowed} onNavigate={go} />}
+          {current === 'dashboard' && <Dashboard allowed={allowed} onNavigate={go} onOpenFinance={openFinance} />}
           {current === 'gameOps' && <GameOperationsCenter admin={admin} />}
           {current === 'virtualPlayers' && (
             <VirtualPlayers
@@ -283,15 +295,26 @@ function Shell({ admin }: { admin: Admin }) {
               canOperate={admin.role === 'SUPER' || admin.role === 'OPERATOR'}
             />
           )}
-          {current === 'users' && <Users role={admin.role} />}
-          {current === 'kyc' && <KycReview />}
-          {current === 'deposits' && <DepositsHub role={admin.role} />}
-          {current === 'withdrawals' && <WithdrawalsHub role={admin.role} />}
+          {current === 'users' && (
+            <Users
+              role={admin.role}
+              focus={userFocus}
+              onFocusConsumed={() => setUserFocus(null)}
+            />
+          )}
+          {current === 'kyc' && <IdentityReviewHub />}
           {current === 'payments' && <PaymentGateway />}
           {current === 'rooms' && <Rooms />}
           {current === 'rounds' && <Rounds canReconcile={admin.role === 'SUPER' || admin.role === 'FINANCE'} />}
           {current === 'tng' && <Tng canReconcile={admin.role === 'SUPER' || admin.role === 'FINANCE'} />}
-          {current === 'finance' && <Finance />}
+          {current === 'finance' && (
+            <FinanceCenter
+              onOpenUser={openUserCenter}
+              initialTab={financeFocus}
+              onInitialTabConsumed={() => setFinanceFocus(null)}
+              payees={<DepositPayees />}
+            />
+          )}
           {current === 'profitPool' && <ProfitPoolCenter />}
           {current === 'rewards' && (
             <RewardsAdmin canManageMoney={admin.role === 'SUPER' || admin.role === 'FINANCE'} />
@@ -382,37 +405,6 @@ function HubTabs({
   );
 }
 
-function DepositsHub({ role }: { role: Admin['role'] }) {
-  const canOrders = role === 'SUPER' || role === 'FINANCE';
-  const canPayees = role === 'SUPER' || role === 'FINANCE';
-  // 支付通道设置只在左侧菜单的「支付通道」页维护，充值管理不再重复入口
-  const tabs = [
-    ...(canOrders ? [{ id: 'orders', label: '充值工单' }] : []),
-    ...(canPayees ? [{ id: 'payees', label: '收款账户' }] : []),
-  ];
-  return (
-    <HubTabs tabs={tabs}>
-      {(tab) => {
-        if (tab === 'payees') return <DepositPayees />;
-        return <Orders type="deposit" />;
-      }}
-    </HubTabs>
-  );
-}
-
-function WithdrawalsHub({ role }: { role: Admin['role'] }) {
-  const canOrders = role === 'SUPER' || role === 'FINANCE';
-  const tabs = [
-    ...(canOrders ? [{ id: 'orders', label: '提现工单' }] : []),
-    { id: 'accounts', label: '账户审核' },
-  ];
-  return (
-    <HubTabs tabs={tabs}>
-      {(tab) => (tab === 'orders' ? <Orders type="withdraw" /> : <WithdrawAccountReview />)}
-    </HubTabs>
-  );
-}
-
 function MessagingHub() {
   return (
     <HubTabs
@@ -481,9 +473,11 @@ function DashMetric({
 function Dashboard({
   allowed,
   onNavigate,
+  onOpenFinance,
 }: {
   allowed: Page[];
   onNavigate: (page: Page) => void;
+  onOpenFinance: (tab: 'deposits' | 'withdrawals') => void;
 }) {
   const [data, setData] = useState<Row | null>(null);
   const [checks, setChecks] = useState<boolean[]>(() => {
@@ -517,6 +511,7 @@ function Dashboard({
   const pendingKyc = Number(data?.pendingKyc ?? 0);
   const pendingDeposits = Number(data?.pendingDeposits ?? 0);
   const pendingWithdrawals = Number(data?.pendingWithdrawals ?? 0);
+  const pendingWithdrawAccounts = Number(data?.pendingWithdrawAccounts ?? 0);
   const activeRounds = Number(data?.activeRounds ?? 0);
   const todaySettlements = Number(data?.todaySettlements ?? 0);
   const todayPushFailures = Number(data?.todayPushFailures ?? 0);
@@ -525,8 +520,8 @@ function Dashboard({
   const betsCents = BigInt(data?.todayBetsCents ?? 0);
   const rakeCents = BigInt(data?.todayRakeCents ?? 0);
 
-  const todoTotal = pendingKyc + pendingDeposits + pendingWithdrawals + todayPushFailures + reconcileAnomalies + (activeRounds > 0 ? 1 : 0);
-  const maxTodo = Math.max(pendingKyc, pendingDeposits, pendingWithdrawals, activeRounds, reconcileAnomalies, todayPushFailures, 1);
+  const todoTotal = pendingKyc + pendingWithdrawAccounts + pendingDeposits + pendingWithdrawals + todayPushFailures + reconcileAnomalies + (activeRounds > 0 ? 1 : 0);
+  const maxTodo = Math.max(pendingKyc, pendingWithdrawAccounts, pendingDeposits, pendingWithdrawals, activeRounds, reconcileAnomalies, todayPushFailures, 1);
   const maxMoney = Number(betsCents > rakeCents ? betsCents : rakeCents || 1n);
   const checkedCount = checks.filter(Boolean).length;
 
@@ -534,7 +529,7 @@ function Dashboard({
     { label: '核对 TNG 发包账号额度', page: 'tng', tip: '红包台账' },
     {
       label: '处理待审实名与充提工单',
-      page: pendingKyc ? 'kyc' : pendingDeposits ? 'deposits' : 'withdrawals',
+      page: pendingKyc ? 'kyc' : pendingDeposits || pendingWithdrawals ? 'finance' : 'kyc',
       tip: '审核队列',
     },
     {
@@ -580,10 +575,10 @@ function Dashboard({
           <DashMetric
             label="待审实名"
             value={data ? pendingKyc : '—'}
-            hint="实名审核队列"
+            hint={pendingWithdrawAccounts ? `另有 ${pendingWithdrawAccounts} 个提款账户待审` : '实名与提款账户'}
             tone="gold"
-            alert={pendingKyc > 0}
-            level={(pendingKyc / maxTodo) * 100}
+            alert={pendingKyc + pendingWithdrawAccounts > 0}
+            level={((pendingKyc + pendingWithdrawAccounts) / maxTodo) * 100}
             onClick={allowed.includes('kyc') ? () => go('kyc') : undefined}
           />
           <DashMetric
@@ -593,16 +588,16 @@ function Dashboard({
             tone="jade"
             alert={pendingDeposits > 0}
             level={(pendingDeposits / maxTodo) * 100}
-            onClick={allowed.includes('deposits') ? () => go('deposits') : undefined}
+            onClick={allowed.includes('finance') ? () => onOpenFinance('deposits') : undefined}
           />
           <DashMetric
             label="待处理提现"
             value={data ? pendingWithdrawals : '—'}
-            hint="提现工单 / 账户审核"
+            hint="提现工单"
             tone="jade"
             alert={pendingWithdrawals > 0}
             level={(pendingWithdrawals / maxTodo) * 100}
-            onClick={allowed.includes('withdrawals') ? () => go('withdrawals') : undefined}
+            onClick={allowed.includes('finance') ? () => onOpenFinance('withdrawals') : undefined}
           />
           <DashMetric
             label="推送失败"
@@ -818,13 +813,22 @@ function WithdrawOrderTarget({ item }: { item: Row }) {
 
 const USER_PAGE_SIZE = 15;
 
-function Users({ role }: { role: Admin['role'] }) {
+function Users({
+  role,
+  focus,
+  onFocusConsumed,
+}: {
+  role: Admin['role'];
+  focus?: { userId: string; tab?: UserDetailTab } | null;
+  onFocusConsumed?: () => void;
+}) {
   const [query, setQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
   const [items, setItems] = useState<Row[]>([]);
   const [page, setPage] = useState(1);
   const [total, setTotal] = useState(0);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(focus?.userId ?? null);
+  const [openTab, setOpenTab] = useState<UserDetailTab | undefined>(focus?.tab);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const totalPages = Math.max(1, Math.ceil(total / USER_PAGE_SIZE));
@@ -845,7 +849,6 @@ function Users({ role }: { role: Admin['role'] }) {
       setItems(result.items);
       setTotal(result.total);
       setPage(result.page);
-      if (selectedId && !result.items.some((item) => item.id === selectedId)) setSelectedId(null);
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -856,6 +859,13 @@ function Users({ role }: { role: Admin['role'] }) {
   useEffect(() => {
     void load(1);
   }, []);
+
+  useEffect(() => {
+    if (!focus?.userId) return;
+    setSelectedId(focus.userId);
+    setOpenTab(focus.tab);
+    onFocusConsumed?.();
+  }, [focus]);
 
   async function status(user: Row) {
     const next = user.status === 'ACTIVE' ? 'BANNED' : 'ACTIVE';
@@ -925,7 +935,10 @@ function Users({ role }: { role: Admin['role'] }) {
                   <tr
                     key={user.id}
                     className={`clickable-row ${selectedId === user.id ? 'selected' : ''}`}
-                    onClick={() => setSelectedId(user.id)}
+                    onClick={() => {
+                      setOpenTab(undefined);
+                      setSelectedId(user.id);
+                    }}
                   >
                     <td>
                       <strong>{user.nickname || '未设置昵称'}</strong>
@@ -954,7 +967,7 @@ function Users({ role }: { role: Admin['role'] }) {
                     <td><Badge value={user.device?.status ?? 'UNBOUND'} /></td>
                     <td><Badge value={user.status} /></td>
                     <td className="actions" onClick={(event) => event.stopPropagation()}>
-                      <button onClick={() => setSelectedId(user.id)}>查看详情</button>
+                      <button onClick={() => { setOpenTab(undefined); setSelectedId(user.id); }}>查看详情</button>
                       {role === 'SUPER' && (
                         <button onClick={() => void status(user)}>{user.status === 'ACTIVE' ? '封禁' : '恢复'}</button>
                       )}
@@ -989,6 +1002,7 @@ function Users({ role }: { role: Admin['role'] }) {
             key={selectedId}
             userId={selectedId}
             role={role}
+            initialTab={openTab}
             onClose={() => setSelectedId(null)}
             onChanged={() => void load(page)}
             onToggleStatus={async () => {
@@ -1009,6 +1023,7 @@ function Users({ role }: { role: Admin['role'] }) {
 function UserDetail({
   userId,
   role,
+  initialTab,
   onClose,
   onChanged,
   onToggleStatus,
@@ -1016,12 +1031,13 @@ function UserDetail({
 }: {
   userId: string;
   role: Admin['role'];
+  initialTab?: UserDetailTab;
   onClose: () => void;
   onChanged: () => void;
   onToggleStatus: () => Promise<void>;
   onUnbind: () => Promise<void>;
 }) {
-  const [tab, setTab] = useState<UserDetailTab>('overview');
+  const [tab, setTab] = useState<UserDetailTab>(initialTab ?? 'overview');
   const [detail, setDetail] = useState<Row | null>(null);
   const [ledger, setLedger] = useState<Row[]>([]);
   const [rounds, setRounds] = useState<Row[]>([]);
@@ -1436,8 +1452,9 @@ function UserDetail({
           <div className="user-wallet-grid">
             <article><small>可用余额</small><strong>RM {rm(wallet.availableCents ?? 0)}</strong><span>可下注 / 提现</span></article>
             <article><small>冻结总额</small><strong>RM {rm(frozen)}</strong><span>庄池、下注、提现</span></article>
+            <article><small>累计已到账充值</small><strong>RM {rm(detail.summary.depositCompletedCents ?? 0)}</strong><span>{detail.summary.depositCompletedCount ?? 0} 笔完成</span></article>
+            <article><small>待审充值</small><strong>RM {rm(detail.summary.depositPendingCents ?? 0)}</strong><span>{detail.summary.depositPendingCount ?? 0} 笔待处理</span></article>
             <article><small>庄池冻结</small><strong>RM {rm(wallet.freezeBankerCents ?? 0)}</strong><span>进行中庄家资金</span></article>
-            <article><small>下注冻结</small><strong>RM {rm(wallet.freezeBetCents ?? 0)}</strong><span>未结算注单</span></article>
             <article><small>提现冻结</small><strong>RM {rm(wallet.freezeWithdrawCents ?? 0)}</strong><span>待审核提现金额</span></article>
           </div>
 
@@ -1497,16 +1514,21 @@ function UserDetail({
 
           <div className="user-activity-grid">
             {[
-              ['坐庄局数', detail.summary.bankerRounds],
-              ['竞标记录', detail.summary.bids],
-              ['下注记录', detail.summary.bets],
-              ['认额记录', detail.summary.claims],
-              ['已结算对局', detail.summary.settlements],
-              ['直属下线', detail.summary.directInvitees],
-              ['奖励记录', detail.summary.rewards],
-              ['充值工单', detail.summary.deposits],
-              ['提现工单', detail.summary.withdrawals],
-            ].map(([label, value]) => <div key={String(label)}><strong>{value}</strong><span>{label}</span></div>)}
+              ['坐庄局数', detail.summary.bankerRounds, 'rounds'] as const,
+              ['竞标记录', detail.summary.bids, 'rounds'] as const,
+              ['下注记录', detail.summary.bets, 'rounds'] as const,
+              ['认额记录', detail.summary.claims, 'rounds'] as const,
+              ['已结算对局', detail.summary.settlements, 'rounds'] as const,
+              ['直属下线', detail.summary.directInvitees, 'invitees'] as const,
+              ['奖励记录', detail.summary.rewards, 'ledger'] as const,
+              ['充值工单', detail.summary.deposits, 'orders'] as const,
+              ['提现工单', detail.summary.withdrawals, 'orders'] as const,
+            ].map(([label, value, nextTab]) => (
+              <button type="button" key={label} onClick={() => setTab(nextTab)}>
+                <strong>{value}</strong>
+                <span>{label}</span>
+              </button>
+            ))}
           </div>
 
           <section className="user-subsection">
@@ -1563,7 +1585,7 @@ function UserDetail({
       {tab === 'kyc' && (
         <div className="user-detail-body">
           <div className="user-safety-note">
-            实名字段加密存储。保存为「已通过」时，会同步 KYC 来源的 TNG 与银行提款账户；历史订单快照不会被改写。日常待审请优先走「实名审核」队列。单独改提款账户请用「提款账户」页签。
+            实名字段加密存储。保存为「已通过」时，会同步 KYC 来源的 TNG 与银行提款账户；历史订单快照不会被改写。日常待审请优先走「资料审核」。单独改提款账户请用「提款账户」页签。
           </div>
           <div className="user-form-grid">
             <label>TNG 实名<input value={kyc.realName} disabled={!canEditKyc(role)} onChange={(event) => setKyc({ ...kyc, realName: event.target.value })} /></label>
@@ -1805,6 +1827,13 @@ function UserDetail({
 
       {tab === 'orders' && (
         <div className="user-detail-body">
+          <div className="user-safety-note">
+            累计已到账 RM {rm(detail.summary.depositCompletedCents ?? 0)}
+            {' · '}
+            {detail.summary.depositCompletedCount ?? 0} 笔完成
+            {' · '}
+            {detail.summary.depositPendingCount ?? 0} 笔待审 RM {rm(detail.summary.depositPendingCents ?? 0)}
+          </div>
           <div className="table-wrap user-ledger-table">
             <table>
               <thead><tr><th>类型</th><th>金额</th><th>状态</th><th>详情</th><th>时间</th></tr></thead>
@@ -1834,6 +1863,25 @@ function UserDetail({
   );
 }
 
+function IdentityReviewHub() {
+  const [kycCount, setKycCount] = useState<number | null>(null);
+  const [accountCount, setAccountCount] = useState<number | null>(null);
+  useEffect(() => {
+    void request<{ items: Row[] }>('/api/admin/kyc?status=PENDING').then((result) => setKycCount(result.items.length));
+    void request<{ items: Row[] }>('/api/admin/withdraw-accounts?status=PENDING').then((result) => setAccountCount(result.items.length));
+  }, []);
+  return (
+    <HubTabs
+      tabs={[
+        { id: 'kyc', label: kycCount ? `实名审核 · ${kycCount}` : '实名审核' },
+        { id: 'accounts', label: accountCount ? `账户审核 · ${accountCount}` : '账户审核' },
+      ]}
+    >
+      {(tab) => (tab === 'accounts' ? <WithdrawAccountReview /> : <KycReview />)}
+    </HubTabs>
+  );
+}
+
 function KycReview() {
   const [items, setItems] = useState<Row[]>([]);
   const [busy, setBusy] = useState(false);
@@ -1856,65 +1904,6 @@ function KycReview() {
     <div className="review-grid">{items.map((item) => <article className="review-card" key={item.id}><header><SupportAvatar url={item.avatarUrl} name={item.nickname} /><div><strong>{item.nickname}</strong><small>UID {item.uid}</small></div><Badge value={item.status} /></header><dl><div><dt>TNG 实名</dt><dd>{item.realName}</dd></div><div><dt>DuitNow</dt><dd>{item.duitnowId}</dd></div>{item.bankName ? <div><dt>历史银行</dt><dd>{item.bankName}</dd></div> : null}{item.bankAccount ? <div><dt>历史账号</dt><dd>{item.bankAccount}</dd></div> : null}</dl><footer><button className="danger" disabled={busy} onClick={() => void review(item.id, 'reject')}>驳回</button><button className="success" disabled={busy} onClick={() => void review(item.id, 'approve')}>审核通过</button></footer></article>)}</div>
     {items.length === 0 && <Empty text="实名审核队列已清空" />}
   </section>;
-}
-
-function Orders({ type }: { type: 'deposit' | 'withdraw' }) {
-  const [items, setItems] = useState<Row[]>([]);
-  const [error, setError] = useState('');
-  const [busy, setBusy] = useState(false);
-  const load = () => request<{ items: Row[] }>(`/api/admin/orders/${type}?status=PENDING`).then((result) => setItems(result.items)).catch((e) => setError((e as Error).message));
-  useEffect(() => { void load(); }, [type]);
-  async function review(item: Row, action: 'complete' | 'reject') {
-    let reason: string | undefined;
-    if (action === 'reject') {
-      const input = prompt('驳回原因');
-      if (input === null) return;
-      if (input.trim().length < 2) { alert('请填写驳回原因（至少 2 字）'); return; }
-      reason = input.trim();
-    }
-    if (action === 'complete') {
-      const text = type === 'deposit'
-        ? `确认该笔 RM${rm(item.amountCents)}（UID ${item.user.uid} · ${item.user.nickname}）的充值已到账？`
-        : `确认该笔 RM${rm(item.amountCents)}（UID ${item.user.uid} · ${item.user.nickname}）的提现已转账？`;
-      if (!window.confirm(text)) return;
-    }
-    setBusy(true);
-    try {
-      setError('');
-      await post(`/api/admin/orders/${type}/${item.id}/review`, { action, reason });
-      await load();
-    } catch (e) { setError((e as Error).message); } finally { setBusy(false); }
-  }
-  async function viewProof(url: string) {
-    try {
-      setError('');
-      await openProtectedUpload(url);
-    } catch (e) { setError(`无法打开凭证：${(e as Error).message}`); }
-  }
-  return <section className="panel"><ErrorBox error={error} /><div className="table-wrap"><table><thead><tr><th>工单</th><th>用户</th><th>金额</th><th>{type === 'deposit' ? '渠道 / 凭证' : '收款目标'}</th><th>提交时间</th><th>操作</th></tr></thead><tbody>
-    {items.map((item) => <tr key={item.id}><td><strong>{item.id.slice(-8)}</strong><small><Badge value={item.status} /></small></td><td><strong>{item.user.nickname}</strong><small>UID {item.user.uid}</small></td><td className="money">RM {rm(item.amountCents)}</td><td>{type === 'deposit' ? <DepositOrderSource item={item} onViewProof={viewProof} /> : <WithdrawOrderTarget item={item} />}</td><td>{new Date(item.createdAt).toLocaleString('zh-MY')}</td><td className="actions"><button className="danger" disabled={busy} onClick={() => void review(item, 'reject')}>驳回</button><button className="success" disabled={busy} onClick={() => void review(item, 'complete')}>{type === 'deposit' ? '确认到账' : '确认已转账'}</button></td></tr>)}
-  </tbody></table>{items.length === 0 && <Empty text="当前没有待处理工单" />}</div></section>;
-}
-
-function DepositOrderSource({ item, onViewProof }: { item: Row; onViewProof: (url: string) => Promise<void> }) {
-  if (item.channel === 'VPAY') {
-    const mismatch =
-      item.paidAmountCents != null && String(item.paidAmountCents) !== String(item.amountCents);
-    return (
-      <>
-        <strong>VPay 网关 · 通道 {item.providerCode ?? '—'}</strong>
-        <small>{item.providerTradeNo ? `平台单号 ${item.providerTradeNo}` : '尚未取得平台单号'}</small>
-        {mismatch && <small className="danger-text">⚠ 实付 RM {rm(item.paidAmountCents)} 与下单金额不符</small>}
-      </>
-    );
-  }
-  return (
-    <>
-      <strong>{item.payeeSnapshot ? `${item.payeeSnapshot.bankName} · ${item.payeeSnapshot.accountName}` : '人工转账'}</strong>
-      <small>{item.payeeSnapshot?.accountNo ?? ''}</small>
-      {item.proofUrl ? <button type="button" onClick={() => void onViewProof(item.proofUrl)}>查看凭证 ↗</button> : <small>未上传</small>}
-    </>
-  );
 }
 
 function WithdrawAccountReview() {
@@ -3086,117 +3075,6 @@ function Tng({ canReconcile }: { canReconcile: boolean }) {
   async function add(){await post('/api/admin/tng/accounts',{...form,monthlyLimitCents:form.monthlyLimitCents?toCents(form.monthlyLimitCents):undefined});setForm({label:'',accountName:'',maskedId:'',monthlyLimitCents:''});await load();}
   async function reconcileCancelled(packet:Row){const claimed=prompt('实际已领取累计金额（RM）',rm(packet.reconciledCents??0));const returned=prompt('TNG 实际退回累计金额（RM）',rm(packet.returnedCents??0));if(claimed===null||returned===null)return;await post(`/api/admin/packets/${packet.id}/reconcile-cancelled`,{claimedCents:toCents(claimed),returnedCents:toCents(returned)});await load();}
   return <><section className="panel inline-form"><input placeholder="账号标签" value={form.label} onChange={e=>setForm({...form,label:e.target.value})}/><input placeholder="TNG 户名" value={form.accountName} onChange={e=>setForm({...form,accountName:e.target.value})}/><input placeholder="账号尾号" value={form.maskedId} onChange={e=>setForm({...form,maskedId:e.target.value})}/><input placeholder="月限额 RM" value={form.monthlyLimitCents} onChange={e=>setForm({...form,monthlyLimitCents:e.target.value})}/><button className="primary small" onClick={()=>void add()}>添加发包账号</button></section><section className="panel"><div className="account-chips">{accounts.map(a=><div key={a.id}><span><i/> {a.label}</span><strong>{a.accountName}</strong><small>{a.maskedId||'未填尾号'} · 月限额 {a.monthlyLimitCents?`RM ${rm(a.monthlyLimitCents)}`:'未设置'}</small><footer><Badge value={a.status}/><button onClick={async()=>{await patch(`/api/admin/tng/accounts/${a.id}`,{status:a.status==='ACTIVE'?'DISABLED':'ACTIVE'});await load();}}>{a.status==='ACTIVE'?'停用':'启用'}</button></footer></div>)}</div></section><section className="panel"><div className="panel-title"><div><small>红包台账</small><h2>红包对账</h2></div></div><div className="table-wrap"><table><thead><tr><th>局号</th><th>房间</th><th>总额</th><th>已领取</th><th>已退回</th><th>领取人数</th><th>状态</th><th>操作</th></tr></thead><tbody>{packets.map(p=><tr key={p.id}><td>#{p.round.seqNo}</td><td>{p.round.room.title}</td><td>RM {rm(p.totalCents)}</td><td>RM {rm(p.reconciledCents)}</td><td>RM {rm(p.returnedCents??0)}</td><td>{p.claims.length}/{p.participantCount}</td><td><Badge value={p.status}/></td><td>{canReconcile&&p.round.phase==='CANCELLED'&&BigInt(String(p.reconciledCents??0))+BigInt(String(p.returnedCents??0))<BigInt(String(p.totalCents))?<button onClick={()=>void reconcileCancelled(p)}>核销取消包</button>:(p.sentAt?new Date(p.sentAt).toLocaleString('zh-MY'):'—')}</td></tr>)}</tbody></table></div></section></>;
-}
-
-/** 平台科目中文名与含义（余额为负 = 累计净支出，属正常状态） */
-const ACCOUNT_INFO: Record<string, [string, string]> = {
-  PLATFORM_RAKE: ['抽水收入', '玩家赢3% + 庄家赢5%，累计毛利润，只进不出'],
-  PLATFORM_FEES: ['庄家费用收入', '上庄费 + 服务费，累计收入'],
-  PLATFORM_RESERVE: ['红包备付金', '代包费收入 − 内部红包发放，与红包成本勾稽'],
-  PLATFORM_REBATE: ['推广返水支出户', '负数 = 累计已发返水佣金（发给玩家/邀请人）'],
-  PLATFORM_REWARD: ['活动奖励支出户', '负数 = 累计已发每日奖励/排行榜奖励'],
-  PLATFORM_PROFIT_POOL: ['利润池分成支出户', '负数 = 累计已发代理称桶分成'],
-  TNG_TRANSIT: ['TNG 在途', '充值/提现过渡科目'],
-  ADJUST_CLEARING: ['人工调账清算户', '调账对方科目，余额 = 调账净额'],
-  USER_AVAILABLE: ['用户可用余额', '玩家钱包可用资金'],
-  USER_FREEZE_BET: ['用户投注冻结', '下注后冻结，结算时解冻'],
-  USER_FREEZE_BANKER: ['用户上庄冻结', '上庄押金冻结，下庄时结余返还'],
-  USER_FREEZE_WITHDRAW: ['用户提现冻结', '提现审核中冻结的资金'],
-};
-const REF_TYPE_LABELS: Record<string, string> = {
-  deposit: '充值到账', withdraw_freeze: '提现申请', withdraw_complete: '提现成功', withdraw_refund: '提现退回', withdraw_fee: '提现手续费',
-  rebate: '推广返水', profit_share: '代理分成', reward: '活动奖励', leaderboard_reward: '排行榜奖励',
-  bet: '下注冻结', bet_adjust: '改注调整', bet_withdraw: '撤回下注', bid: '上庄冻结',
-  settle_win: '对局赢取', settle_lose: '对局输掉', settle_bet_return: '本金退回', settle_tie_return: '平局退回', settle_banker_return: '庄池结余退回',
-  rake: '平台抽水', fee_banker_seat: '上庄费', fee_service: '服务费', fee_packet_agent: '代包费',
-  tip: '打赏客服', group_packet_create: '发群红包', group_packet_claim: '领群红包', group_packet_refund: '群红包退回',
-  packet_create: '对局红包发出', packet_claim: '对局红包核销', packet_return: '对局红包退回', cancelled_packet_claim: '取消局红包核销',
-  round_cancel_refund: '取消局退款', claim_forfeit_refund: '弃权退款', adjust: '人工调账',
-  bet_liability_reserve: '赔付预留冻结', bet_liability_adjust: '赔付预留调整', settle_liability_return: '剩余预留退回', packet_internal_claim: '内部红包核销', settle_lose_topup: '输局补足扣款',
-};
-const refLabel = (t: string) => REF_TYPE_LABELS[t] ?? t;
-
-function Finance() {
-  const today=new Date().toLocaleDateString('sv-SE',{timeZone:'Asia/Kuala_Lumpur'});
-  const [accounts,setAccounts]=useState<Row[]>([]);const [ledger,setLedger]=useState<Row[]>([]);const [uid,setUid]=useState('');const [amount,setAmount]=useState('');const [direction,setDirection]=useState('credit');const [reason,setReason]=useState('');
-  const [reportDate,setReportDate]=useState(today);const [report,setReport]=useState<Row|null>(null);
-  const [adjustBusy,setAdjustBusy]=useState(false);
-  const adjustRequest=useRef<{key:string;id:string}|null>(null);
-  const load=()=>Promise.all([request<Row>('/api/admin/finance/accounts'),request<{items:Row[]}>('/api/admin/finance/ledger?limit=200')]).then(([a,l])=>{setAccounts(a.accounts);setLedger(l.items);});
-  useEffect(()=>{void load();},[]);
-  useEffect(()=>{request<Row>(`/api/admin/finance/daily-report?date=${reportDate}`).then(setReport).catch(()=>setReport(null));},[reportDate]);
-  async function adjust(){
-    if(adjustBusy)return;
-    setAdjustBusy(true);
-    try {
-      const amountCents=toCents(amount);
-      const key=JSON.stringify({uid,direction,amountCents,reason:reason.trim()});
-      const requestId=adjustRequest.current?.key===key?adjustRequest.current.id:crypto.randomUUID();
-      adjustRequest.current={key,id:requestId};
-      await post('/api/admin/finance/adjust',{uid,direction,amountCents,reason:reason.trim(),requestId});
-      adjustRequest.current=null;
-      setAmount('');setReason('');await load();
-    } catch(e){ alert(`调账失败：${(e as Error).message}`); }
-    finally{setAdjustBusy(false);}
-  }
-  const accountGroups: Array<{title:string; hint:string; types:string[]; tone:(v:bigint)=>string}> = [
-    { title: '收入科目', hint: '平台赚到的钱，只进不出', types: ['PLATFORM_RAKE','PLATFORM_FEES'], tone: v => v < 0n ? 'red' : 'jade' },
-    { title: '支出户', hint: '负数 = 累计已发出，属正常', types: ['PLATFORM_REBATE','PLATFORM_REWARD','PLATFORM_PROFIT_POOL'], tone: () => 'plain' },
-    { title: '备付与在途', hint: '与红包 / 充提勾稽，不计入利润', types: ['PLATFORM_RESERVE','TNG_TRANSIT','ADJUST_CLEARING'], tone: () => 'blue' },
-  ];
-  const accountByType = new Map(accounts.map(a=>[a.accountType,a] as const));
-  const reportSections: Array<{title:string; rows:Array<[string,string]>; net?:boolean}> = report ? [
-    { title: '对局情况', rows: [
-      ['已结算局数', `${report.settledRounds} 局（取消 ${report.cancelledRounds} 局）`],
-      ['投注流水', `RM ${rm(report.betsCents)}`],
-      ['闲家赔付', `RM ${rm(report.payoutsCents)}（免赔 RM ${rm(report.shortfallCents)}）`],
-    ]},
-    { title: '平台收入', rows: [
-      ['抽水收入（合计）', `RM ${rm(report.rakeCents)}`],
-      ['　├ 玩家赢抽水 3%', `RM ${rm(report.rakePlayerCents ?? 0)}`],
-      ['　└ 庄家赢抽水 5%', `RM ${rm(report.rakeBankerCents ?? 0)}`],
-      ['上庄费', `RM ${rm(report.seatFeeCents)}`],
-      ['服务费', `RM ${rm(report.serviceFeeCents)}`],
-      ['代包费（红包备付，不计净利）', `RM ${rm(report.packetFeeCents)}`],
-    ]},
-    { title: '平台支出', rows: [
-      ['活动 / 排行榜奖励', `RM ${rm(report.rewardsPaidCents)}`],
-      ['推广返水佣金', `RM ${rm(report.rebatesPaidCents)}`],
-      ['代理称桶分成', `RM ${rm(report.profitSharesPaidCents ?? 0)}`],
-    ]},
-    { title: '当日净利', net: true, rows: [
-      ['净利 = 抽水 + 上庄费 + 服务费 − 奖励 − 返水 − 分成', `RM ${rm(report.netProfitCents ?? 0)}`],
-    ]},
-    { title: '资金进出', rows: [
-      ['充值入账', `RM ${rm(report.depositsCents)}（${report.depositsCount} 单）`],
-      ['提现出账', `RM ${rm(report.withdrawalsCents)}（${report.withdrawalsCount} 单）`],
-      ['红包在途差异', `RM ${rm(report.packetOutstandingCents)}（${report.packetOutstandingCount} 包）`],
-    ]},
-  ] : [];
-  return <>
-    <div className="fin-groups">{accountGroups.map(group=>{
-      const rows = group.types.map(t=>accountByType.get(t)).filter(Boolean) as Row[];
-      if(rows.length===0) return null;
-      return <section className="fin-group" key={group.title}>
-        <header><strong>{group.title}</strong><small>{group.hint}</small></header>
-        <div className="pp-metrics fin-cards">{rows.map(a=>
-          <article key={a.id} className={`pp-card tone-${group.tone(BigInt(a.balanceCents))}`}>
-            <small>{ACCOUNT_INFO[a.accountType]?.[0] ?? a.accountType}</small>
-            <strong>RM {rm(a.balanceCents)}</strong>
-            <em>{ACCOUNT_INFO[a.accountType]?.[1] ?? '平台逻辑科目'}</em>
-          </article>)}
-        </div>
-      </section>;
-    })}</div>
-    <section className="panel"><div className="panel-title"><div><small>日报</small><h2>财务日报</h2></div><input type="date" value={reportDate} onChange={e=>setReportDate(e.target.value)}/></div>
-      {report?<div className="table-wrap report-table"><table><tbody>{reportSections.map(section=>
-        <Fragment key={section.title}>
-          <tr className="report-section"><td colSpan={2}>{section.title}</td></tr>
-          {section.rows.map(([label,value])=><tr key={label} className={section.net?'report-net':''}><td>{label}</td><td className="money">{value}</td></tr>)}
-        </Fragment>)}
-      </tbody></table></div>:<Empty text="该业务日暂无数据"/>}
-    </section>
-    <section className="panel"><div className="panel-title"><div><small>人工调账</small><h2>余额调整</h2></div><span>调账会写入审计日志</span></div><div className="inline-form"><input placeholder="用户 UID" value={uid} onChange={e=>setUid(e.target.value)}/><select value={direction} onChange={e=>setDirection(e.target.value)}><option value="credit">增加余额</option><option value="debit">扣减余额</option></select><input placeholder="金额 RM" value={amount} onChange={e=>setAmount(e.target.value)}/><input placeholder="调账原因（必填）" value={reason} onChange={e=>setReason(e.target.value)}/><button className="primary small" disabled={adjustBusy||!uid||!amount||reason.length<4} onClick={()=>void adjust()}>{adjustBusy?'处理中…':'执行调账'}</button></div></section><section className="panel"><div className="panel-title"><div><small>全量流水</small><h2>钱包台账</h2></div><span>最近 200 条</span></div><div className="table-wrap"><table><thead><tr><th>时间</th><th>科目</th><th>方向</th><th>金额</th><th>业务</th><th>关联局</th><th>备注</th></tr></thead><tbody>{ledger.map(l=><tr key={l.id}><td>{new Date(l.createdAt).toLocaleString('zh-MY')}</td><td>{ACCOUNT_INFO[l.accountType]?.[0] ?? l.accountType}</td><td className={l.direction==='CREDIT'?'positive':'negative'}>{l.direction==='CREDIT'?'收入':'支出'}</td><td>RM {rm(l.amountCents)}</td><td>{refLabel(l.refType)}</td><td>{l.roundId?.slice(-8)??'—'}</td><td>{l.memo??'—'}</td></tr>)}</tbody></table></div></section></>;
 }
 
 function RewardsAdmin({ canManageMoney }: { canManageMoney: boolean }) {

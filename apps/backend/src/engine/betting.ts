@@ -1,22 +1,22 @@
 /**
  * 动态下注范围 — 对应《06-公式与数值配置总表》第 3 节
- * 普通下注上限 = 庄钱 × 0.5% × 人数系数，再受「余额 ÷ 本局最高倍数」约束（向下取整到完整 RM）。
- * 梭哈固定 1:1：最低额默认 RM20，最高额 = 玩家当前可承担余额（精确到分），不受房间庄钱上限限制。
+ * 普通满注 = 庄钱 × 0.6% × 人数系数，再受「余额 ÷ 本局最高倍数」约束（向下取整到完整 RM）。
+ * 满梭哈 = 庄钱 × 5% × 人数系数，再与当前余额取较小值；赔付仍固定 1:1。
  */
 
 export interface BettingConfig {
-  betMinCents: number;      // 默认 200 (RM2)
-  shMinCents: number;       // 默认 2000 (RM20)
-  betRatio: number;         // 默认 0.005
-  shRatio: number;          // 默认 0.05
+  betMinCents: number;      // 默认 300 (RM3)
+  shMinCents: number;       // 默认 3000 (RM30)
+  betRatio: number;         // 默认 0.006（满注 0.6%）
+  shRatio: number;          // 默认 0.05（满梭哈 5%）
   /** 人数系数分档：按 maxPlayers 升序匹配第一个满足 players <= maxPlayers 的档位 */
   playerCoefTiers: Array<{ maxPlayers: number; coef: number }>;
 }
 
 export const DEFAULT_BETTING_CONFIG: BettingConfig = {
-  betMinCents: 200,
-  shMinCents: 2000,
-  betRatio: 0.005,
+  betMinCents: 300,
+  shMinCents: 3000,
+  betRatio: 0.006,
   shRatio: 0.05,
   playerCoefTiers: [
     { maxPlayers: 9, coef: 2.0 },
@@ -87,7 +87,7 @@ export function maxAffordableBetCents(
  * - 低于玩法最低额仍拒绝；
  * - 普通下注高于房间上限或余额赔付能力时自动降额；
  * - 普通下注预留覆盖本局最高倍数的最坏损失；
- * - 梭哈固定 1:1，只受余额限制，预留 = 注额本身，可精确到分押上全部余额。
+ * - 梭哈固定 1:1，预留 = 注额本身；房间上限 = 庄钱 × 梭哈比例 × 人数系数，再与余额取较小值。
  */
 export function acceptBetAmount(params: {
   requestedCents: bigint;
@@ -97,9 +97,9 @@ export function acceptBetAmount(params: {
   range: BettingRange;
 }): BetAcceptance {
   const roomMinCents = BigInt(params.isAllIn ? params.range.shMinCents : params.range.betMinCents);
-  const roomMaxCents = params.isAllIn
-    ? params.liabilityBalanceCents
-    : BigInt(params.range.betMaxCents);
+  const roomMaxCents = BigInt(
+    params.isAllIn ? params.range.shMaxCents : params.range.betMaxCents,
+  );
   const liabilityMultiplier = params.isAllIn ? ALL_IN_PAYOUT_MULTIPLIER : params.maxMultiplier;
   const maxAffordableCents = params.isAllIn
     ? params.liabilityBalanceCents
@@ -131,7 +131,7 @@ export function acceptBetAmount(params: {
   const acceptedCents =
     params.requestedCents < maxAcceptedCents ? params.requestedCents : maxAcceptedCents;
   const adjustedBy: BetAdjustmentReason[] = [];
-  if (!params.isAllIn && params.requestedCents > roomMaxCents) adjustedBy.push('ROOM_LIMIT');
+  if (params.requestedCents > roomMaxCents) adjustedBy.push('ROOM_LIMIT');
   if (params.requestedCents > maxAffordableCents) adjustedBy.push('LIABILITY_LIMIT');
 
   return {
@@ -151,12 +151,12 @@ export function bettingRange(
 ): BettingRange {
   const coef = playerCoef(playerCount, config);
   const betMax = Math.floor(potCents * config.betRatio * coef);
+  const shMax = Math.floor(potCents * config.shRatio * coef);
   return {
     betMinCents: config.betMinCents,
     betMaxCents: Math.max(betMax, config.betMinCents),
     shMinCents: config.shMinCents,
-    // 兼容旧字段：梭哈不再按庄钱封顶，展示/接受均以玩家余额为准
-    shMaxCents: 0,
+    shMaxCents: Math.max(shMax, config.shMinCents),
   };
 }
 
@@ -168,6 +168,7 @@ export function validateBet(
 ): { ok: boolean; reason?: string } {
   if (isAllIn) {
     if (amountCents < range.shMinCents) return { ok: false, reason: 'BELOW_SH_MIN' };
+    if (amountCents > range.shMaxCents) return { ok: false, reason: 'ABOVE_SH_MAX' };
   } else {
     if (amountCents < range.betMinCents) return { ok: false, reason: 'BELOW_BET_MIN' };
     if (amountCents > range.betMaxCents) return { ok: false, reason: 'ABOVE_BET_MAX' };

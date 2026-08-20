@@ -211,17 +211,17 @@ export default function ChatComposer({
       }
     : invalidBidIncrement
       ? {
-          title: `下一口最低 RM ${formatComposerRm(minimumBidCents!, true)}`,
-          detail: `当前最高 RM ${formatComposerRm(bidHighCents!, true)} · 至少加 RM 100`,
+          title: `下一口最低 ${formatComposerRm(minimumBidCents!, true)}`,
+          detail: `当前最高 ${formatComposerRm(bidHighCents!, true)} · 至少加 100`,
           invalid: true,
         }
     : parsedAmount
       ? parsedAmount.kind === 'withdraw'
         ? { title: '撤回本局下注', detail: '冻结金额原路退回' }
         : parsedAmount.kind === 'all_in'
-          ? { title: `梭哈 RM ${formatComposerRm(parsedAmount.cents)}`, detail: '按梭哈规则提交' }
+          ? { title: `梭哈 ${formatComposerRm(parsedAmount.cents)}`, detail: '按梭哈规则提交' }
           : {
-              title: `${amountMode === 'bid' ? '竞庄' : '下注'} RM ${formatComposerRm(
+              title: `${amountMode === 'bid' ? '竞庄' : '下注'} ${formatComposerRm(
                 parsedAmount.cents,
                 amountMode === 'bid',
               )}`,

@@ -9,6 +9,7 @@ import { prisma } from '../lib/prisma.js';
 import { withRedisLock } from '../lib/redis.js';
 import { announceBidPlaced } from './bidAuction.js';
 import { runBankerDiceCeremony } from './chatCommands.js';
+import { countEligiblePlayers } from './eligiblePlayers.js';
 import {
   BANKER_BID_INCREMENT_CENTS,
   bankerContinuationFunding,
@@ -290,13 +291,7 @@ async function actOnBetPhase(roomId: string, roundId: string) {
   if (settings.round.assistantEnabled === false) return;
 
   const snap = parseSettingsSnapshot(round.configSnapshot);
-  const members = await prisma.roomMember.count({
-    where: {
-      roomId,
-      status: 'ACTIVE',
-      user: { status: 'ACTIVE', kyc: { status: 'APPROVED' } },
-    },
-  });
+  const members = await countEligiblePlayers(roomId);
   const range = bettingRange(
     Number(round.potCents),
     Math.max(1, members),
@@ -339,9 +334,12 @@ async function actOnBetPhase(roomId: string, roundId: string) {
       );
 
       const availableCents = profile.user.wallet?.availableCents ?? 0n;
+      const shMaxCents = BigInt(liveRange.shMaxCents);
+      const allInCap =
+        availableCents < shMaxCents ? availableCents : shMaxCents;
       const useAllIn =
         profile.canAllIn
-        && availableCents >= BigInt(liveRange.shMinCents)
+        && allInCap >= BigInt(liveRange.shMinCents)
         && Math.random() < 0.08;
 
       let amountCents: bigint;
@@ -349,7 +347,7 @@ async function actOnBetPhase(roomId: string, roundId: string) {
       if (useAllIn) {
         isAllIn = true;
         const minCents = BigInt(liveRange.shMinCents);
-        const span = availableCents - minCents;
+        const span = allInCap - minCents;
         amountCents =
           minCents +
           BigInt(Math.floor(Math.random() * (Number(span > 1_000_000n ? 1_000_000n : span) + 1)));

@@ -73,7 +73,7 @@ function formatBidList(
   return bids
     .map((bid, index) => {
       const mark = index === 0 ? ' ← 当前最高（锁庄前复核资格）' : '';
-      return `${index + 1}. ${mentionUser(bid.user)} RM ${formatBidAmount(bid.amountCents)}${mark}`;
+      return `${index + 1}. ${mentionUser(bid.user)} ${formatBidAmount(bid.amountCents)}${mark}`;
     })
     .join('\n');
 }
@@ -180,7 +180,7 @@ export async function advanceBidClosingCeremony(params: {
     const sent = await appendSystemChatOnce(
       params.roomId,
       `round:${round.id}:bid:closing`,
-      content || '竞标最后倒数，3、2、1 播完前仍可继续加 RM 100。',
+      content || '竞标最后倒数，3、2、1 播完前仍可继续加 100。',
     );
     if (!sent) return 'pending';
     await prisma.roundEvent.create({

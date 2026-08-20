@@ -17,15 +17,15 @@ const configMeta: Record<string, { label: string; hint: string }> = {
 const HAND_TYPES: Array<{ key: string; label: string }> = [
   { key: 'BAOZI', label: '豹子' },
   { key: 'MANNIU', label: '满牛' },
-  { key: 'FANSHUN', label: '反顺' },
   { key: 'SHUNZI', label: '顺子' },
+  { key: 'FANSHUN', label: '反顺' },
   { key: 'DUIZI', label: '对子' },
   { key: 'JINNIU', label: '金牛' },
   { key: 'NIUNIU', label: '牛牛（三位相加=10）' },
   { key: 'NORMAL', label: '普通（占位，实际用下方点数倍数）' },
 ];
 
-const NORMAL_POINTS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] as const;
+const NORMAL_POINTS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9] as const;
 
 const MESSAGE_FIELDS: Array<{ key: string; label: string; hint?: string }> = [
   { key: 'welcome', label: '进群欢迎语' },
@@ -164,11 +164,11 @@ function HandForm({
           </Field>
         ))}
       </Section>
-      <Section title="普通牌型点数倍数（1–10 点；相加=10 已归入「牛牛」牌型，此处 10 点仅指相加=20 等情形）">
+      <Section title="普通牌型点数倍数（0–9 点；相加=10 已归入「牛牛」牌型，相加=20 等记 0 点）">
         {NORMAL_POINTS.map((point) => (
           <Field
             key={point}
-            label={point === 10 ? '10 点（最大点数）' : `${point} 点`}
+            label={point === 0 ? '0 点（最小点数）' : `${point} 点`}
             hint="倍"
           >
             <input
@@ -176,7 +176,12 @@ function HandForm({
               min={1}
               max={100}
               step={1}
-              value={normal[point] ?? normal[String(point)] ?? ''}
+              value={
+                normal[point]
+                ?? normal[String(point)]
+                ?? (point === 0 ? (normal[10] ?? normal['10']) : undefined)
+                ?? ''
+              }
               onChange={(event) =>
                 onChange({
                   ...value,
@@ -247,7 +252,7 @@ function BettingForm({
             }
           />
         </Field>
-        <Field label="梭哈最低" hint="RM；梭哈固定 1:1，最高额等于玩家当前余额，不再按庄钱封顶">
+        <Field label="梭哈最低" hint="RM；梭哈固定 1:1，最高额 = 庄钱 × 梭哈比例 × 人数系数">
           <input
             inputMode="decimal"
             value={value.shMinCents ?? ''}
@@ -258,7 +263,7 @@ function BettingForm({
         </Field>
       </Section>
       <Section title="上限比例（相对庄钱）">
-        <Field label="普通下注比例" hint="% ，例如 0.5 表示庄钱的 0.5%">
+        <Field label="普通下注比例" hint="% ，满注。例如 0.6 表示庄钱的 0.6%">
           <input
             value={value.betRatio ?? ''}
             onChange={(event) =>
@@ -266,7 +271,7 @@ function BettingForm({
             }
           />
         </Field>
-        <Field label="梭哈比例" hint="已停用：梭哈不再按庄钱比例封顶，此值仅保留兼容旧配置">
+        <Field label="梭哈比例" hint="% ，满梭哈。例如 5 表示庄钱的 5%">
           <input
             value={value.shRatio ?? ''}
             onChange={(event) =>
@@ -277,7 +282,7 @@ function BettingForm({
       </Section>
       <Section title="人数系数分档">
         <p className="cfg-help">
-          按「人数上限」从小到大匹配：实际人数 ≤ 上限时使用该系数。上限越大越靠后。
+          按「人数上限」从小到大匹配：实际人数 ≤ 上限时使用该系数。普通满注与满梭哈都会乘这个系数。上限越大越靠后。
         </p>
         {tiers.map((tier, index) => (
           <div className="cfg-tier-row" key={index}>
@@ -384,7 +389,7 @@ function FeesForm({
           }
         />
       </Field>
-      <Field label="庄家赢抽水比例" hint="% ，只抽庄家赢方盈利，例如 5 = 5%">
+      <Field label="庄家盈利抽水比例" hint="% ，按本局对赌毛利（实收−实赔）抽取，亏损不抽。例如 5 = 5%">
         <input
           value={value.bankerRakeRatio ?? ''}
           onChange={(event) =>
@@ -855,7 +860,12 @@ function serializeConfig(key: string, draft: Row): Row {
     }
     const normalMultipliers: Record<string, number> = {};
     for (const point of NORMAL_POINTS) {
-      const raw = draft.normalMultipliers?.[point] ?? draft.normalMultipliers?.[String(point)];
+      const raw =
+        draft.normalMultipliers?.[point]
+        ?? draft.normalMultipliers?.[String(point)]
+        ?? (point === 0
+          ? (draft.normalMultipliers?.[10] ?? draft.normalMultipliers?.['10'])
+          : undefined);
       normalMultipliers[String(point)] = intOrThrow(String(raw ?? ''), `${point}点倍数`);
     }
     return {
@@ -916,7 +926,7 @@ function serializeConfig(key: string, draft: Row): Row {
       bankerRakeRatio:
         typeof draft.bankerRakeRatio === 'string'
           ? percentToRatio(draft.bankerRakeRatio)
-          : numOrThrow(String(draft.bankerRakeRatio ?? ''), '庄家赢抽水比例'),
+          : numOrThrow(String(draft.bankerRakeRatio ?? ''), '庄家盈利抽水比例'),
     };
   }
 

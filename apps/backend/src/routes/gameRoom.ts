@@ -14,6 +14,7 @@ import {
 } from '../engine/bankerContinuation.js';
 import { bettingRange, toCentsBigInt } from '../engine/betting.js';
 import { prisma } from '../lib/prisma.js';
+import { countEligiblePlayers } from '../services/eligiblePlayers.js';
 import {
   canClaimPacket,
   currentRoundForRoom,
@@ -184,16 +185,6 @@ async function requireRoomInputOpen(roomId: string): Promise<void> {
   }
 }
 
-async function eligiblePlayerCount(roomId: string): Promise<number> {
-  return prisma.roomMember.count({
-    where: {
-      roomId,
-      status: 'ACTIVE',
-      user: { status: 'ACTIVE', kyc: { status: 'APPROVED' } },
-    },
-  });
-}
-
 async function buildRoomState(roomId: string, userId: string) {
   const [room, member] = await Promise.all([
     prisma.room.findFirst({
@@ -249,7 +240,7 @@ async function buildRoomState(roomId: string, userId: string) {
         })
       : Promise.resolve(null),
     round?.phase === RoundPhase.BETTING
-      ? eligiblePlayerCount(roomId)
+      ? countEligiblePlayers(roomId)
       : Promise.resolve(null),
     round?.packet && round.phase === RoundPhase.CLAIMING && !myClaim
       ? canClaimPacket(round.packet.id, userId)

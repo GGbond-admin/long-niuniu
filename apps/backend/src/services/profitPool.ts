@@ -2,7 +2,7 @@
  * 利润池与称桶分配 — 对应《07-利润池与称桶分配》与
  * 《代理称桶制度与上下级分成机制说明文档》（2026-08-17 升级：代理树 + 占成差额制 + 两阶段结算）
  *
- * 链路：游戏抽水（玩家赢 3% / 庄家赢 5%，实收入账 PLATFORM_RAKE）
+ * 链路：游戏抽水（闲家赢按该笔盈利 3% / 庄家按本局对赌毛利 5%，实收入账 PLATFORM_RAKE）
  *   → 当日毛利润 = 实收抽水合计
  *   → 公司支出 = 公司总流水 × 支出比例（默认 2.5%）
  *   → 净利润池 = 毛利润 − 支出 + 前日负结转
@@ -23,6 +23,7 @@
 import { AccountType, Prisma } from '@prisma/client';
 import { prisma } from '../lib/prisma.js';
 import { serializable } from '../lib/transaction.js';
+import { bankerRakeCentsFromSummary } from '../engine/settlement.js';
 import {
   PLATFORM_CONFIG_SCOPE,
   getGameConfig,
@@ -490,7 +491,7 @@ export async function computeProfitPool(date: string): Promise<PoolComputation> 
 
   const config = await getProfitPoolConfig();
   const window = malaysiaDayWindow(date);
-  const [playerRake, bankerRake, turnover, previousPool, agents] = await Promise.all([
+  const [playerRake, bankerPairRake, bankerSummaries, turnover, previousPool, agents] = await Promise.all([
     prisma.settlement.aggregate({
       where: { createdAt: window, outcome: 'PLAYER_WIN' },
       _sum: { rakeCents: true },
@@ -498,6 +499,10 @@ export async function computeProfitPool(date: string): Promise<PoolComputation> 
     prisma.settlement.aggregate({
       where: { createdAt: window, outcome: 'BANKER_WIN' },
       _sum: { rakeCents: true },
+    }),
+    prisma.roundScoreboard.findMany({
+      where: { round: { settledAt: window } },
+      select: { bankerSummary: true },
     }),
     prisma.turnoverDaily.aggregate({
       where: { date },
@@ -514,7 +519,12 @@ export async function computeProfitPool(date: string): Promise<PoolComputation> 
   ]);
 
   const rakePlayerCents = playerRake._sum.rakeCents ?? 0n;
-  const rakeBankerCents = bankerRake._sum.rakeCents ?? 0n;
+  const rakeBankerCents =
+    (bankerPairRake._sum.rakeCents ?? 0n) +
+    bankerSummaries.reduce(
+      (sum, row) => sum + bankerRakeCentsFromSummary(row.bankerSummary),
+      0n,
+    );
   const rakeTotalCents = rakePlayerCents + rakeBankerCents;
   const turnoverCents = turnover._sum.selfCents ?? 0n;
   const expenseCents = expenseOf(turnoverCents, config.expenseRatio);
@@ -729,7 +739,7 @@ export async function confirmProfitPool(date: string, adminId: string) {
       void pushService
         .sendCustom(
           share.agent.userId,
-          `💼 ${date} 称桶分成已发放\n占成 ${share.sharePointsSnapshot}/${share.bucketBaseSnapshot}，分成 RM${amount} 已发放到可用余额。`,
+          `💼 ${date} 称桶分成已发放\n占成 ${share.sharePointsSnapshot}/${share.bucketBaseSnapshot}，分成 ${amount} 已发放到可用余额。`,
         )
         .catch(() => undefined);
     }

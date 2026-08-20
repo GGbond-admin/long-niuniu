@@ -35,6 +35,7 @@ import { blindIndex, decryptSecret, encryptSecret, normalizeIdentity } from '../
 import { prisma } from '../lib/prisma.js';
 import { checkTngClaimLink, checkTngDeepLink } from '../lib/tngPacketUrl.js';
 import { serializable } from '../lib/transaction.js';
+import { countEligiblePlayers } from './eligiblePlayers.js';
 import {
   getGameSettings,
   parseSettingsSnapshot,
@@ -542,13 +543,7 @@ export async function closeBidding(roundId: string) {
 }
 
 async function activePlayerCount(tx: Tx, roomId: string): Promise<number> {
-  return tx.roomMember.count({
-    where: {
-      roomId,
-      status: 'ACTIVE',
-      user: { status: 'ACTIVE', kyc: { status: 'APPROVED' } },
-    },
-  });
+  return countEligiblePlayers(roomId, tx);
 }
 
 export interface PlaceBetResult {
@@ -2230,11 +2225,11 @@ export async function settleGameRound(roundId: string, actorId?: string) {
           });
         }
       } else if (pair.outcome === 'BANKER_WIN') {
-        // 最大赔付已在下注时完整预留；结算只从冻结科目扣实赔并退回剩余。
-        const bankerNet = BigInt(pair.bankerNetCents);
-        if (bankerNet > 0n) {
+        // 最大赔付已在下注时完整预留；结算按实收全额划给庄家，抽水改在本局盈利上一次性收取。
+        const collectedCents = BigInt(pair.paidCents);
+        if (collectedCents > 0n) {
           await transfer(tx, {
-            amountCents: bankerNet,
+            amountCents: collectedCents,
             from: { userId: pair.userId, accountType: AccountType.USER_FREEZE_BET },
             to: { userId: round.bankerId, accountType: AccountType.USER_FREEZE_BANKER },
             refType: 'settle_lose',
@@ -2243,18 +2238,7 @@ export async function settleGameRound(roundId: string, actorId?: string) {
             idempotencyKey: `settle:banker-win:${round.id}:${pair.userId}`,
           });
         }
-        if (pair.rakeCents > 0) {
-          await transfer(tx, {
-            amountCents: BigInt(pair.rakeCents),
-            from: { userId: pair.userId, accountType: AccountType.USER_FREEZE_BET },
-            to: { accountType: AccountType.PLATFORM_RAKE },
-            refType: 'rake',
-            refId: bet.id,
-            roundId: round.id,
-            idempotencyKey: `settle:banker-rake:${round.id}:${pair.userId}`,
-          });
-        }
-        const reserveReturn = reservedCents - BigInt(pair.paidCents);
+        const reserveReturn = reservedCents - collectedCents;
         if (reserveReturn > 0n) {
           await unfreeze(
             tx,
@@ -2298,6 +2282,18 @@ export async function settleGameRound(roundId: string, actorId?: string) {
           shortfallCents: BigInt(pair.shortfallCents),
           rakeCents: BigInt(pair.rakeCents),
         },
+      });
+    }
+
+    if (calculation.bankerRakeCents > 0) {
+      await transfer(tx, {
+        amountCents: BigInt(calculation.bankerRakeCents),
+        from: { userId: round.bankerId, accountType: AccountType.USER_FREEZE_BANKER },
+        to: { accountType: AccountType.PLATFORM_RAKE },
+        refType: 'rake',
+        refId: round.id,
+        roundId: round.id,
+        idempotencyKey: `settle:banker-profit-rake:${round.id}`,
       });
     }
 
@@ -2557,6 +2553,8 @@ export async function settleGameRound(roundId: string, actorId?: string) {
       isBust: calculation.pairs.some((pair) => pair.isBustBanker),
       stats: calculation.stats,
       fees: calculation.fees,
+      profitCents: String(calculation.bankerProfitCents),
+      rakeCents: String(calculation.bankerRakeCents),
       grossCents: String(calculation.bankerGrossCents),
       netCents: String(calculation.bankerNetCents),
       balanceBeforeCents: String(bankerBefore),

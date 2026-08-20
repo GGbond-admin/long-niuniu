@@ -442,7 +442,7 @@ export async function adminOperationsRoutes(app: FastifyInstance) {
     });
     if (!user) return reply.code(404).send({ error: 'USER_NOT_FOUND' });
 
-    const [grandInviter, bankerRounds, auditLogs] = await Promise.all([
+    const [grandInviter, bankerRounds, auditLogs, depositStats] = await Promise.all([
       user.grandInviterId
         ? prisma.user.findUnique({
             where: { id: user.grandInviterId },
@@ -456,7 +456,19 @@ export async function adminOperationsRoutes(app: FastifyInstance) {
         take: 30,
         select: { id: true, adminId: true, action: true, createdAt: true },
       }),
+      prisma.depositOrder.groupBy({
+        by: ['status'],
+        where: { userId: id },
+        _sum: { amountCents: true },
+        _count: true,
+      }),
     ]);
+    const depositByStatus = Object.fromEntries(
+      depositStats.map((row) => [
+        row.status,
+        { count: row._count, cents: row._sum.amountCents ?? 0n },
+      ]),
+    );
 
     return {
       user: {
@@ -541,6 +553,10 @@ export async function adminOperationsRoutes(app: FastifyInstance) {
         bankerRounds,
         rewards: user._count.rewardGrants,
         deposits: user._count.depositOrders,
+        depositCompletedCount: depositByStatus.COMPLETED?.count ?? 0,
+        depositPendingCount: depositByStatus.PENDING?.count ?? 0,
+        depositCompletedCents: String(depositByStatus.COMPLETED?.cents ?? 0n),
+        depositPendingCents: String(depositByStatus.PENDING?.cents ?? 0n),
         withdrawals: user._count.withdrawOrders,
         rooms: user._count.roomMemberships,
       },
@@ -827,6 +843,8 @@ export async function adminOperationsRoutes(app: FastifyInstance) {
               status: true,
               proofUrl: true,
               payeeSnapshot: true,
+              channel: true,
+              providerTradeNo: true,
               createdAt: true,
               reviewedAt: true,
             },
@@ -2034,7 +2052,20 @@ export async function adminOperationsRoutes(app: FastifyInstance) {
       orderBy: { createdAt: 'desc' },
       take: query.limit,
     });
-    return { items };
+    const userIds = [...new Set(items.map((item) => item.userId).filter((id): id is string => Boolean(id)))];
+    const users = userIds.length
+      ? await prisma.user.findMany({
+          where: { id: { in: userIds } },
+          select: { id: true, uid: true, nickname: true },
+        })
+      : [];
+    const userById = new Map(users.map((row) => [row.id, row]));
+    return {
+      items: items.map((item) => ({
+        ...item,
+        user: item.userId ? userById.get(item.userId) ?? null : null,
+      })),
+    };
   });
 
   app.post('/api/admin/finance/adjust', { preHandler: finance }, async (req, reply) => {
