@@ -5391,6 +5391,9 @@ textarea::placeholder {
   max-height: 168px;
   z-index: 90;
 }
+.pp-dir-modal-body .form-error {
+  margin: 4px 0 8px;
+}
 
 .pp-formula {
   display: flex;

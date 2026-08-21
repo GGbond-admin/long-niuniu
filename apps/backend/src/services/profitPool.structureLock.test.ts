@@ -75,4 +75,24 @@ describe('利润池配置与代理树结构锁', () => {
 
     expect(calls.slice(0, 2)).toEqual(['lock', 'read-config']);
   });
+
+  it('拒绝把官方邀请号建成代理', async () => {
+    tx.user.findUnique.mockResolvedValueOnce({
+      id: 'house-1',
+      uid: '8888888888',
+      kind: 'HUMAN',
+      adminNote: 'HOUSE_INVITER',
+      status: 'ACTIVE',
+      agentBinding: null,
+    });
+
+    await expect(
+      createAgent({
+        uid: '8888888888',
+        label: '官方邀请',
+        sharePoints: 50,
+      }),
+    ).rejects.toMatchObject({ code: 'HOUSE_INVITER_NOT_ALLOWED' });
+    expect(tx.agent.create).not.toHaveBeenCalled();
+  });
 });

@@ -59,6 +59,8 @@ export const PROFIT_POOL_ERROR_MESSAGES: Record<string, string> = {
   SHARE_POINTS_OUT_OF_RANGE: '占成点数超出允许范围（受上级/下级占成与最低预留限制）',
   USER_NOT_FOUND: '未找到该 UID 对应的用户',
   VIRTUAL_NOT_ALLOWED: '虚拟玩家不能作为代理或归属玩家',
+  HOUSE_INVITER_NOT_ALLOWED: '官方邀请号不能设为代理',
+  USER_BANNED: '该账号已封禁，不能设为代理',
   AGENT_ALREADY_EXISTS: '该用户已经是代理',
   AGENT_NOT_FOUND: '代理不存在',
   SUBAGENT_NOT_FOUND: '该代理不是你的直属下级',

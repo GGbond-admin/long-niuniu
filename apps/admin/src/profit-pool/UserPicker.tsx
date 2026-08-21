@@ -189,7 +189,11 @@ export default function UserPicker({
               event.preventDefault();
               select(items[activeIndex]);
             } else if (event.key === 'Escape') {
-              setOpen(false);
+              if (open) {
+                event.preventDefault();
+                event.stopPropagation();
+                setOpen(false);
+              }
             }
           }}
         />

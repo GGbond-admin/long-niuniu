@@ -219,26 +219,37 @@ function Pager({
   );
 }
 
+function clipAgentLabel(value: string) {
+  return value.replace(/\s+/g, ' ').trim().slice(0, 30);
+}
+
 function CreateAgentModal({
   bucketBase,
   minReservePoints,
   tierPresets,
   onClose,
   onCreated,
-  onError,
 }: {
   bucketBase: number;
   minReservePoints: number;
   tierPresets: TierPreset[];
   onClose: () => void;
   onCreated: () => void;
-  onError: (message: string) => void;
 }) {
-  const presets = tierPresets.length ? tierPresets : [{ label: '默认', points: 65 }];
+  const presets = useMemo(() => {
+    const source = tierPresets.length
+      ? tierPresets
+      : [{ label: '默认', points: Math.min(65, bucketBase) }];
+    const valid = source.filter(
+      (tier) => Number.isInteger(tier.points) && tier.points >= 0 && tier.points <= bucketBase,
+    );
+    return valid.length ? valid : [{ label: '默认', points: Math.min(65, bucketBase) }];
+  }, [bucketBase, tierPresets]);
   const [agentUser, setAgentUser] = useState<UserOption | null>(null);
   const [label, setLabel] = useState('');
   const [points, setPoints] = useState(String(presets[0].points));
   const [creating, setCreating] = useState(false);
+  const [formError, setFormError] = useState('');
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -249,17 +260,24 @@ function CreateAgentModal({
   }, [onClose]);
 
   async function create() {
-    if (!agentUser || !label.trim()) return;
+    const sharePoints = Number(points);
+    const nextLabel = clipAgentLabel(label);
+    if (!agentUser || !nextLabel) return;
+    if (!Number.isInteger(sharePoints) || sharePoints < 0 || sharePoints > bucketBase) {
+      setFormError(`占成必须是 0–${bucketBase} 的整数`);
+      return;
+    }
     setCreating(true);
+    setFormError('');
     try {
       await post('/api/admin/profit-pool/agents', {
         uid: agentUser.uid,
-        label: label.trim(),
-        sharePoints: Number(points),
+        label: nextLabel,
+        sharePoints,
       });
       onCreated();
     } catch (error) {
-      onError(errorText(error, '建立代理失败'));
+      setFormError(errorText(error, '建立代理失败'));
     } finally {
       setCreating(false);
     }
@@ -281,7 +299,8 @@ function CreateAgentModal({
             placeholder="搜索 UID、昵称或 Telegram"
             onChange={(user) => {
               setAgentUser(user);
-              if (user) setLabel(userOptionName(user));
+              setFormError('');
+              if (user) setLabel(clipAgentLabel(userOptionName(user)));
             }}
           />
         </label>
@@ -315,6 +334,11 @@ function CreateAgentModal({
             ))}
           </div>
         </div>
+        {formError ? (
+          <div className="form-error" role="alert">
+            {formError}
+          </div>
+        ) : null}
       </div>
       <div className="pp-dir-modal-actions">
         <button type="button" className="small" onClick={onClose}>
@@ -323,7 +347,7 @@ function CreateAgentModal({
         <button
           type="button"
           className="primary small"
-          disabled={!agentUser || !label.trim() || creating}
+          disabled={!agentUser || !clipAgentLabel(label) || creating}
           onClick={() => void create()}
         >
           {creating ? '正在建立…' : '建立第一层代理'}
@@ -1039,7 +1063,6 @@ export default function AgentNetworkScreen({
             setCreating(false);
             void refreshed();
           }}
-          onError={onError}
         />
       )}
       {editingPoints && current && (

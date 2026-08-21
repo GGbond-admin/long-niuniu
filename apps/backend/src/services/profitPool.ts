@@ -20,7 +20,7 @@
  * - 「自身流水」= 直属玩家流水 + 代理本人流水；「团队流水」= 自身流水 + 所有下级团队流水；
  * - 净池 ≤ 0 当日不分配（NO_DISTRIBUTION），负额结转次日；余数与停用代理份额归公司留存。
  */
-import { AccountType, Prisma } from '@prisma/client';
+import { AccountType, Prisma, UserStatus } from '@prisma/client';
 import { prisma } from '../lib/prisma.js';
 import { serializable } from '../lib/transaction.js';
 import { bankerRakeCentsFromSummary } from '../engine/settlement.js';
@@ -30,6 +30,7 @@ import {
   getGameConfigInTransaction,
   setGameConfigInTransaction,
 } from './gameConfig.js';
+import { HOUSE_INVITER_NOTE } from './houseInviter.js';
 import { pushService } from './push.js';
 import { malaysiaDay } from './rebates.js';
 import { transfer } from './wallet.js';
@@ -890,6 +891,10 @@ export async function createAgent(params: {
     });
     if (!user) throw new ProfitPoolError('USER_NOT_FOUND');
     if (user.kind === 'VIRTUAL') throw new ProfitPoolError('VIRTUAL_NOT_ALLOWED');
+    if (user.adminNote === HOUSE_INVITER_NOTE) {
+      throw new ProfitPoolError('HOUSE_INVITER_NOT_ALLOWED');
+    }
+    if (user.status === UserStatus.BANNED) throw new ProfitPoolError('USER_BANNED');
     const existing = await tx.agent.findUnique({ where: { userId: user.id } });
     if (existing) throw new ProfitPoolError('AGENT_ALREADY_EXISTS');
     if (user.agentBinding) throw new ProfitPoolError('USER_IS_BOUND_PLAYER');
