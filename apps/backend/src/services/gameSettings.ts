@@ -634,12 +634,24 @@ function normalizeFeeSnapshot(rawFees: Partial<FeeConfig> | undefined): FeeConfi
   return merged;
 }
 
+const BETTING_CONFIG_KEYS = ['betMinCents', 'shMinCents', 'betRatio', 'shRatio'] as const;
+
+/** 人数系数等已删除字段仍可能留在旧库里；保存时丢掉，避免整单拒收 */
+function stripLegacyBettingConfig(value: unknown): unknown {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+  const row = value as Record<string, unknown>;
+  const next: Record<string, unknown> = {};
+  for (const key of BETTING_CONFIG_KEYS) {
+    if (key in row) next[key] = row[key];
+  }
+  return next;
+}
+
 function normalizeBettingSnapshot(rawBetting: Partial<BettingConfig> | undefined): BettingConfig {
-  const { playerCoefTiers: _legacy, ...rest } = {
+  return {
     ...DEFAULT_BETTING_CONFIG,
-    ...(rawBetting ?? {}),
-  } as BettingConfig & { playerCoefTiers?: unknown };
-  return rest;
+    ...(stripLegacyBettingConfig(rawBetting) as Partial<BettingConfig>),
+  };
 }
 
 export function parseSettingsSnapshot(value: Prisma.JsonValue | null): GameSettings {
@@ -673,7 +685,7 @@ const configSchemas = {
       bustThreshold: z.number().int().min(0).max(10).optional(),
       bustExemptSpecialHands: z.boolean().optional(),
     })
-    .strict(),
+    .strip(),
   betting: z
     .object({
       betMinCents: z.number().int().min(1).max(100_000_000).optional(),
@@ -681,7 +693,7 @@ const configSchemas = {
       betRatio: z.number().positive().max(1).optional(),
       shRatio: z.number().positive().max(1).optional(),
     })
-    .strict()
+    .strip()
     .superRefine((value, ctx) => {
       if (
         value.betMinCents !== undefined
@@ -690,7 +702,7 @@ const configSchemas = {
       ) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
-          message: 'BET_MIN_EXCEEDS_ALL_IN_MIN',
+          message: '普通下注最低不能高于梭哈最低',
           path: ['betMinCents'],
         });
       }
@@ -704,7 +716,7 @@ const configSchemas = {
       bankerRakeRatio: z.number().min(0).max(1).optional(),
       rakeRatio: z.number().min(0).max(1).optional(),
     })
-    .strict(),
+    .strip(),
   rebate: z
     .object({
       selfRate: z.number().min(0).max(0.1).optional(),
@@ -712,7 +724,7 @@ const configSchemas = {
       l2Rate: z.number().min(0).max(0.1).optional(),
       includeTieBets: z.boolean().optional(),
     })
-    .strict(),
+    .strip(),
   round: z
     .object({
       bidDurationSeconds: z.number().int().min(5).max(3_600).optional(),
@@ -732,7 +744,7 @@ const configSchemas = {
       tailPackerBankerName: z.string().min(1).max(80).optional(),
       tailPackerPlayerName: z.string().min(1).max(80).optional(),
     })
-    .strict()
+    .strip()
     .superRefine((value, ctx) => {
       if (
         value.bankerBidMinCents !== undefined
@@ -741,7 +753,7 @@ const configSchemas = {
       ) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
-          message: 'BANKER_BID_MIN_EXCEEDS_MAX',
+          message: '上庄起拍价不能高于最高出价',
           path: ['bankerBidMinCents'],
         });
       }
@@ -752,7 +764,7 @@ const configSchemas = {
       minAllInCents: z.number().int().min(1).max(100_000_000).optional(),
       bankerInstantAmountCents: z.number().int().min(1).max(1_000_000).optional(),
     })
-    .strict()
+    .strip()
     .superRefine((value, ctx) => {
       if (
         value.minBetCents !== undefined
@@ -761,7 +773,7 @@ const configSchemas = {
       ) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
-          message: 'REWARD_BET_MIN_EXCEEDS_ALL_IN_MIN',
+          message: '奖励普通最低不能高于梭哈最低',
           path: ['minBetCents'],
         });
       }
@@ -782,10 +794,10 @@ const configSchemas = {
           hands: z.string().min(1).max(30).optional(),
           banker: z.string().min(1).max(30).optional(),
         })
-        .strict()
+        .strip()
         .optional(),
     })
-    .strict(),
+    .strip(),
   messages: z
     .object({
       welcome: z.string().min(1).max(4_000).optional(),
@@ -815,7 +827,7 @@ const configSchemas = {
       bankerDice: z.string().min(1).max(4_000).optional(),
       rewardCongrats: z.string().min(1).max(4_000).optional(),
     })
-    .strict(),
+    .strip(),
 } as const;
 
 export type GameConfigKey = keyof typeof configSchemas;
@@ -842,5 +854,7 @@ const validationDefaults: Record<GameConfigKey, object> = {
 };
 
 export function validateGameConfig(key: GameConfigKey, value: unknown): object {
-  return configSchemas[key].parse(deepMerge(validationDefaults[key], value));
+  const merged = deepMerge(validationDefaults[key], value);
+  const sanitized = key === 'betting' ? stripLegacyBettingConfig(merged) : merged;
+  return configSchemas[key].parse(sanitized);
 }

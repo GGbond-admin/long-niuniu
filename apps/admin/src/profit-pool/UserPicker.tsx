@@ -1,5 +1,8 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import { request, rm } from '../api';
+import { userOptionAvailability, type UserPickerMode } from './userOptionAvailability';
+
+export type { UserPickerMode };
 
 export type UserOption = {
   id: string;
@@ -13,8 +16,6 @@ export type UserOption = {
   binding: { agentId: string; agentLabel: string } | null;
 };
 
-export type UserPickerMode = 'agent' | 'player';
-
 export function userOptionName(user: UserOption): string {
   return (
     user.nickname?.trim() ||
@@ -22,30 +23,6 @@ export function userOptionName(user: UserOption): string {
     (user.tgUsername ? `@${user.tgUsername}` : '') ||
     `UID ${user.uid}`
   );
-}
-
-function userOptionAvailability(
-  user: UserOption,
-  mode: UserPickerMode,
-  currentAgentId?: string,
-): { allowed: boolean; reason: string } {
-  if (user.status !== 'ACTIVE') return { allowed: false, reason: '账号已封禁' };
-  if (user.agent) {
-    return {
-      allowed: false,
-      reason: mode === 'agent' ? `已是代理：${user.agent.label}` : '该用户已经是代理',
-    };
-  }
-  if (user.binding) {
-    return {
-      allowed: false,
-      reason:
-        user.binding.agentId === currentAgentId
-          ? '已归属当前代理'
-          : `已归属：${user.binding.agentLabel}`,
-    };
-  }
-  return { allowed: true, reason: mode === 'agent' ? '可设为第一层代理' : '可绑定' };
 }
 
 export default function UserPicker({
@@ -98,7 +75,7 @@ export default function UserPicker({
         setLoading(true);
         setLoadError('');
         try {
-          const params = new URLSearchParams({ limit: '8' });
+          const params = new URLSearchParams({ limit: '8', purpose: mode });
           if (query.trim()) params.set('q', query.trim());
           const result = await request<{ items: UserOption[] }>(
             `/api/admin/profit-pool/user-options?${params}`,
@@ -223,23 +200,38 @@ export default function UserPicker({
             <small>
               UID {value.uid}
               {value.tgUsername ? ` · @${value.tgUsername}` : ''}
+              {value.binding && mode === 'agent' ? ` · 现属 ${value.binding.agentLabel}` : ''}
             </small>
           </div>
           <em>余额 RM {rm(value.availableCents)}</em>
-          <b>已选择</b>
+          <b>{value.binding && mode === 'agent' ? '将解绑' : '已选择'}</b>
         </div>
       )}
 
       {open && (
         <div className="pp-user-options" id={listId} role="listbox">
           <header>
-            <span>{query.trim() ? '搜索结果' : '最近注册用户'}</span>
-            <small>可搜索 UID、昵称或 Telegram</small>
+            <span>
+              {query.trim()
+                ? '搜索结果'
+                : mode === 'agent'
+                  ? '可直接设为第一层'
+                  : '最近注册用户'}
+            </span>
+            <small>
+              {mode === 'agent'
+                ? '已归属的用户也可搜索后选择，提交时会先解绑'
+                : '可搜索 UID、昵称或 Telegram'}
+            </small>
           </header>
           {loadError ? (
             <div className="pp-user-empty error">{loadError}</div>
           ) : !loading && items.length === 0 ? (
-            <div className="pp-user-empty">没有找到匹配用户，请换关键词</div>
+            <div className="pp-user-empty">
+              {mode === 'agent' && !query.trim()
+                ? '暂时没有未归属用户。请搜索 UID，已归属其他代理的人也可以选。'
+                : '没有找到匹配用户，请换关键词'}
+            </div>
           ) : (
             items.map((user, index) => {
               const availability = userOptionAvailability(user, mode, currentAgentId);
@@ -252,7 +244,11 @@ export default function UserPicker({
                   aria-selected={value?.id === user.id}
                   disabled={!availability.allowed}
                   className={activeIndex === index ? 'active' : ''}
-                  onMouseDown={(event) => event.preventDefault()}
+                  onMouseDown={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    select(user);
+                  }}
                   onMouseEnter={() => availability.allowed && setActiveIndex(index)}
                   onClick={() => select(user)}
                 >

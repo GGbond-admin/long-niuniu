@@ -24,6 +24,7 @@ const tx = vi.hoisted(() => ({
   },
   agentPlayer: {
     createMany: vi.fn(async () => ({ count: 0 })),
+    deleteMany: vi.fn(async () => ({ count: 1 })),
   },
 }));
 
@@ -74,6 +75,8 @@ describe('利润池配置与代理树结构锁', () => {
     });
 
     expect(calls.slice(0, 2)).toEqual(['lock', 'read-config']);
+    expect(tx.agentPlayer.deleteMany).not.toHaveBeenCalled();
+    expect(tx.agent.create).toHaveBeenCalled();
   });
 
   it('拒绝把官方邀请号建成代理', async () => {
@@ -94,5 +97,27 @@ describe('利润池配置与代理树结构锁', () => {
       }),
     ).rejects.toMatchObject({ code: 'HOUSE_INVITER_NOT_ALLOWED' });
     expect(tx.agent.create).not.toHaveBeenCalled();
+  });
+
+  it('已归属玩家建第一层时代理记录会先解绑再创建', async () => {
+    tx.user.findUnique.mockResolvedValueOnce({
+      id: 'user-2',
+      uid: '10002',
+      kind: 'HUMAN',
+      adminNote: null,
+      status: 'ACTIVE',
+      agentBinding: { id: 'bind-1', agentId: 'agent-old', userId: 'user-2' },
+    });
+
+    await createAgent({
+      uid: '10002',
+      label: '新第一层',
+      sharePoints: 50,
+    });
+
+    expect(tx.agentPlayer.deleteMany).toHaveBeenCalledWith({
+      where: { userId: 'user-2' },
+    });
+    expect(tx.agent.create).toHaveBeenCalled();
   });
 });

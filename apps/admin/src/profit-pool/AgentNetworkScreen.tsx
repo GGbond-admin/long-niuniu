@@ -267,6 +267,12 @@ function CreateAgentModal({
       setFormError(`占成必须是 0–${bucketBase} 的整数`);
       return;
     }
+    if (agentUser.binding) {
+      const ok = window.confirm(
+        `「${userOptionName(agentUser)}」已归属代理「${agentUser.binding.agentLabel}」。\n设为第一层将先解除该归属，确定继续？`,
+      );
+      if (!ok) return;
+    }
     setCreating(true);
     setFormError('');
     try {
@@ -288,10 +294,13 @@ function CreateAgentModal({
       <header>
         <small>仅后台可建第一层</small>
         <h3 id="pp-dir-create-title">新增第一层代理</h3>
-        <p>选用户后定名称和占成。下级由他自己升级，须预留 {minReservePoints} 点差额。</p>
+        <p>
+          先选用户再定名称和占成。已归属其他代理的用户也可以选，提交时会先解绑再建成第一层。下级由他自己升级，须预留{' '}
+          {minReservePoints} 点差额。
+        </p>
       </header>
       <div className="pp-dir-modal-body">
-        <label className="pp-dir-field">
+        <div className="pp-dir-field">
           <span>选择用户</span>
           <UserPicker
             value={agentUser}
@@ -303,7 +312,7 @@ function CreateAgentModal({
               if (user) setLabel(clipAgentLabel(userOptionName(user)));
             }}
           />
-        </label>
+        </div>
         <label className="pp-dir-field">
           <span>报表显示名称</span>
           <input

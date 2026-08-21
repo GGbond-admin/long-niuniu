@@ -56,6 +56,54 @@ const MESSAGE_FIELDS: Array<{ key: string; label: string; hint?: string }> = [
   { key: 'rewardCongrats', label: '奖励到账' },
 ];
 
+function formatConfigSaveError(error: unknown): string {
+  const err = error as Error & {
+    issues?: Array<{
+      path?: Array<string | number>;
+      message?: string;
+      code?: string;
+      keys?: string[];
+      maximum?: number;
+      minimum?: number;
+    }>;
+  };
+  const issue = err.issues?.[0];
+  if (!issue) return err.message || '保存失败';
+  const FIELD_LABELS: Record<string, string> = {
+    betRatio: '普通下注比例',
+    shRatio: '梭哈比例',
+    betMinCents: '普通下注最低',
+    shMinCents: '梭哈最低',
+    bankerSeatFeeRatio: '上庄费比例',
+    serviceFeeCents: '服务费',
+    packetPerHeadCents: '红包人均单价',
+    playerRakeRatio: '玩家赢抽水比例',
+    bankerRakeRatio: '庄家盈利抽水比例',
+    selfRate: '自身返水',
+    l1Rate: '一级返水',
+    l2Rate: '二级返水',
+    bankerBidMinCents: '上庄起拍价',
+    bankerBidMaxCents: '最高出价',
+    minBetCents: '奖励普通最低',
+    minAllInCents: '奖励梭哈最低',
+  };
+  const path = (issue.path ?? []).map(String).join('.');
+  const label = FIELD_LABELS[path] ?? path;
+  if (issue.message && /[\u4e00-\u9fff]/.test(issue.message)) {
+    return issue.message;
+  }
+  if (issue.code === 'too_big') {
+    return `${label || '数值'}超出允许范围`;
+  }
+  if (issue.code === 'too_small') {
+    return `${label || '数值'}低于允许范围`;
+  }
+  if (issue.code === 'unrecognized_keys') {
+    return `包含已停用字段：${(issue.keys ?? []).join('、')}`;
+  }
+  return issue.message || err.message || '提交的资料格式有误';
+}
+
 function Notice({ message }: { message: string }) {
   if (!message) return null;
   return <div className="game-scope-notice" role="status">{message}</div>;
@@ -96,10 +144,16 @@ function intOrThrow(value: string, label: string): number {
   return n;
 }
 
-function numOrThrow(value: string, label: string): number {
-  const n = Number(value.trim());
-  if (!Number.isFinite(n)) throw new Error(`${label}须为数字`);
-  return n;
+function percentField(value: unknown, label: string): number {
+  const text = String(value ?? '').trim();
+  if (!text) throw new Error(`请填写「${label}」`);
+  return percentToRatio(text);
+}
+
+function moneyField(value: unknown, label: string): number {
+  const text = String(value ?? '').trim();
+  if (!text) throw new Error(`请填写「${label}」`);
+  return rmToCents(text);
 }
 
 function Field({
@@ -810,47 +864,20 @@ function serializeConfig(key: string, draft: Row): Row {
 
   if (key === 'betting') {
     return {
-      betMinCents:
-        typeof draft.betMinCents === 'string'
-          ? rmToCents(draft.betMinCents)
-          : intOrThrow(String(draft.betMinCents ?? ''), '普通下注最低'),
-      shMinCents:
-        typeof draft.shMinCents === 'string'
-          ? rmToCents(draft.shMinCents)
-          : intOrThrow(String(draft.shMinCents ?? ''), '梭哈最低'),
-      betRatio:
-        typeof draft.betRatio === 'string'
-          ? percentToRatio(draft.betRatio)
-          : numOrThrow(String(draft.betRatio ?? ''), '普通下注比例'),
-      shRatio:
-        typeof draft.shRatio === 'string'
-          ? percentToRatio(draft.shRatio)
-          : numOrThrow(String(draft.shRatio ?? ''), '梭哈比例'),
+      betMinCents: moneyField(draft.betMinCents, '普通下注最低'),
+      shMinCents: moneyField(draft.shMinCents, '梭哈最低'),
+      betRatio: percentField(draft.betRatio, '普通下注比例'),
+      shRatio: percentField(draft.shRatio, '梭哈比例'),
     };
   }
 
   if (key === 'fees') {
     return {
-      bankerSeatFeeRatio:
-        typeof draft.bankerSeatFeeRatio === 'string'
-          ? percentToRatio(draft.bankerSeatFeeRatio)
-          : numOrThrow(String(draft.bankerSeatFeeRatio ?? ''), '上庄费比例'),
-      serviceFeeCents:
-        typeof draft.serviceFeeCents === 'string'
-          ? rmToCents(draft.serviceFeeCents)
-          : intOrThrow(String(draft.serviceFeeCents ?? ''), '服务费'),
-      packetPerHeadCents:
-        typeof draft.packetPerHeadCents === 'string'
-          ? rmToCents(draft.packetPerHeadCents)
-          : intOrThrow(String(draft.packetPerHeadCents ?? ''), '红包人均'),
-      playerRakeRatio:
-        typeof draft.playerRakeRatio === 'string'
-          ? percentToRatio(draft.playerRakeRatio)
-          : numOrThrow(String(draft.playerRakeRatio ?? ''), '玩家赢抽水比例'),
-      bankerRakeRatio:
-        typeof draft.bankerRakeRatio === 'string'
-          ? percentToRatio(draft.bankerRakeRatio)
-          : numOrThrow(String(draft.bankerRakeRatio ?? ''), '庄家盈利抽水比例'),
+      bankerSeatFeeRatio: percentField(draft.bankerSeatFeeRatio, '上庄费比例'),
+      serviceFeeCents: moneyField(draft.serviceFeeCents, '服务费'),
+      packetPerHeadCents: moneyField(draft.packetPerHeadCents, '红包人均'),
+      playerRakeRatio: percentField(draft.playerRakeRatio, '玩家赢抽水比例'),
+      bankerRakeRatio: percentField(draft.bankerRakeRatio, '庄家盈利抽水比例'),
     };
   }
 
@@ -871,14 +898,8 @@ function serializeConfig(key: string, draft: Row): Row {
         String(draft.bankerDiceTimeoutSeconds ?? ''),
         '庄家投骰时限',
       ),
-      bankerBidMinCents:
-        typeof draft.bankerBidMinCents === 'string'
-          ? rmToCents(draft.bankerBidMinCents)
-          : intOrThrow(String(draft.bankerBidMinCents ?? ''), '上庄起拍价'),
-      bankerBidMaxCents:
-        typeof draft.bankerBidMaxCents === 'string'
-          ? rmToCents(draft.bankerBidMaxCents)
-          : intOrThrow(String(draft.bankerBidMaxCents ?? ''), '最高出价'),
+      bankerBidMinCents: moneyField(draft.bankerBidMinCents, '上庄起拍价'),
+      bankerBidMaxCents: moneyField(draft.bankerBidMaxCents, '最高出价'),
       trendLength: intOrThrow(String(draft.trendLength ?? ''), '走势条长度'),
       assistantEnabled: draft.assistantEnabled !== false,
       autoStart:
@@ -893,36 +914,18 @@ function serializeConfig(key: string, draft: Row): Row {
 
   if (key === 'rebate') {
     return {
-      selfRate:
-        typeof draft.selfRate === 'string'
-          ? percentToRatio(draft.selfRate)
-          : numOrThrow(String(draft.selfRate ?? ''), '自身返水'),
-      l1Rate:
-        typeof draft.l1Rate === 'string'
-          ? percentToRatio(draft.l1Rate)
-          : numOrThrow(String(draft.l1Rate ?? ''), '一级返水'),
-      l2Rate:
-        typeof draft.l2Rate === 'string'
-          ? percentToRatio(draft.l2Rate)
-          : numOrThrow(String(draft.l2Rate ?? ''), '二级返水'),
+      selfRate: percentField(draft.selfRate, '自身返水'),
+      l1Rate: percentField(draft.l1Rate, '一级返水'),
+      l2Rate: percentField(draft.l2Rate, '二级返水'),
       includeTieBets: Boolean(draft.includeTieBets),
     };
   }
 
   if (key === 'rewards') {
     return {
-      minBetCents:
-        typeof draft.minBetCents === 'string'
-          ? rmToCents(draft.minBetCents)
-          : intOrThrow(String(draft.minBetCents ?? ''), '普通下注最低'),
-      minAllInCents:
-        typeof draft.minAllInCents === 'string'
-          ? rmToCents(draft.minAllInCents)
-          : intOrThrow(String(draft.minAllInCents ?? ''), '梭哈最低'),
-      bankerInstantAmountCents:
-        typeof draft.bankerInstantAmountCents === 'string'
-          ? rmToCents(draft.bankerInstantAmountCents)
-          : intOrThrow(String(draft.bankerInstantAmountCents ?? ''), '庄家即时奖励'),
+      minBetCents: moneyField(draft.minBetCents, '普通下注最低'),
+      minAllInCents: moneyField(draft.minAllInCents, '梭哈最低'),
+      bankerInstantAmountCents: moneyField(draft.bankerInstantAmountCents, '庄家即时奖励'),
     };
   }
 
@@ -1075,7 +1078,7 @@ export default function GameConfigEditor({ gameCode }: { gameCode: string }) {
       await load();
       setMessage('配置已保存；进行中牌局继续使用原快照，下一局生效。');
     } catch (error) {
-      setMessage(`保存失败：${(error as Error).message}`);
+      setMessage(`保存失败：${formatConfigSaveError(error)}`);
     } finally {
       setBusy(false);
     }

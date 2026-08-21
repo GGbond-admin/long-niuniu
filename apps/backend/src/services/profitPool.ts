@@ -897,7 +897,10 @@ export async function createAgent(params: {
     if (user.status === UserStatus.BANNED) throw new ProfitPoolError('USER_BANNED');
     const existing = await tx.agent.findUnique({ where: { userId: user.id } });
     if (existing) throw new ProfitPoolError('AGENT_ALREADY_EXISTS');
-    if (user.agentBinding) throw new ProfitPoolError('USER_IS_BOUND_PLAYER');
+    if (user.agentBinding) {
+      // 后台建第一层时允许把已归属玩家提上来，必须在同一事务里先解绑。
+      await tx.agentPlayer.deleteMany({ where: { userId: user.id } });
+    }
     const agent = await tx.agent.create({
       data: {
         userId: user.id,

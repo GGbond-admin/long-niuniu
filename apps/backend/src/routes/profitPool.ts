@@ -127,7 +127,7 @@ const configSchema = z
 const createAgentSchema = z.object({
   uid: z.string().trim().min(1),
   label: z.string().trim().min(1).max(30),
-  sharePoints: z.number().int().min(0).max(10_000),
+  sharePoints: z.coerce.number().int().min(0).max(10_000),
 });
 
 const updateAgentSchema = z
@@ -141,6 +141,7 @@ const updateAgentSchema = z
 const userOptionQuerySchema = z.object({
   q: z.string().trim().max(100).default(''),
   limit: z.coerce.number().int().min(1).max(20).default(8),
+  purpose: z.enum(['agent', 'player']).optional(),
 });
 
 /**
@@ -179,6 +180,24 @@ export function profitPoolUserOptionWhere(q: string): Prisma.UserWhereInput {
       },
       ...(search ? [search] : []),
     ],
+  };
+}
+
+/** 建第一层时代空搜索只拉未归属用户；有关键词时仍能搜到已归属玩家以便解绑提升。 */
+export function profitPoolUserOptionListWhere(
+  q: string,
+  purpose?: 'agent' | 'player',
+): Prisma.UserWhereInput {
+  const eligibleFirst = purpose === 'agent' && !q.trim();
+  return {
+    ...profitPoolUserOptionWhere(q),
+    ...(eligibleFirst
+      ? {
+          status: 'ACTIVE' as const,
+          agentProfile: { is: null },
+          agentBinding: { is: null },
+        }
+      : {}),
   };
 }
 
@@ -269,9 +288,9 @@ export async function adminProfitPoolRoutes(app: FastifyInstance) {
    * 避免管理员记 UID 或提交后才发现用户已被占用。
    */
   app.get('/api/admin/profit-pool/user-options', guard, async (req) => {
-    const { q, limit } = userOptionQuerySchema.parse(req.query);
+    const { q, limit, purpose } = userOptionQuerySchema.parse(req.query);
     const users = await prisma.user.findMany({
-      where: profitPoolUserOptionWhere(q),
+      where: profitPoolUserOptionListWhere(q, purpose),
       select: {
         id: true,
         uid: true,
@@ -293,25 +312,32 @@ export async function adminProfitPoolRoutes(app: FastifyInstance) {
       orderBy: { createdAt: 'desc' },
       take: limit,
     });
+    const items = users.map((user) => ({
+      id: user.id,
+      uid: user.uid,
+      nickname: user.nickname,
+      tgUsername: user.tgUsername,
+      tgDisplayName: user.tgDisplayName,
+      status: user.status,
+      availableCents: String(user.wallet?.availableCents ?? 0),
+      agent: user.agentProfile,
+      binding: user.agentBinding
+        ? {
+            agentId: user.agentBinding.agentId,
+            agentLabel: user.agentBinding.agent.label,
+          }
+        : null,
+    }));
+    items.sort((a, b) => {
+      const rank = (user: (typeof items)[number]) => {
+        if (user.status !== 'ACTIVE' || user.agent) return 2;
+        if (user.binding) return 1;
+        return 0;
+      };
+      return rank(a) - rank(b);
+    });
 
-    return {
-      items: users.map((user) => ({
-        id: user.id,
-        uid: user.uid,
-        nickname: user.nickname,
-        tgUsername: user.tgUsername,
-        tgDisplayName: user.tgDisplayName,
-        status: user.status,
-        availableCents: String(user.wallet?.availableCents ?? 0),
-        agent: user.agentProfile,
-        binding: user.agentBinding
-          ? {
-              agentId: user.agentBinding.agentId,
-              agentLabel: user.agentBinding.agent.label,
-            }
-          : null,
-      })),
-    };
+    return { items };
   });
 
   /** 向导第 1 步：只检查局号范围；0% 计算不会落库。 */

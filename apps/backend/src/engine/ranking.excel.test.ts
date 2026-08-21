@@ -7,6 +7,7 @@ import {
   compareHands,
   evaluateHand,
   handTypeOf,
+  multiplierOf,
   pointsOf,
 } from './hand.js';
 import { toCents } from './betting.js';
@@ -112,6 +113,16 @@ describe('完整排序表对照', () => {
     expect(compareHands(evaluateHand(toCents('3.42')), evaluateHand(toCents('1.26')))).toBe(
       CompareResult.BANKER_WIN,
     );
+  });
+
+  it('庄 1.27 牛牛 10 倍，闲 1.55 对子 12 倍：闲家赢', () => {
+    const banker = evaluateHand(toCents('1.27'));
+    const player = evaluateHand(toCents('1.55'));
+    expect(banker.type).toBe(HandType.NIUNIU);
+    expect(multiplierOf(banker)).toBe(10);
+    expect(player.type).toBe(HandType.DUIZI);
+    expect(multiplierOf(player)).toBe(12);
+    expect(compareHands(banker, player)).toBe(CompareResult.PLAYER_WIN);
   });
 
   it('0.01 免死单独处理；0.98 列为倒顺', () => {

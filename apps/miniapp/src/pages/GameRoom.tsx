@@ -1110,26 +1110,31 @@ function scoreCumulativeLine(params: {
   return `上局 ${scoreRm(params.beforeCents)} · 本局 ${scoreRm(params.afterCents)}`;
 }
 
-const SCORE_HAND_MULTIPLIER: Record<string, number> = {
-  BAOZI: 17,
-  MANNIU: 15,
-  FANSHUN: 14,
-  SHUNZI: 13,
-  DUIZI: 12,
-  JINNIU: 11,
-  NIUNIU: 10,
-  MIANSI: 1,
+/** 牌型等级，与后端 HAND_RANK 同口径（顺子高于倒顺，对子高于金牛/牛牛） */
+const SCORE_HAND_RANK: Record<string, number> = {
+  BAOZI: 8,
+  MANNIU: 7,
+  SHUNZI: 6,
+  FANSHUN: 5,
+  DUIZI: 4,
+  JINNIU: 3,
+  NIUNIU: 2,
+  NORMAL: 1,
+  MIANSI: 0,
 };
 
-function scoreHandMultiplier(type: unknown, points: unknown): number {
-  if (type === 'NORMAL') {
-    const n = Number(points ?? 0);
-    if (n === 10) return 4;
-    if (n === 9) return 3;
-    if (n === 8) return 2;
-    return 1;
-  }
-  return SCORE_HAND_MULTIPLIER[String(type)] ?? 0;
+/**
+ * 与后端 sameTypeStrength 同口径的排序键：
+ * 对子比后两位再前位；金牛只比中间位；普通先比点数再比金额；其余比整笔金额。
+ */
+function scoreHandStrength(line: Record<string, unknown>): [number, number, number] {
+  const type = String(line.handType ?? '');
+  const claim = Number(line.claimCents ?? 0);
+  const rank = SCORE_HAND_RANK[type] ?? 0;
+  if (type === 'DUIZI') return [rank, claim % 100, Math.floor(claim / 100) % 10];
+  if (type === 'JINNIU') return [rank, Math.floor(claim / 10) % 10, 0];
+  if (type === 'NORMAL') return [rank, Number(line.points ?? 0), claim];
+  return [rank, claim, 0];
 }
 
 function scoreLines(board: RoomState['lastScoreboard']): string[] {
@@ -1138,15 +1143,11 @@ function scoreLines(board: RoomState['lastScoreboard']): string[] {
   if (!Array.isArray(board.playerLines)) return [];
   return [...board.playerLines]
     .sort((left, right) => {
-      const a = (left ?? {}) as Record<string, unknown>;
-      const b = (right ?? {}) as Record<string, unknown>;
-      const am = scoreHandMultiplier(a.handType, a.points);
-      const bm = scoreHandMultiplier(b.handType, b.points);
-      if (am !== bm) return bm - am;
-      const ap = Number(a.points ?? 0);
-      const bp = Number(b.points ?? 0);
-      if (ap !== bp) return bp - ap;
-      return Number(b.claimCents ?? 0) - Number(a.claimCents ?? 0);
+      const a = scoreHandStrength((left ?? {}) as Record<string, unknown>);
+      const b = scoreHandStrength((right ?? {}) as Record<string, unknown>);
+      if (a[0] !== b[0]) return b[0] - a[0];
+      if (a[1] !== b[1]) return b[1] - a[1];
+      return b[2] - a[2];
     })
     .map((raw) => {
     if (typeof raw === 'string') return raw;
