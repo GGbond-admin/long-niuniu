@@ -112,7 +112,7 @@ export async function announceBidPlaced(params: {
       1,
       Math.round((params.extendedEndsAt.getTime() - Date.now()) / 1000),
     );
-    const notice = `⏰ 最后时刻有人加价，倒计时重置为 ${seconds} 秒，还有更高的吗？`;
+    const notice = `⏰最后时刻有人加价，倒计时重置为 ${seconds} 秒，还有更高的吗？`;
     content = content ? `${content}\n\n${notice}` : notice;
   }
   if (content) systemChat(params.roomId, content);
@@ -180,7 +180,7 @@ export async function advanceBidClosingCeremony(params: {
     const sent = await appendSystemChatOnce(
       params.roomId,
       `round:${round.id}:bid:closing`,
-      content || '竞标最后倒数，3、2、1 播完前仍可继续加 100。',
+      content || '⏰竞标倒数，3、2、1 播完前仍可继续加 100。',
     );
     if (!sent) return 'pending';
     await prisma.roundEvent.create({

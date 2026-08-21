@@ -246,7 +246,7 @@ describe('续庄窗口结束后的调度', () => {
     expect(memory.appendSystemChatOnce).toHaveBeenCalledWith(
       'room-1',
       'round:round-1:continuation:expired',
-      '【续庄确认超时】\n庄家未在规定时间内确认，下一局转入公开竞标。',
+      '⏰续庄确认超时\n庄家未在规定时间内确认，下一局转入公开竞标。',
       { force: true },
     );
     expect(memory.startRound).toHaveBeenCalledWith(

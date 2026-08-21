@@ -34,6 +34,53 @@ function absoluteAmount(value: unknown): string {
   return fromCents(amount >= 0n ? amount : -amount);
 }
 
+function feeAmount(value: unknown): string {
+  return fromCents(String(value ?? 0));
+}
+
+function bankerPairStats(
+  banker: Record<string, unknown>,
+  players: Array<Record<string, unknown>>,
+): { counted: number; won: number; lost: number; tied: number } {
+  const raw = banker.stats && typeof banker.stats === 'object'
+    ? (banker.stats as Record<string, unknown>)
+    : null;
+  if (raw && ('playerWin' in raw || 'playerLose' in raw || 'tie' in raw)) {
+    const won = Number(raw.playerLose ?? 0);
+    const lost = Number(raw.playerWin ?? 0);
+    const tied = Number(raw.tie ?? 0);
+    if ([won, lost, tied].every((item) => Number.isFinite(item) && item >= 0)) {
+      return { counted: won + lost + tied, won, lost, tied };
+    }
+  }
+  let won = 0;
+  let lost = 0;
+  let tied = 0;
+  for (const player of players) {
+    if (player.outcome === 'BANKER_WIN') won += 1;
+    else if (player.outcome === 'PLAYER_WIN') lost += 1;
+    else tied += 1;
+  }
+  return { counted: players.length, won, lost, tied };
+}
+
+function bankerFeeLines(banker: Record<string, unknown>): string[] {
+  const fees = banker.fees && typeof banker.fees === 'object'
+    ? (banker.fees as Record<string, unknown>)
+    : null;
+  if (!fees) return [];
+  return [
+    `上庄费-${feeAmount(fees.seatFeeCents)} · 服务费-${feeAmount(fees.serviceFeeCents)} · 代包费-${feeAmount(fees.packetFeeCents)}`,
+  ];
+}
+
+function bankerProfitLine(netCents: bigint): string {
+  const amount = absoluteAmount(netCents);
+  if (netCents > 0n) return `庄盈利+${amount}`;
+  if (netCents < 0n) return `庄亏损-${amount}`;
+  return '庄盈亏 0.00';
+}
+
 /**  enclosed CJK 必须带 VS16，否则会被中易/Noto 画成「得」「无」方字，而不是彩色表情 */
 export const SCOREBOARD_EMOJI = {
   win: '\u{1F250}\uFE0F',
@@ -106,8 +153,9 @@ export function formatScoreboard(
   }
 
   const bankerMention = mention(banker, presentation.bankerAlias);
-  const bankerNet = BigInt(String(banker.netCents));
+  const bankerNet = BigInt(String(banker.netCents ?? 0));
   const bankerLabel = netLabel(bankerNet);
+  const pairStats = bankerPairStats(banker, players);
   const bankerTrend = Array.isArray(banker.trend)
     ? banker.trend
         .filter((item): item is string | number => (
@@ -121,10 +169,11 @@ export function formatScoreboard(
     '━━━━━━━━━━━━━━━━━━',
     `${SCOREBOARD_EMOJI.banker} <b>庄家 ${bankerMention}</b> ·`,
     `抢 ${fromCents(String(banker.claimCents))} · ${bankerLabel}→${absoluteAmount(bankerNet)}`,
-    cumulativeLine({
-      beforeCents: banker.balanceBeforeCents,
-      afterCents: banker.balanceAfterCents,
-    }),
+    `输 ${pairStats.lost} 家 · 赢 ${pairStats.won} 家 · 水 ${pairStats.tied} 家`,
+    ...bankerFeeLines(banker),
+    bankerProfitLine(bankerNet),
+    `上庄积分：${fromCents(String(banker.balanceBeforeCents ?? 0))}`,
+    `庄总积分：${fromCents(String(banker.balanceAfterCents ?? 0))}`,
     ...(presentation.bankerNote?.trim()
       ? [`备注：${escapeHtml(presentation.bankerNote.trim())}`]
       : []),

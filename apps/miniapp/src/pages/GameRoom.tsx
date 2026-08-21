@@ -287,9 +287,9 @@ const PACKET_ERROR_TEXT: Record<string, string> = {
   PACKET_ESCROW_UNAVAILABLE: '红包资金正在核对，请稍后重试',
   INSUFFICIENT_BALANCE: '余额不足，请先充值',
   KYC_REQUIRED: '请先完成实名认证',
-  INVALID_PACKET_AMOUNT: '红包金额超出范围（0.10 ~ 10000）',
+  INVALID_PACKET_AMOUNT: '红包金额超出范围（RM0.10 ~ RM10000）',
   INVALID_PACKET_COUNT: '红包个数需在 1 ~ 50 之间',
-  PACKET_TOO_SMALL: '金额太小，每份至少 0.01',
+  PACKET_TOO_SMALL: '金额太小，每份至少 RM0.01',
   INVALID_TIP_AMOUNT: '打赏金额需在 1 ~ 5000 之间',
 };
 
@@ -728,7 +728,7 @@ const DEMO_FEED: FeedItem[] = [
   {
     kind: 'system',
     id: 'demo-bid',
-    text: '🔔 第 1 局开始竞标\n请直接发送整数庄钱金额，不支持小数。\n竞标时间：30 秒\n最低：100',
+    text: '📢第 1 局竞标开启\n时长：30 秒\n最低出价：100',
     time: '21:40',
   },
   {
@@ -758,13 +758,13 @@ const DEMO_FEED: FeedItem[] = [
   {
     kind: 'system',
     id: 'demo-banker-selected',
-    text: '👑 庄家确认\n恭喜 @小美 成为第 1 局庄家！\n庄钱：8800.00',
+    text: '👑庄家锁定\n庄家@小美\n第 1 局庄钱：8800.00\n庄钱已冻结入池，闲家准备开注。',
     time: '21:41',
   },
   {
     kind: 'system',
     id: 'demo-banker',
-    text: '🐂 第 1 局开注\n庄家：@小美\n庄钱：8800.00\n时长：50 秒\n下注：3.00 ~ 52.80\n梭哈：30.00 ~ 440.00\n发数字下注 · sh+数字梭哈 · 0 撤回',
+    text: '💰第 1 局开注\n庄家@小美\n庄钱：8800.00\n时长：50 秒\n下注：3.00 ~ 52.80\n梭哈：30.00 ~ 440.00\n发数字下注 · sh+数字梭哈 · 0 撤回',
     time: '21:41',
   },
   {
@@ -815,13 +815,13 @@ const DEMO_FEED: FeedItem[] = [
   {
     kind: 'system',
     id: 'demo-sealed',
-    text: '🛑 停止下注\n庄家：@小美\n庄钱：8800.00\n发包金额：3.00\n发包数量：3\n总下注额：225.00\n总梭哈额：200.00\n\n本局下注成功名单：\n@阿强 25.00\n@阿杰 200.00梭哈',
+    text: '📋封盘明细\n庄家@小美\n庄钱：8800.00\n发包金额：3.00\n发包数量：3 个\n总下注：225.00\n总梭哈：200.00\n\n本局下注成功名单：\n@阿强 25.00\n@阿杰 200.00梭哈',
     time: '21:42',
   },
   {
     kind: 'system',
     id: 'demo-dice-prompt',
-    text: '🎲 封盘后有 5 秒重推确认。\n庄家不重推，须在接下来的 15 秒内投骰；超时本局自动取消并退款。',
+    text: '⏳封盘确认 · 5 秒\n请庄家@小美确认本局。\n· 继续本局：确认结束后须在 15 秒内投骰，超时本局自动取消并退款\n· 重推本局：倒计时内发送 /重推',
     time: '21:42',
   },
   {
@@ -854,13 +854,13 @@ const DEMO_FEED: FeedItem[] = [
   {
     kind: 'system',
     id: 'demo-dice-result',
-    text: '【庄家开骰】\n庄家：@小美\n点数：2·5·6\n牌型据此开算，请各位看结果。',
+    text: '🎲庄家开骰\n庄家@小美\n骰子：2·5·6',
     time: '21:42',
   },
   {
     kind: 'system',
     id: 'demo-wait',
-    text: '⏳ 等待系统在后台完成 TNG 发包\n请耐心等待，期间请勿退出本页面，以免错过抢包。',
+    text: '⏳等待平台发包\n请耐心等待平台发包，期间请勿退出本页面，\n以免错过抢包。',
     time: '21:42',
   },
   {
@@ -884,7 +884,7 @@ const DEMO_FEED: FeedItem[] = [
   {
     kind: 'system',
     id: 'demo-claim-start',
-    text: '🧧 红包已发出，开始抢包\n仅本局庄家与已下注闲家可领取。\n红包将在 30 秒后过期。',
+    text: '🧧开始抢包 · 30 秒\n仅庄家与已下注闲家可领，过期即止。',
     time: '21:43',
   },
   {
@@ -896,19 +896,19 @@ const DEMO_FEED: FeedItem[] = [
   {
     kind: 'system',
     id: 'demo-claim-end',
-    text: '⏰ 抢包已结束，正在等待平台核对领取明细并结算。',
+    text: '⏰抢包结束\n领取通道已关闭。平台正在核对明细并统算，成绩单一会公布。',
     time: '21:43',
   },
   {
     kind: 'system',
     id: 'demo-rake',
-    text: '⭐ 小通告\n玩家盈利抽 5%，庄家盈利抽 5%。\n祝各位老板发发发！',
+    text: '💸抽水通告\n闲家盈利抽 5%，庄家盈利抽 5%。',
     time: '21:43',
   },
   {
     kind: 'system',
     id: 'demo-next',
-    text: '📣 下一局准备中。上方为演示流程：竞标 → @宣布庄家 → 下注 → 系统发包 → 抢包 → 结算。',
+    text: '📣下一局准备中。上方为演示流程：竞标 → 宣布庄家 → 下注 → 系统发包 → 抢包 → 结算。',
     time: '21:44',
   },
 ];
@@ -998,13 +998,13 @@ function RemainingCopy({
 }) {
   const remaining = useRemainingSeconds(endsAt) ?? 0;
   if (remaining <= 0 && mode === 'bid') {
-    return <>竞标最后倒数{'\n'}最低加 100，也可以加更多</>;
+    return <>⏰竞标倒数{'\n'}最低加 100，也可以加更多</>;
   }
   if (remaining <= 0 && mode === 'bet') {
-    return <>下注时间已到{'\n'}正在封盘…</>;
+    return <>⏰下注时间已到{'\n'}正在封盘…</>;
   }
   if (remaining <= 0 && mode === 'repost') {
-    return <>{afterTemplate || '封盘确认已结束\n请庄家完成投骰'}</>;
+    return <>{afterTemplate || '⏳封盘确认已结束\n请庄家完成投骰'}</>;
   }
   return <>{fillRemaining(template, remaining)}</>;
 }
@@ -1174,6 +1174,39 @@ function scoreLines(board: RoomState['lastScoreboard']): string[] {
   });
 }
 
+function scoreBankerPairStats(board: RoomState['lastScoreboard']): {
+  counted: number;
+  won: number;
+  lost: number;
+  tied: number;
+} {
+  const banker = board && typeof board.bankerSummary === 'object' && board.bankerSummary
+    ? (board.bankerSummary as Record<string, unknown>)
+    : null;
+  const raw = banker?.stats && typeof banker.stats === 'object'
+    ? (banker.stats as Record<string, unknown>)
+    : null;
+  if (raw && ('playerWin' in raw || 'playerLose' in raw || 'tie' in raw)) {
+    const won = Number(raw.playerLose ?? 0);
+    const lost = Number(raw.playerWin ?? 0);
+    const tied = Number(raw.tie ?? 0);
+    if ([won, lost, tied].every((item) => Number.isFinite(item) && item >= 0)) {
+      return { counted: won + lost + tied, won, lost, tied };
+    }
+  }
+  const players = Array.isArray(board?.playerLines) ? board.playerLines : [];
+  let won = 0;
+  let lost = 0;
+  let tied = 0;
+  for (const rawPlayer of players) {
+    const player = (rawPlayer ?? {}) as Record<string, unknown>;
+    if (player.outcome === 'BANKER_WIN') won += 1;
+    else if (player.outcome === 'PLAYER_WIN') lost += 1;
+    else tied += 1;
+  }
+  return { counted: players.length, won, lost, tied };
+}
+
 function scoreFooter(board: RoomState['lastScoreboard']): string {
   if (!board) return '';
   if (typeof board.bankerSummary === 'string') return board.bankerSummary;
@@ -1181,13 +1214,26 @@ function scoreFooter(board: RoomState['lastScoreboard']): string {
   if (!banker || typeof banker !== 'object') return '';
   const name = String(banker.nickname || (banker.uid ? `UID ${banker.uid}` : '庄家'));
   const label = scoreNetLabel(banker.netCents);
+  const net = Number(banker.netCents ?? 0);
+  const pairStats = scoreBankerPairStats(board);
+  const fees = banker.fees && typeof banker.fees === 'object'
+    ? (banker.fees as Record<string, unknown>)
+    : null;
+  const profitLine = net > 0
+    ? `庄盈利+${scoreAbsoluteAmount(net)}`
+    : net < 0
+      ? `庄亏损-${scoreAbsoluteAmount(net)}`
+      : '庄盈亏 0.00';
   return [
     `\u{1F451} 庄家 @${name} ·`,
     `抢 ${scoreRm(banker.claimCents)} · ${label}→${scoreAbsoluteAmount(banker.netCents)}`,
-    scoreCumulativeLine({
-      beforeCents: banker.balanceBeforeCents,
-      afterCents: banker.balanceAfterCents,
-    }),
+    `输 ${pairStats.lost} 家 · 赢 ${pairStats.won} 家 · 水 ${pairStats.tied} 家`,
+    ...(fees
+      ? [`上庄费-${scoreRm(fees.seatFeeCents)} · 服务费-${scoreRm(fees.serviceFeeCents)} · 代包费-${scoreRm(fees.packetFeeCents)}`]
+      : []),
+    profitLine,
+    `上庄积分：${scoreRm(banker.balanceBeforeCents)}`,
+    `庄总积分：${scoreRm(banker.balanceAfterCents)}`,
   ].join('\n');
 }
 
@@ -1834,10 +1880,10 @@ export default function GameRoom({
           const template =
             payload?.template ||
             (payload?.mode === 'bid'
-              ? '竞标倒计时 · 还剩 {{remaining}} 秒\n直接发送整数金额出价，时间到进入最终确认！'
+              ? '⏰竞标倒计时 · 还剩 {{remaining}} 秒\n直接发送整数金额出价，时间到进入最终确认！'
               : payload?.mode === 'repost'
-                ? '封盘确认 · 还剩 {{remaining}} 秒'
-              : '下注倒计时 · 还剩 {{remaining}} 秒\n未出手的抓紧了，时间到立刻封盘！');
+                ? '⏳封盘确认 · {{remaining}} 秒'
+              : '⏰下注倒计时 · 还剩 {{remaining}} 秒\n未出手的抓紧了，时间到立刻封盘！');
           items.push({
             kind: 'countdown',
             id: msg.id,
@@ -1917,7 +1963,7 @@ export default function GameRoom({
           subtitle: canOpen
             ? '点击打开红包'
             : canView
-              ? `已领取 ${rm(state!.me.claimedAmountCents!)} · 点击查看`
+              ? `已领取 RM ${rm(state!.me.claimedAmountCents!)} · 点击查看`
               : isPublishingCurrentRound
                 ? '红包已发出 · 点击查看'
                 : '点击查看红包',
@@ -1994,7 +2040,7 @@ export default function GameRoom({
         subtitle: canOpen
           ? '点击打开红包'
           : canView
-            ? `已领取 ${rm(state.me.claimedAmountCents!)} · 点击查看`
+            ? `已领取 RM ${rm(state.me.claimedAmountCents!)} · 点击查看`
             : '点击查看红包',
         endsAt: canOpen ? deadline : null,
         claimable: canOpen,
@@ -3788,7 +3834,7 @@ export default function GameRoom({
               {state?.room.interactionGroupTitle ?? state?.room.title ?? '至尊牛牛互动群'}
             </strong>
             <small className={connState === 'online' ? undefined : 'offline'}>
-              <i />{' '}
+              <i />
               {connState === 'online'
                 ? '互动中'
                 : connState === 'connecting'
@@ -4136,7 +4182,7 @@ export default function GameRoom({
                             {isDemo
                               ? '演示红包'
                               : opened
-                                ? `已领取 ${rm(claimed!)} · 点击查看`
+                                ? `已领取 RM ${rm(claimed!)} · 点击查看`
                                 : gone
                                   ? '点击查看红包'
                                   : '点击打开红包'}
@@ -4680,7 +4726,7 @@ function RedPacketDialog({
     statusTitle = isTng ? '正在打开 TNG 红包' : '正在拆红包';
     statusHint = isTng ? '即将前往 TNG 领取' : '好运正在赶来…';
   } else if (data.status === 'claimed') {
-    statusTitle = rm(data.amountCents ?? '0');
+    statusTitle = `RM ${rm(data.amountCents ?? '0')}`;
     statusHint = '已领取，可查看领取详情';
   } else if (data.status === 'gone') {
     statusTitle = '手慢了，红包已抢完';

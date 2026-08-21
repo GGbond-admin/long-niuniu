@@ -188,6 +188,7 @@ export default function PacketDetail({ overlay = false }: { overlay?: boolean } 
             <div className="wx-rp-result-miss">手慢了，红包已被领完</div>
           ) : amountCents ? (
             <div className="wx-rp-result-amount">
+              <span className="wx-rp-result-amount-unit">RM</span>
               <b>{rm(amountCents)}</b>
               <i>已存入零钱余额</i>
             </div>
@@ -198,8 +199,8 @@ export default function PacketDetail({ overlay = false }: { overlay?: boolean } 
       <section className="wx-rp-result-sheet" aria-label="领取名单">
         <div className="wx-rp-result-sheet-head">
           {count > 0
-            ? `已领取 ${claims.length}/${count} 个，共 ${rm(totalCents)}`
-            : `已领取 ${claims.length} 个，共 ${rm(totalCents)}`}
+            ? `已领取 ${claims.length}/${count} 个，共 RM ${rm(totalCents)}`
+            : `已领取 ${claims.length} 个，共 RM ${rm(totalCents)}`}
           {grabbedOut ? '，已抢光' : ''}
         </div>
 
@@ -248,7 +249,7 @@ export default function PacketDetail({ overlay = false }: { overlay?: boolean } 
                   <small>{formatClaimTime(claim.at)}</small>
                 </div>
                 <div className="wx-rp-result-row-amt">
-                  <b>{rm(claim.amountCents)}</b>
+                  <b>RM {rm(claim.amountCents)}</b>
                   {isLucky && <span className="wx-rp-result-lucky">手气最佳</span>}
                 </div>
               </div>

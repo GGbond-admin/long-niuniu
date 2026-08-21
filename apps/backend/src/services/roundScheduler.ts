@@ -462,7 +462,7 @@ export class RoundScheduler {
           if (tailed.length) {
             systemChat(
               round.roomId,
-              `🧧 自动认尾包已完成：为 ${tailed.length} 位未领取玩家补录尾包金额，等待复核结算。`,
+              `🧧自动认尾包已完成：为 ${tailed.length} 位未领取玩家补录尾包金额，等待复核结算。`,
             );
             const rows = await prisma.claim.findMany({
               where: { roundId: round.id, userId: { in: tailed } },
@@ -667,7 +667,7 @@ export class RoundScheduler {
             await appendSystemChatOnce(
               room.id,
               `round:${previous.id}:continuation:expired`,
-              '【续庄确认超时】\n庄家未在规定时间内确认，下一局转入公开竞标。',
+              '⏰续庄确认超时\n庄家未在规定时间内确认，下一局转入公开竞标。',
               { force: true },
             ).catch(() => undefined);
           }

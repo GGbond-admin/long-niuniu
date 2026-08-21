@@ -147,7 +147,7 @@ describe('阶段机器人播报顺序', () => {
       mode: 'repost',
       endsAt: '2026-08-07T07:01:25.000Z',
       template: 'dice-prompt @庄家 {{remaining}} 15',
-      afterTemplate: '【封盘确认已结束】\n请庄家在 15 秒内完成投骰，超时自动取消并退款',
+      afterTemplate: '⏳封盘确认已结束\n请庄家在 15 秒内完成投骰，超时自动取消并退款',
     });
   });
 

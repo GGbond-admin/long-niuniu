@@ -266,7 +266,7 @@ body.kb-open .game-room-channel{
   display:grid;
   grid-template-columns:44px minmax(0,1fr) 44px;
   align-items:center;
-  gap:0;
+  gap:2px;
   min-height:48px;
   padding:2px 6px;
   border-bottom:1px solid rgba(232,213,168,.12);
@@ -280,39 +280,42 @@ body.kb-open .game-room-channel{
 .game-room-title{
   min-width:0;
   display:flex;
-  flex-direction:column;
+  flex-direction:row;
   align-items:center;
-  justify-content:center;
-  gap:1px;
-  text-align:center;
+  justify-content:flex-start;
+  gap:6px;
+  padding:2px 4px 2px 2px;
+  text-align:left;
 }
 .game-room-title strong{
+  flex:0 1 auto;
   display:block;
-  max-width:100%;
-  font-size:15px;
-  font-weight:700;
-  letter-spacing:-.01em;
-  line-height:1.2;
+  min-width:0;
+  font-size:16px;
+  font-weight:650;
+  letter-spacing:0;
+  line-height:1.15;
   overflow:hidden;
   text-overflow:ellipsis;
   white-space:nowrap;
 }
 .game-room-title small{
+  flex:0 0 auto;
   display:inline-flex;
   align-items:center;
-  justify-content:center;
+  justify-content:flex-start;
   gap:4px;
   margin-top:0;
   color:var(--success);
   font-size:10px;
   font-weight:500;
-  line-height:1.2;
+  line-height:1;
   white-space:nowrap;
 }
 .game-room-title small i{
-  width:5px;height:5px;border-radius:50%;
+  width:4px;height:4px;border-radius:50%;
   background:var(--success);
-  box-shadow:0 0 8px rgba(110,231,183,.55);
+  box-shadow:0 0 6px rgba(110,231,183,.55);
 }
 .game-room-title small.offline{color:var(--warning)}
 .game-room-title small.offline i{
@@ -2088,7 +2091,7 @@ body.kb-open .game-room-channel{
   box-shadow:0 10px 28px rgba(0,0,0,.45);
 }
 
-.game-room-header{padding:2px 6px;gap:0}
+.game-room-header{padding:2px 6px}
 .game-room-refresh{padding:6px 10px;font-size:11px}
 .game-room-phase{
   margin:8px 10px 0;
@@ -6100,8 +6103,8 @@ img.feed-assistant-avatar {
   font-size:12px;
 }
 
-/* 互动群顶栏：标题与状态叠放居中，避免左右留白浪费 */
-.game-room .game-room-title strong{font-size:15px}
+/* 互动群顶栏：群名靠左，连接状态跟在标题右侧 */
+.game-room .game-room-title strong{font-size:16px}
 .game-room .game-room-title small{font-size:10px}
 .game-room .game-room-phase{
   align-items:center;

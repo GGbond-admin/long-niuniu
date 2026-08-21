@@ -133,7 +133,7 @@ describe('续庄余额不足降级', () => {
     expect(memory.appendSystemChatOnce).toHaveBeenCalledWith(
       'room-1',
       'round:round-1:continuation:insufficient',
-      '【续庄余额不足】\n庄家 @庄家甲 续庄需冻结 516.00，当前可用 100.00，下一局立即转入公开竞标。',
+      '💰续庄余额不足\n庄家 @庄家甲 续庄需冻结 516.00，当前可用 100.00，下一局立即转入公开竞标。',
       { force: true },
     );
     expect(memory.transition).toHaveBeenCalledWith({
@@ -206,7 +206,7 @@ describe('续庄余额不足降级', () => {
     expect(memory.appendSystemChatOnce).toHaveBeenCalledWith(
       'room-1',
       'round:round-1:continuation:insufficient',
-      '【续庄余额不足】\n庄家 @庄家甲 续庄需冻结 516.00，当前可用 100.00，下一局立即转入公开竞标。',
+      '💰续庄余额不足\n庄家 @庄家甲 续庄需冻结 516.00，当前可用 100.00，下一局立即转入公开竞标。',
       { force: true },
     );
     expect(memory.rebroadcastRoomState).toHaveBeenCalledWith({

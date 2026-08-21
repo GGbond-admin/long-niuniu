@@ -2376,10 +2376,16 @@ export default function GameOperationsCenter({ admin }: { admin: Admin }) {
                             ? ` · ${scoreboard.bankerSummary.points} 点`
                             : ''}
                           {' · '}
+                          输 {Number(scoreboard.bankerSummary.stats?.playerWin ?? 0)} 家
+                          {' · '}
+                          赢 {Number(scoreboard.bankerSummary.stats?.playerLose ?? 0)} 家
+                          {' · '}
+                          水 {Number(scoreboard.bankerSummary.stats?.tie ?? 0)} 家
+                          {' · '}
                           抢 RM {rm(scoreboard.bankerSummary.claimCents ?? 0)} ·
-                          余额 RM {rm(scoreboard.bankerSummary.balanceBeforeCents ?? 0)}
-                          {' → '}
-                          {rm(scoreboard.bankerSummary.balanceAfterCents ?? 0)}
+                          上庄积分 RM {rm(scoreboard.bankerSummary.balanceBeforeCents ?? 0)}
+                          {' · '}
+                          庄总积分 RM {rm(scoreboard.bankerSummary.balanceAfterCents ?? 0)}
                           {' · '}
                           毛输赢 {scoreboardMoney(scoreboard.bankerSummary.grossCents)}
                           {scoreboard.bankerSummary.profitCents != null && (
@@ -2399,7 +2405,7 @@ export default function GameOperationsCenter({ admin }: { admin: Admin }) {
                           {' · '}
                           服务费 {scoreboardMoney(scoreboard.bankerSummary.fees?.serviceFeeCents)}
                           {' · '}
-                          红包费 {scoreboardMoney(scoreboard.bankerSummary.fees?.packetFeeCents)}
+                          代包费 {scoreboardMoney(scoreboard.bankerSummary.fees?.packetFeeCents)}
                         </small>
                       </div>
                       {scoreboard.presentationSyncError && (

@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { formatScoreboard, SCOREBOARD_EMOJI } from './messages.js';
 
 describe('成绩单文案', () => {
-  it('用不同符号区分赢输平，并只展示抢、下、本局与累计金额', () => {
+  it('用不同符号区分赢输平，庄家栏展示输赢水、费用、亏损与积分', () => {
     const scoreboard = {
       seqNo: 85,
       playerLines: [
@@ -55,6 +55,8 @@ describe('成绩单文案', () => {
         netCents: '-5000',
         balanceBeforeCents: '100000',
         balanceAfterCents: '95000',
+        stats: { playerWin: 1, playerLose: 1, tie: 1 },
+        fees: { seatFeeCents: 5000, serviceFeeCents: 3800, packetFeeCents: 3120 },
         trend: ['3点', '5点', '4点', '对子'],
       },
     } as unknown as RoundScoreboard;
@@ -79,8 +81,11 @@ describe('成绩单文案', () => {
     expect(text).toContain(
       `${SCOREBOARD_EMOJI.banker} <b>庄家 @庄家</b> ·\n抢 0.70 · 输→50.00`,
     );
-    expect(text).not.toContain('积分：');
-    expect(text).not.toContain('上庄费');
+    expect(text).toContain('输 1 家 · 赢 1 家 · 水 1 家');
+    expect(text).toContain('上庄费-50.00 · 服务费-38.00 · 代包费-31.20');
+    expect(text).toContain('庄亏损-50.00');
+    expect(text).toContain('上庄积分：1000.00');
+    expect(text).toContain('庄总积分：950.00');
     expect(text).toMatch(
       /━━━━━━━━━━━━━━━━━━\n庄家走势\n3点 → 5点 → 4点 → 对子$/,
     );
@@ -255,5 +260,10 @@ describe('成绩单文案', () => {
       `${SCOREBOARD_EMOJI.win} <b>@喝水玩家</b> ·\n抢 0.88 · 下 5.00 · 赢→0.00（喝水 · 庄钱已赔完）`,
     );
     expect(text).toContain(`${SCOREBOARD_EMOJI.banker} <b>庄家 @庄家</b>`);
+    expect(text).toContain('输 1 家 · 赢 0 家 · 水 0 家');
+    expect(text).toContain('庄盈亏 0.00');
+    expect(text).toContain('上庄积分：1000.00');
+    expect(text).toContain('庄总积分：1000.00');
+    expect(text).not.toContain('服务费-');
   });
 });

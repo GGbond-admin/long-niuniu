@@ -273,10 +273,10 @@ export async function buildRoundAnnounceMessages(params: {
       }),
     );
     if (!prompt.includes('{{remaining}}')) {
-      const staticTitle = /【封盘确认\s*·\s*\d+\s*秒】/;
+      const staticTitle = /(?:【封盘确认\s*·\s*\d+\s*秒】|⏳封盘确认\s*·\s*\d+\s*秒)/;
       prompt = staticTitle.test(prompt)
-        ? prompt.replace(staticTitle, '【封盘确认 · {{remaining}} 秒】')
-        : `【封盘确认 · {{remaining}} 秒】\n${prompt}`;
+        ? prompt.replace(staticTitle, '⏳封盘确认 · {{remaining}} 秒')
+        : `⏳封盘确认 · {{remaining}} 秒\n${prompt}`;
     }
     const repostEndsAt = eventEndsAt(
       round.events.find((item) => item.type === 'BANKER_REPOST_WINDOW')?.payload,
@@ -285,7 +285,7 @@ export async function buildRoundAnnounceMessages(params: {
       'repost',
       repostEndsAt,
       prompt,
-      `【封盘确认已结束】\n请庄家在 ${diceSeconds} 秒内完成投骰，超时自动取消并退款`,
+      `⏳封盘确认已结束\n请庄家在 ${diceSeconds} 秒内完成投骰，超时自动取消并退款`,
     );
     return [
       banner('bet-stop'),
@@ -358,7 +358,7 @@ export async function buildRoundAnnounceMessages(params: {
       }
     } else {
       messages.push(
-        text(`🏆 第 ${round.seqNo} 局结算完成`, {
+        text(`🏆第 ${round.seqNo} 局结算完成`, {
           messageKey: 'scoreboard:0',
           scoreboardChunkIndex: 0,
         }),

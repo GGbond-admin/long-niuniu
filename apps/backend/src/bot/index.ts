@@ -337,7 +337,7 @@ async function startBotsInternal(
           miniappUrl(cfg.username, refUid),
         );
         await ctx.reply(
-          '欢迎来到 至尊牛牛\n\n💡 点击下方按钮打开游戏大厅\n进入「至尊牛牛互动群」参与对局（竞庄、下注、抢包、成绩单）。',
+          '👋欢迎来到至尊牛牛\n\n💡点击下方按钮打开游戏大厅\n进入至尊牛牛互动群参与对局（竞庄、下注、抢包、成绩单）。',
           { reply_markup: keyboard },
         );
       });

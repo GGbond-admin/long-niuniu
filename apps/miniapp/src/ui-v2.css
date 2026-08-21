@@ -1512,6 +1512,10 @@ body.tg-native-back-visible :is(
   grid-template-columns: minmax(0, 1fr) auto !important;
 }
 
+body.tg-native-back-visible .game-room-title {
+  padding-left: 10px;
+}
+
 .subpage-header > .text-action {
   justify-self: end;
   width: max-content;
