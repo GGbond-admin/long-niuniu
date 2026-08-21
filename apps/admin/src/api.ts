@@ -69,6 +69,36 @@ export function patch<T>(path: string, body: unknown) {
   return request<T>(path, { method: 'PATCH', body: JSON.stringify(body) });
 }
 
+export async function uploadAdminFile<T>(path: string, file: File, field = 'file'): Promise<T> {
+  const body = new FormData();
+  body.append(field, file);
+  const res = await fetch(path, {
+    method: 'POST',
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    body,
+  });
+  if (res.status === 401) {
+    logout();
+    throw new Error('UNAUTHORIZED');
+  }
+  if (!res.ok) {
+    const payload = await res.json().catch(() => ({}));
+    const messages: Record<string, string> = {
+      FILE_REQUIRED: '请选择要上传的图片',
+      UNSUPPORTED_FILE_TYPE: '仅支持 JPG、PNG 或 WEBP',
+      FILE_CONTENT_MISMATCH: '图片文件已损坏或类型不正确',
+      FILE_TOO_LARGE: '图片不能超过 5MB',
+    };
+    throw new Error(
+      payload.message
+        ?? messages[payload.error as string]
+        ?? payload.error
+        ?? `HTTP ${res.status}`,
+    );
+  }
+  return res.json();
+}
+
 export function put<T>(path: string, body: unknown) {
   return request<T>(path, { method: 'PUT', body: JSON.stringify(body) });
 }

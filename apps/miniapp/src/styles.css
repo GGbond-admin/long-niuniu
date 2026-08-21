@@ -203,6 +203,7 @@
   background:linear-gradient(180deg, rgba(20,19,18,.98) 0%, rgba(20,19,18,.92) 100%);
 }
 .game-room-footer{
+  position:relative;
   flex:0 0 auto;
   z-index:8;
   border-top:1px solid rgba(232,213,168,.1);
@@ -984,6 +985,132 @@ body.kb-open .game-room-channel{
 }
 @keyframes channel-sheet-fade{from{opacity:0}to{opacity:1}}
 @keyframes channel-sheet-up{from{transform:translateY(100%)}to{transform:translateY(0)}}
+
+/* 我的战绩面板 */
+.my-history-summary {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  gap: 14px;
+  margin: 2px 14px 10px;
+  padding: 12px 14px;
+  border: 1px solid rgba(232, 213, 168, 0.16);
+  border-radius: 14px;
+  background: linear-gradient(160deg, rgba(201, 169, 98, 0.12), rgba(255, 255, 255, 0.02));
+}
+.my-history-total small {
+  display: block;
+  color: var(--text-tertiary);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+.my-history-total strong {
+  display: block;
+  margin-top: 2px;
+  font-size: 20px;
+  font-weight: 750;
+  font-variant-numeric: tabular-nums;
+}
+.my-history-total.win strong { color: var(--success); }
+.my-history-total.lose strong { color: var(--danger); }
+.my-history-total.tie strong { color: var(--text-secondary); }
+.my-history-summary dl {
+  display: flex;
+  justify-content: flex-end;
+  gap: 14px;
+}
+.my-history-summary dl div {
+  display: grid;
+  gap: 2px;
+  text-align: center;
+}
+.my-history-summary dt {
+  color: var(--text-tertiary);
+  font-size: 10px;
+}
+.my-history-summary dd {
+  font-size: 13px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.my-history-list {
+  gap: 8px;
+}
+.my-history-row {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.025);
+}
+.my-history-row-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.my-history-row-head strong {
+  font-size: 13px;
+  font-weight: 700;
+}
+.my-history-role {
+  flex: 0 0 auto;
+  padding: 1px 7px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  color: var(--text-secondary);
+  font-size: 10px;
+  font-weight: 700;
+}
+.my-history-role.banker {
+  border-color: rgba(201, 169, 98, 0.45);
+  color: var(--accent-text);
+  background: rgba(201, 169, 98, 0.12);
+}
+.my-history-row-head time {
+  flex: 1;
+  min-width: 0;
+  color: var(--text-tertiary);
+  font-size: 11px;
+}
+.my-history-net {
+  font-size: 14px;
+  font-weight: 750;
+  font-variant-numeric: tabular-nums;
+}
+.my-history-net.win { color: var(--success); }
+.my-history-net.lose { color: var(--danger); }
+.my-history-net.tie { color: var(--text-secondary); }
+.my-history-row p {
+  margin-top: 5px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.my-history-empty {
+  display: grid;
+  justify-items: center;
+  gap: 10px;
+  padding: 36px 20px;
+  text-align: center;
+  color: var(--text-tertiary);
+  font-size: 13px;
+  line-height: 1.6;
+}
+.my-history-empty button {
+  padding: 8px 18px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 650;
+}
+.my-history-cap {
+  padding: 4px 0 2px;
+  text-align: center;
+  color: var(--text-tertiary);
+  font-size: 11px;
+}
 .packet-detail-link{
   display:inline-block;
   margin-top:8px;
@@ -5190,33 +5317,55 @@ body.kb-open .game-room-channel{
   }
 }
 
+/* 竞庄/下注金额提示：与聊天区底部状态条同一位置，贴在分隔线上方 */
 .composer-amount-preview{
-  margin:6px 10px 0;
-  padding:8px 12px;
+  position:absolute;
+  left:50%;
+  bottom:100%;
+  z-index:8;
+  transform:translateX(-50%);
+  width:fit-content;
+  max-width:calc(100vw - 28px);
+  min-height:28px;
+  padding:5px 16px;
   display:flex;
-  align-items:baseline;
-  justify-content:space-between;
+  align-items:center;
+  justify-content:center;
   gap:8px;
-  border:1px solid rgba(201,169,98,.28);
-  border-radius:10px;
-  background:rgba(201,169,98,.14);
-  color:var(--accent-text);
+  border:0;
+  border-radius:11px 11px 0 0;
+  background:rgba(38,38,42,.94);
+  -webkit-backdrop-filter:blur(10px);
+  backdrop-filter:blur(10px);
+  color:#e7c98d;
 }
 .composer-amount-preview strong{
-  font-size:14px;
-  font-weight:800;
+  flex:0 0 auto;
+  font-size:12.5px;
+  font-weight:700;
+  line-height:1.3;
   letter-spacing:.01em;
+  white-space:nowrap;
   font-variant-numeric:tabular-nums;
 }
 .composer-amount-preview small{
-  color:var(--text-secondary);
+  min-width:0;
+  overflow:hidden;
+  color:rgba(255,255,255,.42);
   font-size:11px;
   font-weight:500;
+  line-height:1.3;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+  font-variant-numeric:tabular-nums;
 }
 .composer-amount-preview.invalid{
-  border-color:rgba(224,112,96,.32);
-  background:rgba(155,58,48,.14);
-  color:#f0b0a5;
+  color:#e0aaa5;
+}
+/* 已有下注状态条时，金额提示往上叠一层，避免两条挤在同一行 */
+.game-room-footer.has-stake-strip .composer-amount-preview{
+  bottom:calc(100% + 30px);
+  border-radius:11px;
 }
 .composer-reply-preview{
   margin:6px 10px 0;
@@ -5307,112 +5456,6 @@ body.kb-open .game-room-channel{
   box-shadow: 0 6px 18px rgba(0, 0, 0, 0.4);
 }
 
-/* 骰子面板：可用时突出动作，不可用时收紧为状态提示 */
-.dice-panel {
-  margin: 0 12px 8px;
-  border: 1px solid var(--border);
-  border-radius: 18px;
-  background: rgba(17, 17, 19, 0.9);
-}
-.dice-panel.ready {
-  display: grid;
-  gap: 12px;
-  padding: 14px;
-  border-color: rgba(201, 169, 98, 0.2);
-  background:
-    radial-gradient(circle at 8% 18%, rgba(201, 169, 98, 0.1), transparent 34%),
-    rgba(17, 17, 19, 0.94);
-}
-.dice-panel.unavailable {
-  padding: 11px 13px;
-  background: rgba(255, 255, 255, 0.018);
-}
-.dice-panel-ready-head {
-  display: grid;
-  grid-template-columns: 54px minmax(0, 1fr);
-  align-items: center;
-  gap: 12px;
-}
-.dice-panel-art {
-  width: 54px;
-  height: 54px;
-  display: grid;
-  place-items: center;
-  overflow: hidden;
-  border: 1px solid rgba(201, 169, 98, 0.18);
-  border-radius: 15px;
-  background: rgba(0, 0, 0, 0.2);
-}
-.dice-panel-art .die3-art {
-  transform: scale(0.8);
-}
-.dice-panel-ready-head > span:last-child,
-.dice-panel-unavailable > span:last-child {
-  min-width: 0;
-  display: grid;
-  gap: 3px;
-}
-.dice-panel-ready-head strong,
-.dice-panel-unavailable strong {
-  color: #eee9df;
-  font-size: 13px;
-  font-weight: 700;
-}
-.dice-panel-ready-head small,
-.dice-panel-unavailable small {
-  color: var(--text-tertiary);
-  font-size: 10px;
-  line-height: 1.45;
-}
-.dice-panel-hint {
-  margin: 0;
-  color: var(--accent-text);
-  font-size: 12px;
-  font-weight: 600;
-  text-align: center;
-}
-.dice-panel .dice-action {
-  width: 100%;
-  min-height: 44px;
-  padding: 0 18px;
-  border: 0;
-  border-radius: 13px;
-  color: #1a1610;
-  font-size: 13px;
-  font-weight: 700;
-  background: linear-gradient(180deg, #ead490, #c9a962);
-  box-shadow: inset 0 1px rgba(255, 251, 230, 0.42);
-}
-.dice-panel .dice-action:disabled {
-  opacity: 0.55;
-  cursor: default;
-}
-.dice-panel-unavailable {
-  display: grid;
-  grid-template-columns: 38px minmax(0, 1fr);
-  align-items: center;
-  gap: 11px;
-}
-.dice-panel-lock {
-  width: 38px;
-  height: 38px;
-  display: grid;
-  place-items: center;
-  border: 1px solid rgba(255, 255, 255, 0.07);
-  border-radius: 12px;
-  color: #77747c;
-  background: rgba(255, 255, 255, 0.025);
-}
-.dice-panel-lock svg {
-  width: 19px;
-  height: 19px;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 1.6;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
-
 /* 聊天头像：支持图片头像（仅显示他人头像，自己的消息不显示） */
 img.feed-chat-avatar {
   object-fit: cover;
@@ -5449,51 +5492,45 @@ img.feed-chat-avatar {
   font-variant-numeric: lining-nums;
 }
 
-/* 底部工具抽屉：骰子 / 表情 / 贴纸 分页 */
+/* 底部工具抽屉：普通、轻量的表情 / 贴纸切换 */
 .tool-drawer {
-  border-top: 1px solid var(--border);
-  background: rgba(14, 14, 16, 0.96);
-  padding-bottom: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.07);
+  background: #111113;
+  padding: 0 0 max(8px, env(safe-area-inset-bottom));
 }
 .tool-tabs {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 6px;
-  padding: 8px 12px 6px;
-}
-.tool-tabs.has-dice {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0;
+  margin: 0 12px 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
 }
 .tool-tabs button {
   position: relative;
   width: auto;
-  height: 48px;
+  min-height: 44px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 7px;
   padding: 0 8px;
-  border: 1px solid transparent;
-  border-radius: 13px;
-  color: #77767d;
+  border: 0;
+  color: #858389;
   background: transparent;
-  transition:
-    border-color 0.18s ease,
-    color 0.18s ease,
-    background 0.18s ease,
-    transform 0.12s ease;
+  touch-action: manipulation;
+  transition: color 0.15s ease, background 0.15s ease;
 }
 .tool-tabs button::after {
   content: '';
   position: absolute;
-  bottom: 3px;
+  bottom: -1px;
   left: 50%;
   width: 0;
   height: 2px;
   border-radius: 999px;
-  background: #d4b66f;
+  background: #c9a962;
   transform: translateX(-50%);
-  transition: width 0.18s ease;
+  transition: width 0.15s ease;
 }
 .tool-tabs button svg {
   width: 19px;
@@ -5506,23 +5543,26 @@ img.feed-chat-avatar {
   stroke-linejoin: round;
 }
 .tool-tabs button span {
-  font-size: 11px;
-  font-weight: 650;
+  font-size: 12px;
+  font-weight: 600;
 }
 .tool-tabs button.active {
-  border-color: rgba(201, 169, 98, 0.24);
-  color: #ddc98f;
-  background: linear-gradient(180deg, rgba(201, 169, 98, 0.12), rgba(201, 169, 98, 0.055));
+  color: #dbc58f;
+  background: rgba(255, 255, 255, 0.018);
 }
 .tool-tabs button.active::after {
-  width: 18px;
+  width: 38px;
 }
 .tool-tabs button:active {
-  transform: scale(0.97);
+  background: rgba(255, 255, 255, 0.045);
 }
-.tool-drawer .dice-panel,
+.tool-tabs button:focus-visible,
+.expression-panel button:focus-visible {
+  outline: 2px solid rgba(232, 213, 168, 0.72);
+  outline-offset: 2px;
+}
 .tool-drawer .expression-panel {
-  margin: 4px 12px 8px;
+  margin: 0 12px;
 }
 
 /* “+” 抽屉：发红包 / 打赏 */
@@ -5562,6 +5602,10 @@ img.feed-chat-avatar {
 .plus-icon.tip {
   color: #1a160f;
   background: var(--accent);
+}
+.plus-icon.history {
+  color: var(--accent-text);
+  background: #2c2c30;
 }
 .plus-hint {
   margin: 12px 8px 0;
@@ -5667,45 +5711,96 @@ img.feed-assistant-avatar {
 
 .game-room-footer .expression-panel {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(42px, 1fr));
-  gap: 6px;
-  margin: 0 12px 8px;
-  padding: 10px;
-  border: 1px solid var(--border);
-  border-radius: 16px;
-  background: rgba(17, 17, 19, 0.92);
-  max-height: 168px;
+  grid-template-columns: repeat(auto-fill, minmax(44px, 1fr));
+  gap: 4px;
+  margin: 0 12px 4px;
+  padding: 4px;
+  max-height: 190px;
   overflow-y: auto;
+  overscroll-behavior: contain;
 }
 .game-room-footer .expression-panel button {
   min-width: 42px;
   min-height: 44px;
-  padding: 5px 0;
-  border: 1px solid transparent;
-  border-radius: 11px;
-  background: rgba(255, 255, 255, 0.012);
-  font-size: 20px;
-  transition: background 0.12s ease, border-color 0.12s ease, transform 0.12s ease;
+  padding: 4px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  font-size: 22px;
+  touch-action: manipulation;
+  transition: background 0.12s ease, transform 0.12s ease;
 }
 .game-room-footer .expression-panel button:active {
-  border-color: rgba(255, 255, 255, 0.07);
-  background: rgba(255, 255, 255, 0.075);
+  background: rgba(255, 255, 255, 0.07);
   transform: scale(0.94);
 }
 .game-room-footer .sticker-panel {
   grid-template-columns: repeat(4, 1fr);
+  gap: 6px;
+}
+.game-room-footer .sticker-panel button {
+  aspect-ratio: 1;
+  min-height: 58px;
+  overflow: hidden;
+  padding: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.025);
 }
 .game-room-footer .sticker-panel img {
   width: 100%;
   aspect-ratio: 1;
   object-fit: contain;
+  transition: transform 0.12s ease;
+}
+.game-room-footer .sticker-panel button:active img {
+  transform: scale(0.94);
 }
 .game-room-footer .expression-panel .empty-inline {
   grid-column: 1 / -1;
+  min-height: 70px;
+  display: grid;
+  place-items: center;
   padding: 12px 0;
   text-align: center;
   color: var(--text-tertiary);
   font-size: 12px;
+}
+
+@media (hover: hover) {
+  .tool-tabs button:not(.active):hover {
+    color: #b5b0a8;
+    background: rgba(255, 255, 255, 0.035);
+  }
+  .game-room-footer .expression-panel button:hover {
+    background: rgba(255, 255, 255, 0.045);
+  }
+}
+
+@media (max-width: 360px) {
+  .tool-tabs {
+    margin-inline: 10px;
+  }
+  .tool-tabs button {
+    gap: 5px;
+    padding-inline: 5px;
+  }
+  .tool-tabs button span {
+    font-size: 10.5px;
+  }
+  .game-room-footer .expression-panel {
+    grid-template-columns: repeat(auto-fill, minmax(40px, 1fr));
+    margin-inline: 10px;
+    padding: 4px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tool-tabs button,
+  .game-room-footer .expression-panel button,
+  .game-room-footer .sticker-panel img {
+    transition: none;
+  }
 }
 
 /* ——— Withdraw redesign ——— */
@@ -6018,18 +6113,6 @@ img.feed-assistant-avatar {
   font-size: 14px;
   line-height: 1.45;
 }
-
-/* 自己的下注：只改字色，不加蓝底框 */
-.feed-chat-name.own-bet{
-  color:#8eb8ff;
-}
-.feed-chat.mine .feed-chat-bubble.is-bet{
-  background:#3a3428 !important;
-  color:#8eb8ff !important;
-  box-shadow:none;
-  font-weight:700;
-  font-variant-numeric:tabular-nums;
-}
 .feed-own-line{
   color:#8eb8ff;
   font-weight:650;
@@ -6215,7 +6298,6 @@ img.feed-assistant-avatar {
   width:42px;
   height:42px;
 }
-.game-room .composer-amount-preview strong{font-size:15px}
 .game-room .game-room-composer input{font-size:16px}
 .game-room .game-room-composer button[type='submit']{width:44px;min-width:44px}
 .feed-banner {
@@ -8442,9 +8524,6 @@ img.feed-assistant-avatar {
   gap: 6px;
   padding: 8px 12px 6px;
 }
-.chat-screen .tool-tabs.has-dice {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-}
 
 /* Support inbox toast — floating bubble */
 .support-inbox-toast {
@@ -8558,6 +8637,10 @@ img.feed-assistant-avatar {
 .plus-icon.tip {
   color: #1a160f;
   background: var(--accent);
+}
+.plus-icon.history {
+  color: var(--accent-text);
+  background: #2c2c30;
 }
 .plus-icon.filled svg {
   width: 26px;
@@ -9499,23 +9582,20 @@ img.feed-assistant-avatar {
   text-align: center;
 }
 .tip-page-avatar {
-  width: 56px;
-  height: 56px;
+  width: 72px;
+  height: 72px;
   display: grid;
   place-items: center;
+  overflow: hidden;
   border: 0;
-  border-radius: 8px;
+  border-radius: 18px;
   color: #1a160f;
   background: linear-gradient(180deg, #f0dfa8 0%, var(--accent) 100%);
 }
-.tip-page-avatar svg {
-  width: 28px;
-  height: 28px;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 1.6;
-  stroke-linecap: round;
-  stroke-linejoin: round;
+.tip-page-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 .tip-page-payee-copy small {
   display: block;
@@ -10773,132 +10853,129 @@ img.feed-assistant-avatar {
   }
 }
 
-/* 下注结果小提示：贴在输入框上方，仅当前玩家可见。 */
+.game-room-feed-shell.has-stake-strip .game-room-feed{
+  padding-bottom: 40px;
+}
+.game-room-feed-shell.has-stake-strip .feed-jump-latest{
+  bottom: 38px;
+}
+
+/* 下注状态：贴在聊天区最底部、紧挨输入框的小标签 */
 .bet-result-toast {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  position: absolute;
+  left: 50%;
+  bottom: 0;
+  z-index: 8;
+  transform: translateX(-50%);
+  display: flex;
   align-items: center;
-  gap: 10px;
-  margin: 8px 12px 0;
-  padding: 9px 10px 9px 12px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-left: 3px solid rgba(85, 197, 138, 0.85);
-  border-radius: 12px;
-  background: rgba(24, 24, 27, 0.96);
-  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.28);
+  justify-content: center;
+  gap: 6px;
+  width: fit-content;
+  max-width: calc(100% - 28px);
+  min-height: 28px;
+  padding: 5px 16px;
+  border: 0;
+  border-radius: 11px 11px 0 0;
+  background: rgba(38, 38, 42, 0.94);
+  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
+  color: #e7e5e4;
   animation: bet-result-toast-in 0.18s ease-out both;
 }
-.bet-result-toast.failed {
-  border-left-color: rgba(248, 113, 113, 0.9);
-}
-.bet-result-toast.unknown {
-  border-left-color: rgba(201, 169, 98, 0.9);
-}
-.bet-result-toast.adjusted {
-  align-items: start;
-  border-left-color: #e8b44f;
-  background:
-    linear-gradient(135deg, rgba(232, 180, 79, 0.1), transparent 48%),
-    rgba(24, 24, 27, 0.98);
-}
-.bet-result-toast-mark {
-  flex: 0 0 auto;
-  width: 22px;
-  height: 22px;
-  display: grid;
-  place-items: center;
-  border-radius: 50%;
-  background: rgba(85, 197, 138, 0.12);
-  color: #6ee7b7;
-  font-size: 12px;
-  font-weight: 800;
-  line-height: 1;
-}
-.bet-result-toast.failed .bet-result-toast-mark {
-  background: rgba(248, 113, 113, 0.12);
-  color: #f87171;
-}
-.bet-result-toast.unknown .bet-result-toast-mark {
-  background: rgba(201, 169, 98, 0.12);
-  color: #e8d5a8;
-}
-.bet-result-toast.adjusted .bet-result-toast-mark {
-  margin-top: 1px;
-  background: rgba(232, 180, 79, 0.16);
-  color: #f3c969;
-}
-.bet-result-toast-copy {
+.bet-result-toast p {
   min-width: 0;
-}
-.bet-result-toast-copy strong {
-  display: block;
-  color: #f5f5f4;
-  font-size: 13px;
-  line-height: 1.35;
-  font-weight: 650;
+  margin: 0;
+  overflow: hidden;
+  color: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.3;
+  letter-spacing: 0.01em;
+  text-align: center;
+  text-overflow: ellipsis;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
-.bet-result-toast-copy strong i {
-  margin: 0 2px;
-  color: #78716c;
-  font-style: normal;
-  font-weight: 400;
+.bet-result-toast.progress {
+  gap: 0;
 }
-.bet-result-toast-copy small {
-  display: block;
-  margin-top: 2px;
-  color: #a8a29e;
-  font-size: 11px;
-  line-height: 1.35;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+.bet-result-toast-seg,
+.bet-result-toast-dot {
+  flex: 0 0 auto;
 }
-.bet-adjustment-detail {
-  display: grid;
-  gap: 3px;
-  margin-top: 5px;
-  color: #b8b2a8;
-  font-size: 11px;
-  line-height: 1.42;
+.bet-result-toast-seg.is-new,
+.bet-result-toast-dot.is-new {
+  animation: bet-result-seg-in 0.22s ease-out both;
+}
+.bet-result-toast-seg {
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.3;
+  letter-spacing: 0.01em;
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
-.bet-adjustment-detail span {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px 10px;
+.bet-result-toast-dot {
+  margin: 0 6px;
+  color: rgba(231, 229, 228, 0.38);
+  font-size: 12.5px;
+  font-weight: 500;
 }
-.bet-adjustment-detail b {
-  color: #f3c969;
-  font-weight: 680;
+.bet-result-toast-seg.success {
+  color: #e7e5e4;
 }
-.bet-adjustment-detail i {
+.bet-result-toast-seg.win {
+  color: #a7dcb8;
+}
+.bet-result-toast-seg.claim {
+  color: #e7c98d;
+}
+.bet-result-toast-seg.lose,
+.bet-result-toast.lose,
+.bet-result-toast.failed {
+  color: #e0aaa5;
+}
+.bet-result-toast-seg.tie,
+.bet-result-toast.tie,
+.bet-result-toast.unknown {
   color: #d6d3d1;
-  font-style: normal;
+}
+.bet-result-toast.win {
+  color: #a7dcb8;
+}
+.bet-result-toast.claim {
+  color: #e7c98d;
 }
 .bet-result-toast-close {
-  width: 24px;
-  height: 24px;
+  width: 26px;
+  height: 26px;
+  flex: 0 0 auto;
+  margin: -3px -10px -3px 0;
   border: 0;
-  border-radius: 8px;
+  border-radius: 50%;
   background: transparent;
-  color: #78716c;
-  font-size: 16px;
+  color: currentColor;
+  font-size: 14px;
   line-height: 1;
+  opacity: 0.7;
 }
 .bet-result-toast-close:active {
-  background: rgba(255, 255, 255, 0.06);
-  color: #d6d3d1;
+  background: rgba(255, 255, 255, 0.1);
+  opacity: 1;
 }
 @keyframes bet-result-toast-in {
-  from { opacity: 0; transform: translateY(6px); }
-  to { opacity: 1; transform: translateY(0); }
+  from { opacity: 0; transform: translateX(-50%) translateY(6px); }
+  to { opacity: 1; transform: translateX(-50%) translateY(0); }
+}
+@keyframes bet-result-seg-in {
+  from { opacity: 0; transform: translateX(8px); }
+  to { opacity: 1; transform: translateX(0); }
 }
 @media (prefers-reduced-motion: reduce) {
-  .bet-result-toast {
+  .bet-result-toast,
+  .bet-result-toast-seg,
+  .bet-result-toast-dot {
     animation: none;
   }
 }

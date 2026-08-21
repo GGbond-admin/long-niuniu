@@ -23,21 +23,17 @@ type Props = {
   placeholder?: string;
   stickers: ChatSticker[];
   onSendSticker: (stickerId: string) => void;
-  /** 游戏房投骰等内容，放在骰子页 */
-  dicePanel?: ReactNode;
-  /** 当前是否可执行投骰，用于收紧不可用状态的面板 */
-  diceAvailable?: boolean;
-  /** 默认打开的工具页 */
-  defaultToolTab?: 'dice' | 'emoji' | 'sticker';
   /** 右侧 + 菜单（不含发红包时由调用方自行过滤） */
   plusActions?: PlusAction[];
   maxLength?: number;
-  /** 掷骰阶段等：高亮工具按钮 */
-  toolsHighlight?: boolean;
   /** 竞庄/下注阶段：输入数字时显示金额预览，发送键改为对应动作 */
   amountMode?: 'bet' | 'bid' | null;
-  /** 当前最高竞标额（分）。有值时校验玩家至少加价 RM100。 */
+  /** 当前最高竞标额（分）。闲置态用来显示参考，不拦截发送。 */
   bidHighCents?: number | null;
+  /** 我本局已出的竞标金额（分） */
+  myBidCents?: number | null;
+  /** 当前最高价是否由我保持 */
+  bidTopIsMine?: boolean;
   /** 被群管理员禁言时，仅保留合法游戏指令输入，隐藏表情、贴纸和扩展动作。 */
   restrictedToGameCommands?: boolean;
   /** 头像艾特或选择回复时，请求插入文字并唤起输入框。 */
@@ -77,19 +73,6 @@ function SendIcon() {
   );
 }
 
-function DiceToolIcon() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-      <rect x="3.5" y="3.5" width="17" height="17" rx="4.5" />
-      <circle cx="8.25" cy="8.25" r="1" />
-      <circle cx="15.75" cy="8.25" r="1" />
-      <circle cx="12" cy="12" r="1" />
-      <circle cx="8.25" cy="15.75" r="1" />
-      <circle cx="15.75" cy="15.75" r="1" />
-    </svg>
-  );
-}
-
 function EmojiToolIcon() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
@@ -111,10 +94,15 @@ function StickerToolIcon() {
 }
 
 function formatComposerRm(cents: number, wholeOnly = false) {
-  return (cents / 100).toLocaleString('en-MY', {
-    minimumFractionDigits: wholeOnly ? 0 : 2,
-    maximumFractionDigits: wholeOnly ? 0 : 2,
-  });
+  const sign = cents < 0 ? '-' : '';
+  const abs = Math.abs(cents);
+  const whole = Math.trunc(abs / 100);
+  const grouped = whole.toLocaleString('en-MY');
+  if (wholeOnly) return `${sign}${grouped}`;
+  const frac = abs % 100;
+  if (frac === 0) return `${sign}${grouped}`;
+  if (frac % 10 === 0) return `${sign}${grouped}.${frac / 10}`;
+  return `${sign}${grouped}.${String(frac).padStart(2, '0')}`;
 }
 
 function readComposerAmount(value: string, amountMode: 'bet' | 'bid'): {
@@ -146,14 +134,12 @@ export default function ChatComposer({
   placeholder = '发送消息…',
   stickers,
   onSendSticker,
-  dicePanel,
-  diceAvailable = false,
-  defaultToolTab = 'emoji',
   plusActions,
   maxLength = 200,
-  toolsHighlight = false,
   amountMode = null,
   bidHighCents = null,
+  myBidCents = null,
+  bidTopIsMine = false,
   restrictedToGameCommands = false,
   inputRequest,
   replyPreview = null,
@@ -163,13 +149,10 @@ export default function ChatComposer({
   const [submitting, setSubmitting] = useState(false);
   const [inputFocused, setInputFocused] = useState(false);
   const [panel, setPanel] = useState<'tools' | 'plus' | null>(null);
-  const [toolTab, setToolTab] = useState<'dice' | 'emoji' | 'sticker'>(
-    dicePanel ? defaultToolTab : 'emoji',
-  );
+  const [toolTab, setToolTab] = useState<'emoji' | 'sticker'>('emoji');
   const inputRef = useRef<HTMLInputElement>(null);
   const handledInputRequestRef = useRef<number | null>(null);
   const showPlus = !restrictedToGameCommands && (plusActions?.length ?? 0) > 0;
-  const showDice = !!dicePanel;
   const sendBusy = busy || submitting;
   const normalizedValue = value.trim().replace(/,/g, '');
   const invalidBidDecimal =
@@ -184,10 +167,6 @@ export default function ChatComposer({
     && bidHighCents > 0
       ? bidHighCents + 10_000
       : null;
-  const invalidBidIncrement =
-    parsedAmount?.kind === 'amount'
-    && minimumBidCents !== null
-    && parsedAmount.cents < minimumBidCents;
   const sendLabel = sendBusy
     ? '发送中'
     : parsedAmount?.kind === 'withdraw'
@@ -199,35 +178,42 @@ export default function ChatComposer({
             ? '上庄'
             : '下注'
           : '发送';
+  const myBidLabel =
+    amountMode === 'bid'
+    && typeof myBidCents === 'number'
+    && Number.isSafeInteger(myBidCents)
+    && myBidCents > 0
+      ? `我的竞标：${formatComposerRm(myBidCents, true)}`
+      : null;
+  /** 闲置态的参考信息；输入过程中不再重复，避免和这条自身内容打架 */
+  const bidIdlePreview: { title: string; detail?: string } | null =
+    amountMode !== 'bid'
+      ? null
+      : myBidLabel && bidTopIsMine
+        ? { title: myBidLabel, detail: '暂列最高，无需再加价' }
+        : minimumBidCents === null
+          ? { title: '当前最高：暂无出价', detail: '输入整数金额即可竞庄' }
+          : {
+              title: myBidLabel ?? `当前最高：${formatComposerRm(bidHighCents!, true)}`,
+              detail: myBidLabel
+                ? `当前最高 ${formatComposerRm(bidHighCents!, true)}`
+                : minimumBidCents
+                  ? `想超当前最高建议 ${formatComposerRm(minimumBidCents, true)}`
+                  : undefined,
+            };
+  // 竞标阶段闲置时给出参考；输入过程只回显金额，不拦截发送。
   const amountPreview: {
     title: string;
-    detail: string;
+    detail?: string;
     invalid?: boolean;
-  } | null = invalidBidDecimal
-    ? {
-        title: '竞庄金额只支持整数',
-        detail: '请删除小数点及小数部分',
-        invalid: true,
-      }
-    : invalidBidIncrement
-      ? {
-          title: `下一口最低 ${formatComposerRm(minimumBidCents!, true)}`,
-          detail: `当前最高 ${formatComposerRm(bidHighCents!, true)} · 至少加 100`,
-          invalid: true,
-        }
-    : parsedAmount
-      ? parsedAmount.kind === 'withdraw'
-        ? { title: '撤回本局下注', detail: '冻结金额原路退回' }
-        : parsedAmount.kind === 'all_in'
-          ? { title: `梭哈 ${formatComposerRm(parsedAmount.cents)}`, detail: '按梭哈规则提交' }
-          : {
-              title: `${amountMode === 'bid' ? '竞庄' : '下注'} ${formatComposerRm(
-                parsedAmount.cents,
-                amountMode === 'bid',
-              )}`,
-              detail: '点右侧按钮提交',
-            }
-      : null;
+  } | null =
+    amountMode !== 'bid'
+      ? null
+      : invalidBidDecimal
+        ? { title: '竞庄金额只支持整数', invalid: true }
+        : parsedAmount
+          ? { title: `竞庄 ${formatComposerRm(parsedAmount.cents, true)}` }
+          : bidIdlePreview;
 
   useEffect(() => {
     return disposeChatInputFocus;
@@ -244,8 +230,7 @@ export default function ChatComposer({
   useEffect(() => {
     if (!restrictedToGameCommands) return;
     setPanel(null);
-    if (showDice && diceAvailable) setToolTab('dice');
-  }, [restrictedToGameCommands, showDice, diceAvailable]);
+  }, [restrictedToGameCommands]);
 
   useEffect(() => {
     if (
@@ -308,7 +293,7 @@ export default function ChatComposer({
   function submit(event: FormEvent) {
     event.preventDefault();
     const content = value.trim();
-    if (disabled || sendBusy || !content || invalidBidDecimal || invalidBidIncrement) return;
+    if (disabled || sendBusy || !content || invalidBidDecimal) return;
     setPanel(null);
     try {
       const result = onSend(content);
@@ -342,8 +327,6 @@ export default function ChatComposer({
     }
     inputRef.current?.blur();
     setPanel('tools');
-    if (toolsHighlight && showDice) setToolTab('dice');
-    else if (!showDice && toolTab === 'dice') setToolTab('emoji');
   }
 
   return (
@@ -365,7 +348,7 @@ export default function ChatComposer({
           role="status"
         >
           <strong>{amountPreview.title}</strong>
-          <small>{amountPreview.detail}</small>
+          {amountPreview.detail && <small>{amountPreview.detail}</small>}
         </div>
       )}
       <form
@@ -374,13 +357,10 @@ export default function ChatComposer({
       >
         <button
           type="button"
-          className={`composer-icon ${panel === 'tools' ? 'active' : ''} ${toolsHighlight && panel !== 'tools' ? 'highlight' : ''}`}
+          className={`composer-icon ${panel === 'tools' ? 'active' : ''}`}
           aria-label={panel === 'tools' ? '收起工具，显示键盘' : '打开工具'}
           onClick={toggleTools}
-          disabled={
-            sendBusy
-            || (restrictedToGameCommands && !(showDice && diceAvailable))
-          }
+          disabled={sendBusy || restrictedToGameCommands}
         >
           {panel === 'tools' ? <KeyboardIcon /> : <ToolGridIcon />}
         </button>
@@ -405,7 +385,7 @@ export default function ChatComposer({
           }
           disabled={disabled}
           aria-busy={sendBusy}
-          aria-invalid={invalidBidDecimal || invalidBidIncrement || undefined}
+          aria-invalid={invalidBidDecimal || undefined}
           maxLength={maxLength}
           inputMode={amountMode === 'bid' ? 'numeric' : 'text'}
           enterKeyHint="send"
@@ -423,7 +403,6 @@ export default function ChatComposer({
               || sendBusy
               || !value.trim()
               || invalidBidDecimal
-              || invalidBidIncrement
             }
             // 用 mousedown 阻止输入框失焦（保持键盘）；不能用 pointerdown：
             // iOS WebKit 在 pointerdown 上 preventDefault 会连 click 一起吞掉，发送键会完全失效。
@@ -454,57 +433,30 @@ export default function ChatComposer({
 
       {panel === 'tools' && (
         <div className="tool-drawer">
-          <div className={`tool-tabs${showDice ? ' has-dice' : ''}`} role="tablist">
-            {showDice && (
-              <button
-                type="button"
-                className={toolTab === 'dice' ? 'active' : ''}
-                onClick={() => setToolTab('dice')}
-                aria-label="骰子"
-                aria-selected={toolTab === 'dice'}
-                role="tab"
-              >
-                <DiceToolIcon />
-                <span>骰子</span>
-              </button>
-            )}
-            {!restrictedToGameCommands && (
-              <>
-                <button
-                  type="button"
-                  className={toolTab === 'emoji' ? 'active' : ''}
-                  onClick={() => setToolTab('emoji')}
-                  aria-label="表情"
-                  aria-selected={toolTab === 'emoji'}
-                  role="tab"
-                >
-                  <EmojiToolIcon />
-                  <span>表情</span>
-                </button>
-                <button
-                  type="button"
-                  className={toolTab === 'sticker' ? 'active' : ''}
-                  onClick={() => setToolTab('sticker')}
-                  aria-label="贴纸"
-                  aria-selected={toolTab === 'sticker'}
-                  role="tab"
-                >
-                  <StickerToolIcon />
-                  <span>贴纸</span>
-                </button>
-              </>
-            )}
-          </div>
-
-          {showDice && toolTab === 'dice' && (
-            <div
-              className={`dice-panel ${diceAvailable ? 'ready' : 'unavailable'}`}
-              role="tabpanel"
-              aria-label="骰子"
+          <div className="tool-tabs" role="tablist">
+            <button
+              type="button"
+              className={toolTab === 'emoji' ? 'active' : ''}
+              onClick={() => setToolTab('emoji')}
+              aria-label="表情"
+              aria-selected={toolTab === 'emoji'}
+              role="tab"
             >
-              {dicePanel}
-            </div>
-          )}
+              <EmojiToolIcon />
+              <span>表情</span>
+            </button>
+            <button
+              type="button"
+              className={toolTab === 'sticker' ? 'active' : ''}
+              onClick={() => setToolTab('sticker')}
+              aria-label="贴纸"
+              aria-selected={toolTab === 'sticker'}
+              role="tab"
+            >
+              <StickerToolIcon />
+              <span>贴纸</span>
+            </button>
+          </div>
 
           {toolTab === 'emoji' && (
             <div className="expression-panel emoji-panel" role="tabpanel" aria-label="表情">
@@ -512,7 +464,12 @@ export default function ChatComposer({
                 <div className="empty-inline">当前不可发言</div>
               ) : (
                 CHAT_EMOJIS.map((emoji) => (
-                  <button key={emoji} type="button" onClick={() => insertEmoji(emoji)}>
+                  <button
+                    key={emoji}
+                    type="button"
+                    aria-label={`插入表情 ${emoji}`}
+                    onClick={() => insertEmoji(emoji)}
+                  >
                     {emoji}
                   </button>
                 ))

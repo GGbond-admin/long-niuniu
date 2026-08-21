@@ -251,6 +251,7 @@ export async function buildServer() {
         'GAME_ADMIN_ASSIGNMENT_NOT_FOUND',
         'GAME_BUDGET_NOT_FOUND',
         'ROOM_MEMBER_NOT_FOUND',
+        'SUPPORT_HOST_USER_NOT_FOUND',
       ].includes(err.code);
       const forbidden = [
         'GAME_ADMIN_ACCESS_DENIED',
@@ -272,6 +273,8 @@ export async function buildServer() {
         INVALID_GAME_ADMIN_PERMISSION: '包含系统不支持的管理员权限',
         GAME_ADMIN_USER_INELIGIBLE: '只能授权已启用的 Telegram 真人账号',
         GAME_ADMIN_PACKET_SECURITY_REQUIRED: '发预算红包前需完成实名并设置支付密码',
+        SUPPORT_HOST_USER_NOT_FOUND: '要绑定的客服小妹账号不存在',
+        SUPPORT_HOST_USER_INVALID: '客服小妹只能绑定启用中的真人 Telegram 用户',
         GAME_ADMIN_UPDATE_REQUIRED: '没有需要更新的管理员资料',
         ROOM_MEMBER_NOT_FOUND: '该用户不是当前游戏的活跃成员',
         CANNOT_MUTE_SELF: '不能禁言自己',

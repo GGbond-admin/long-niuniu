@@ -217,5 +217,9 @@ export function fromCents(cents: string | number | bigint): string {
         : BigInt(cents);
   const sign = n < 0n ? '-' : '';
   const abs = n < 0n ? -n : n;
-  return `${sign}${abs / 100n}.${(abs % 100n).toString().padStart(2, '0')}`;
+  const whole = abs / 100n;
+  const frac = abs % 100n;
+  if (frac === 0n) return `${sign}${whole}`;
+  if (frac % 10n === 0n) return `${sign}${whole}.${frac / 10n}`;
+  return `${sign}${whole}.${frac.toString().padStart(2, '0')}`;
 }

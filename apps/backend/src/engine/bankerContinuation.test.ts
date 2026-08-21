@@ -2,6 +2,7 @@ import { RoundPhase } from '@prisma/client';
 import { describe, expect, it } from 'vitest';
 import {
   bankerContinuationError,
+  nextRoundReadyAtMs,
   shouldStartWaitingRound,
   type ContinuationDestinationRound,
   type ContinuationSourceRound,
@@ -174,5 +175,16 @@ describe('续庄结束后的下一局推进', () => {
         continuationError: undefined,
       }),
     ).toBe(false);
+  });
+});
+
+describe('成绩单后开下一局延迟', () => {
+  it('未公布成绩单时没有开局时刻', () => {
+    expect(nextRoundReadyAtMs(null, 10)).toBeNull();
+  });
+
+  it('按公布时刻加上后台秒数', () => {
+    const announcedAt = new Date('2026-08-07T07:00:00.000Z');
+    expect(nextRoundReadyAtMs(announcedAt, 10)).toBe(announcedAt.getTime() + 10_000);
   });
 });

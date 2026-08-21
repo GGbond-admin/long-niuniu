@@ -55,6 +55,19 @@ export function continuationDeadline(
 }
 
 /**
+ * 成绩单公布后，自动开下一局的最早时刻。
+ * 续庄询问仍按其自身窗口等待；本延迟保证玩家至少有固定秒数阅读成绩单。
+ */
+export function nextRoundReadyAtMs(
+  announcedAt: Date | null | undefined,
+  delaySeconds: number,
+): number | null {
+  if (!announcedAt) return null;
+  const seconds = Number.isFinite(delaySeconds) ? Math.max(0, delaySeconds) : 0;
+  return announcedAt.getTime() + seconds * 1_000;
+}
+
+/**
  * 同一轮竞标只允许连续坐庄两局：
  * 竞标中标局可以续一次；续庄局不能再续。下一次公开竞标中标后会开启新资格。
  */

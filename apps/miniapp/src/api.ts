@@ -550,6 +550,36 @@ export const api = {
       { method: 'POST', body: '{}' },
       { timeoutMs: 8_000, retries: 1 },
     ),
+  /** 我的战绩：本人参与（下注或坐庄）的已结算局次清单 */
+  roomMyHistory: (roomId: string) =>
+    request<{
+      maxRounds: number;
+      summary: {
+        rounds: number;
+        wins: number;
+        losses: number;
+        ties: number;
+        bankerRounds: number;
+        netCents: string;
+      };
+      items: Array<{
+        roundId: string;
+        seqNo: number;
+        finishedAt: string | null;
+        role: 'BANKER' | 'PLAYER';
+        netCents: string;
+        handType: string | null;
+        handLabel: string | null;
+        points: number | null;
+        betCents: string | null;
+        claimCents: string | null;
+        isAllIn: boolean;
+        multiplier: number | null;
+        shortfallCents: string | null;
+        bankerNickname: string | null;
+        bankerUid: string | null;
+      }>;
+    }>(`/api/game/rooms/${roomId}/my-history`),
   placeBid: (roomId: string, amount: string) =>
     request<RoomState>(`/api/game/rooms/${roomId}/bid`, {
       method: 'POST',
@@ -682,7 +712,6 @@ export const api = {
           multipliers: Record<string, number>;
           normalMultipliers: Record<string, number>;
           bustThreshold: number;
-          bustExemptSpecialHands: boolean;
         };
         betting: Record<string, number | Array<Record<string, number>>>;
         fees: Record<string, number>;
@@ -1280,6 +1309,8 @@ export type RoomState = {
     bankerSummary: unknown;
   } | null;
   continuation: { previousRoundId: string; mine: boolean; deadline: string } | null;
+  /** 成绩单公布后自动开下一局的时刻；未到点则为 ISO 时间 */
+  nextRoundAt?: string | null;
   pins?: Array<{ id: string; title: string; body: string }>;
   config: {
     bidDurationSeconds: number;
@@ -1317,5 +1348,9 @@ export function rm(cents: string | number | bigint): string {
   const n = BigInt(cents);
   const sign = n < 0n ? '-' : '';
   const abs = n < 0n ? -n : n;
-  return `${sign}${abs / 100n}.${(abs % 100n).toString().padStart(2, '0')}`;
+  const whole = abs / 100n;
+  const frac = abs % 100n;
+  if (frac === 0n) return `${sign}${whole}`;
+  if (frac % 10n === 0n) return `${sign}${whole}.${frac / 10n}`;
+  return `${sign}${whole}.${frac.toString().padStart(2, '0')}`;
 }

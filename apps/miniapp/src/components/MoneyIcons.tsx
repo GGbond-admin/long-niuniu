@@ -60,6 +60,23 @@ export function TransferSwapIcon(props: IconProps) {
   );
 }
 
+/** 我的战绩：账单纸 + 输赢曲线 */
+export function MyHistoryIcon(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      <rect x="4" y="3.5" width="16" height="17" rx="2.5" stroke="currentColor" strokeWidth="1.7" />
+      <path
+        d="M7.5 14.5 10.5 11l2.5 2.2L16.5 9"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path d="M7.5 17.5h9" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 /** @deprecated 使用 TransferIcon */
 export function SupportHeartIcon(props: IconProps) {
   return <TransferIcon {...props} />;

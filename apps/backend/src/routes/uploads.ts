@@ -1,11 +1,17 @@
 import { createReadStream, createWriteStream } from 'node:fs';
-import { open, stat, unlink } from 'node:fs/promises';
+import { mkdir, open, stat, unlink } from 'node:fs/promises';
 import { extname, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { pipeline } from 'node:stream/promises';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { env } from '../config.js';
+import {
+  PUBLIC_AVATAR_FILENAME,
+  PUBLIC_AVATAR_MIME,
+  publicAvatarUrl,
+  resolvePublicAvatarFile,
+} from '../lib/publicAvatars.js';
 
 const ALLOWED_TYPES: Record<string, string> = {
   'image/jpeg': '.jpg',
@@ -75,6 +81,64 @@ export async function uploadRoutes(app: FastifyInstance) {
       return { url: `upload://${filename}` };
     },
   );
+
+  app.post(
+    '/api/admin/uploads/avatar',
+    {
+      preHandler: [app.authAdmin, app.requireAdminRoles('SUPER')],
+      config: { rateLimit: { max: 20, timeWindow: '1 hour' } },
+    },
+    async (req, reply) => {
+      const file = await req.file();
+      if (!file) return reply.code(400).send({ error: 'FILE_REQUIRED' });
+      const extension = PUBLIC_AVATAR_MIME[file.mimetype];
+      if (!extension) {
+        file.file.resume();
+        return reply.code(400).send({ error: 'UNSUPPORTED_FILE_TYPE' });
+      }
+      const filename = `${randomUUID()}${extension}`;
+      const destination = resolvePublicAvatarFile(env.uploadDir, filename);
+      if (!destination) {
+        file.file.resume();
+        return reply.code(400).send({ error: 'INVALID_AVATAR_FILENAME' });
+      }
+      await mkdir(resolve(env.uploadDir, 'avatars'), { recursive: true });
+      try {
+        await pipeline(file.file, createWriteStream(destination, { flags: 'wx' }));
+        if (file.file.truncated) {
+          await unlink(destination).catch(() => undefined);
+          return reply.code(413).send({ error: 'FILE_TOO_LARGE' });
+        }
+        if (!(await matchesDeclaredType(destination, file.mimetype))) {
+          await unlink(destination).catch(() => undefined);
+          return reply.code(400).send({ error: 'FILE_CONTENT_MISMATCH' });
+        }
+      } catch (error) {
+        await unlink(destination).catch(() => undefined);
+        throw error;
+      }
+      return { url: publicAvatarUrl(filename) };
+    },
+  );
+
+  app.get('/api/public/avatars/:filename', async (req, reply) => {
+    const { filename } = z
+      .object({ filename: z.string().regex(PUBLIC_AVATAR_FILENAME) })
+      .parse(req.params);
+    const path = resolvePublicAvatarFile(env.uploadDir, filename);
+    if (!path) return reply.code(404).send({ error: 'UPLOAD_NOT_FOUND' });
+    try {
+      const metadata = await stat(path);
+      if (!metadata.isFile()) throw new Error('NOT_FILE');
+    } catch {
+      return reply.code(404).send({ error: 'UPLOAD_NOT_FOUND' });
+    }
+    reply
+      .type(RESPONSE_TYPES[extname(filename)] ?? 'image/jpeg')
+      .header('Content-Disposition', `inline; filename="${filename}"`)
+      .header('Cache-Control', 'public, max-age=31536000, immutable');
+    return reply.send(createReadStream(path));
+  });
 
   app.get(
     '/api/admin/uploads/:filename',

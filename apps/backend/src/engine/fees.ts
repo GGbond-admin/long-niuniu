@@ -33,6 +33,37 @@ export function bankerSeatFee(potCents: number, config: FeeConfig = DEFAULT_FEE_
   return Math.round(potCents * config.bankerSeatFeeRatio);
 }
 
+/** 竞标时需备足：庄钱 + 上庄费 + 服务费（代包费在锁定庄家后才按人数计） */
+export function bankerBidReserveCents(
+  bidCents: number,
+  config: FeeConfig = DEFAULT_FEE_CONFIG,
+): number {
+  return bidCents + bankerSeatFee(bidCents, config) + config.serviceFeeCents;
+}
+
+/**
+ * 当前余额最多能出的上庄整数金额（分）。
+ * 需同时扣上庄费与服务费，故略低于账面可用余额。
+ */
+export function maxAffordableBankerBidCents(
+  availableCents: number,
+  config: FeeConfig = DEFAULT_FEE_CONFIG,
+  roomMaxCents = Number.MAX_SAFE_INTEGER,
+): number {
+  if (!Number.isSafeInteger(availableCents) || availableCents < 100) return 0;
+  const leftover = availableCents - config.serviceFeeCents;
+  if (leftover < 100) return 0;
+  const ratio = Math.max(0, config.bankerSeatFeeRatio);
+  const roomMax = Math.floor(Math.max(0, roomMaxCents) / 100) * 100;
+  let candidate = Math.min(Math.floor(leftover / (1 + ratio)), roomMax);
+  candidate = Math.floor(candidate / 100) * 100;
+  while (candidate >= 100) {
+    if (bankerBidReserveCents(candidate, config) <= availableCents) return candidate;
+    candidate -= 100;
+  }
+  return 0;
+}
+
 /** 红包总额 = 参与人数 × 人均单价（参与人数 = 庄家 + 已下注闲家） */
 export function packetTotal(participantCount: number, config: FeeConfig = DEFAULT_FEE_CONFIG): number {
   return participantCount * config.packetPerHeadCents;

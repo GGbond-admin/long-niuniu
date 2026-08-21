@@ -387,7 +387,23 @@ export async function getPlatformGameAdminOverview(gameCode: string) {
   const [room, assignments, budget, actions] = await Promise.all([
     prisma.room.findUnique({
       where: { gameCode },
-      select: { id: true, gameCode: true, title: true, status: true },
+      select: {
+        id: true,
+        gameCode: true,
+        title: true,
+        status: true,
+        supportHost: {
+          select: {
+            id: true,
+            uid: true,
+            nickname: true,
+            tgUsername: true,
+            tgDisplayName: true,
+            avatarUrl: true,
+            status: true,
+          },
+        },
+      },
     }),
     prisma.gameAdminAssignment.findMany({
       where: { gameCode },
@@ -425,6 +441,7 @@ export async function getPlatformGameAdminOverview(gameCode: string) {
     }),
   ]);
   if (!room) throw new GameAdminError('GAME_NOT_FOUND');
+  const { supportHost, ...roomFields } = room;
   const ledger = budget.account.id
     ? await prisma.gameBudgetLedgerEntry.findMany({
         where: { budgetAccountId: budget.account.id },
@@ -432,7 +449,14 @@ export async function getPlatformGameAdminOverview(gameCode: string) {
         take: 40,
       })
     : [];
-  return { room, assignments, budget: budget.account, ledger, actions };
+  return {
+    room: roomFields,
+    supportHost,
+    assignments,
+    budget: budget.account,
+    ledger,
+    actions,
+  };
 }
 
 export async function listMyGameAdminAssignments(userId: string) {

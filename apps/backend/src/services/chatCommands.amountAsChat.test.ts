@@ -236,14 +236,14 @@ describe('非竞标/下注阶段纯数字当普通聊天', () => {
       kind: 'error',
       action: 'bet',
       amountCents: '500',
-      message: '低于最低下注金额 10.00',
+      message: '低于最低下注金额 10',
     });
     expect(privateBetConfirmationFor(result)).toEqual({
       type: 'bet_confirmation',
       status: 'failed',
       action: 'bet',
       amountCents: '500',
-      reason: '低于最低下注金额 10.00',
+      reason: '低于最低下注金额 10',
     });
   });
 
@@ -330,23 +330,43 @@ describe('非竞标/下注阶段纯数字当普通聊天', () => {
     expect(memory.placeBankerBid).toHaveBeenCalledOnce();
   });
 
-  it('竞标金额低于当前最高价加 RM100 时提示下一口最低金额', async () => {
+  it('竞标超额时按可上庄余额落标并返回说明', async () => {
     memory.phase = 'BANKER_BID';
-    memory.placeBankerBid.mockRejectedValue(
-      new GameError('BID_INCREMENT_TOO_LOW', {
-        currentCents: 400_000n,
-        minimumCents: 410_000n,
-      }),
-    );
+    memory.placeBankerBid.mockResolvedValue({
+      amountCents: 1_400_000n,
+      adjusted: true,
+    });
+    const result = await handleRoomChatCommand({
+      roomId: 'room-1',
+      userId: 'user-1',
+      content: '15000',
+    });
+    expect(result).toMatchObject({
+      kind: 'ok',
+      action: 'bid',
+      echo: '14000',
+      amountCents: '1400000',
+      notice: '你目前账号里的余额目前只能标 14,000 的庄，已按此金额出价',
+    });
+  });
+
+  it('低于当前最高价的整数金额仍会提交，由截标选取最高', async () => {
+    memory.phase = 'BANKER_BID';
+    memory.placeBankerBid.mockResolvedValue({
+      amountCents: 405_000n,
+    });
     const result = await handleRoomChatCommand({
       roomId: 'room-1',
       userId: 'user-1',
       content: '4050',
     });
-    expect(result).toEqual({
-      kind: 'error',
-      message: '下一口最低 4,100',
+    expect(result).toMatchObject({
+      kind: 'ok',
+      action: 'bid',
+      echo: '4050',
+      amountCents: '405000',
     });
+    expect(memory.placeBankerBid).toHaveBeenCalledOnce();
   });
 
   it.each(['8800.50', '8800.00', '8800.000'])(

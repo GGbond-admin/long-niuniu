@@ -19,7 +19,9 @@ describe('成员禁言期间的游戏指令边界', () => {
     expect(isRoomCommandCandidate('sh200')).toBe(true);
     expect(isRoomCommandCandidate('0')).toBe(true);
     expect(isRoomCommandCandidate('/重推')).toBe(true);
+    expect(isRoomCommandCandidate('重推')).toBe(true);
     expect(isBankerRepostCommand('/重推')).toBe(true);
+    expect(isBankerRepostCommand('重推')).toBe(true);
     expect(isBankerRepostCommand('ChongTui')).toBe(true);
   });
 

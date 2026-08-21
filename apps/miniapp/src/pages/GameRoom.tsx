@@ -1,4 +1,5 @@
 import {
+  Fragment,
   startTransition,
   useCallback,
   useEffect,
@@ -25,7 +26,12 @@ import {
   type RoomState,
 } from '../api';
 import ChatComposer from '../components/ChatComposer';
-import { RedPacketIcon, TransferIcon, TransferSwapIcon } from '../components/MoneyIcons';
+import {
+  MyHistoryIcon,
+  RedPacketIcon,
+  TransferIcon,
+  TransferSwapIcon,
+} from '../components/MoneyIcons';
 import { goToTab } from '../lib/nav';
 import type { Session } from '../sessionStore';
 import { disposeChatInputFocus, openExternalLink } from '../telegram';
@@ -122,9 +128,29 @@ type PrivateBetNoticePayload = {
   status: 'success' | 'failed' | 'unknown';
   action: 'bet' | 'all_in';
   amountCents: string;
+  roundId?: string;
   acceptance?: BetAcceptanceNotice;
   reason?: string;
 };
+
+type StakeSegment =
+  | { kind: 'stake'; isAllIn: boolean; amountCents: string }
+  | { kind: 'claim'; amountCents: string }
+  | { kind: 'result'; label: '赢' | '输' | '水'; amountCents: string };
+
+type StakeStrip =
+  | { variant: 'alert'; notice: PrivateBetNoticePayload }
+  | { variant: 'progress'; roundId: string; segments: StakeSegment[] };
+
+/** 梭哈 → 抢 → 赢 逐段出现的间隔，出现后留在同一条上。 */
+const STAKE_STEP_MS = 1_000;
+
+function myClaimedAmountCents(state: RoomState | null, uid: string): string | null {
+  const mine = state?.me.claimedAmountCents;
+  if (mine) return mine;
+  const fromRound = state?.round?.claims?.find((claim) => claim.uid === uid)?.amountCents;
+  return fromRound || null;
+}
 
 type PendingChatAck = {
   requestId: string;
@@ -153,6 +179,7 @@ type CountdownPayload = {
   endsAt?: string;
   template?: string;
   afterTemplate?: string;
+  afterEndsAt?: string;
   emoji?: string;
 };
 
@@ -165,8 +192,9 @@ type FeedItem =
       id: string;
       /** lock：普通 3/2/1 文字；其余：与顶栏同步的实时文案 */
       lockText?: string;
-      mode?: 'bid' | 'bet' | 'repost';
+      mode?: 'bid' | 'bet' | 'repost' | 'claim';
       endsAt?: string | null;
+      afterEndsAt?: string | null;
       template?: string;
       afterTemplate?: string;
       time?: string;
@@ -758,13 +786,13 @@ const DEMO_FEED: FeedItem[] = [
   {
     kind: 'system',
     id: 'demo-banker-selected',
-    text: '👑庄家锁定\n庄家@小美\n第 1 局庄钱：8800.00\n庄钱已冻结入池，闲家准备开注。',
+    text: '👑庄家锁定\n庄家@小美\n第 1 局庄钱：8800\n庄钱已冻结入池，闲家准备开注。',
     time: '21:41',
   },
   {
     kind: 'system',
     id: 'demo-banker',
-    text: '💰第 1 局开注\n庄家@小美\n庄钱：8800.00\n时长：50 秒\n下注：3.00 ~ 52.80\n梭哈：30.00 ~ 440.00\n发数字下注 · sh+数字梭哈 · 0 撤回',
+    text: '💰第 1 局开注\n庄家@小美\n庄钱：8800\n时长：50 秒\n下注：3 ~ 52.8\n梭哈：30 ~ 440\n发数字下注 · sh+数字梭哈 · 0 撤回',
     time: '21:41',
   },
   {
@@ -815,13 +843,13 @@ const DEMO_FEED: FeedItem[] = [
   {
     kind: 'system',
     id: 'demo-sealed',
-    text: '📋封盘明细\n庄家@小美\n庄钱：8800.00\n发包金额：3.00\n发包数量：3 个\n总下注：225.00\n总梭哈：200.00\n\n本局下注成功名单：\n@阿强 25.00\n@阿杰 200.00梭哈',
+    text: '📋封盘明细\n庄家@小美\n庄钱：8800\n发包金额：3\n发包数量：3 个\n总下注：225\n总梭哈：200\n\n本局下注成功名单：\n@阿强 25\n@阿杰 200梭哈',
     time: '21:42',
   },
   {
     kind: 'system',
     id: 'demo-dice-prompt',
-    text: '⏳封盘确认 · 5 秒\n请庄家@小美确认本局。\n· 继续本局：确认结束后须在 15 秒内投骰，超时本局自动取消并退款\n· 重推本局：倒计时内发送 /重推',
+    text: '⏳封盘确认 · 5 秒\n请庄家@小美确认本局。\n· 继续本局：确认结束后须在 15 秒内投骰，超时本局自动取消并退款\n· 重推本局：倒计时内发送 重推',
     time: '21:42',
   },
   {
@@ -884,7 +912,7 @@ const DEMO_FEED: FeedItem[] = [
   {
     kind: 'system',
     id: 'demo-claim-start',
-    text: '🧧开始抢包 · 30 秒\n仅庄家与已下注闲家可领，过期即止。',
+    text: '🧧开始抢包 · 40 秒\n仅庄家与已下注闲家可领，过期即止。未领玩家请尽快，超时按尾包规则补录。',
     time: '21:43',
   },
   {
@@ -981,22 +1009,50 @@ function fillRemaining(template: string, remaining: number): string {
   return template.replace(/\{\{\s*remaining\s*\}\}/g, String(remaining));
 }
 
+function isClaimStartCopy(text: string): boolean {
+  return /开始抢包/.test(text) && /\d+\s*秒/.test(text);
+}
+
+function claimStartCountdownTemplate(text: string): string {
+  return text.replace(/\d+\s*秒/g, '{{remaining}} 秒');
+}
+
+/** 只把本局抢包台词接到当前截止时间，避免上一局「开始抢包」跟着新倒计时跳。 */
+function isClaimStartForDeadline(messageAt: string, claimEndsAt: string): boolean {
+  const at = new Date(messageAt).getTime();
+  const ends = new Date(claimEndsAt).getTime();
+  if (!Number.isFinite(at) || !Number.isFinite(ends)) return false;
+  const lag = ends - at;
+  return lag >= -8_000 && lag <= 3 * 60_000;
+}
+
 function RemainingValue({ endsAt }: { endsAt: string }) {
   return <>{useRemainingSeconds(endsAt) ?? '—'}</>;
 }
 
+function liveAfterCopy(template: string | undefined, remaining: number): string {
+  const source =
+    template
+    || '⏳封盘确认已结束\n请庄家在 {{remaining}} 秒内完成投骰，超时自动取消并退款';
+  if (source.includes('{{remaining}}')) return fillRemaining(source, remaining);
+  return source.replace(/在\s*\d+\s*秒内/, `在 ${remaining} 秒内`);
+}
+
 function RemainingCopy({
   endsAt,
+  afterEndsAt,
   mode,
   template,
   afterTemplate,
 }: {
   endsAt?: string | null;
-  mode?: 'bid' | 'bet' | 'repost';
+  afterEndsAt?: string | null;
+  mode?: 'bid' | 'bet' | 'repost' | 'claim';
   template: string;
   afterTemplate?: string;
 }) {
   const remaining = useRemainingSeconds(endsAt) ?? 0;
+  const afterRemaining = useRemainingSeconds(afterEndsAt);
   if (remaining <= 0 && mode === 'bid') {
     return <>⏰竞标倒数{'\n'}最低加 100，也可以加更多</>;
   }
@@ -1004,6 +1060,12 @@ function RemainingCopy({
     return <>⏰下注时间已到{'\n'}正在封盘…</>;
   }
   if (remaining <= 0 && mode === 'repost') {
+    if (typeof afterRemaining === 'number' && afterRemaining > 0) {
+      return <>{liveAfterCopy(afterTemplate, afterRemaining)}</>;
+    }
+    if (afterRemaining === 0) {
+      return <>⏳投骰时间已结束{'\n'}本局正在自动取消并退款</>;
+    }
     return <>{afterTemplate || '⏳封盘确认已结束\n请庄家完成投骰'}</>;
   }
   return <>{fillRemaining(template, remaining)}</>;
@@ -1078,13 +1140,20 @@ function ContinuationGate({
 }
 
 function scoreRm(cents: unknown): string {
-  const n = Number(cents ?? 0);
-  return Number.isFinite(n) ? (n / 100).toFixed(2) : '0.00';
+  try {
+    return rm(String(cents ?? 0));
+  } catch {
+    return '0';
+  }
 }
 
 function scoreAbsoluteAmount(cents: unknown): string {
-  const n = Number(cents ?? 0);
-  return (Math.abs(n) / 100).toFixed(2);
+  try {
+    const n = BigInt(String(cents ?? 0));
+    return rm(n < 0n ? -n : n);
+  } catch {
+    return '0';
+  }
 }
 
 function scoreOutcome(outcome: unknown): {
@@ -1101,6 +1170,53 @@ function scoreNetLabel(netCents: unknown): '赢' | '输' | '水' {
   if (net > 0) return '赢';
   if (net < 0) return '输';
   return '水';
+}
+
+function optionalCents(value: unknown): string | null {
+  if (value === null || value === undefined || value === '') return null;
+  const text = String(value);
+  return text || null;
+}
+
+function findMyScoreboardResult(
+  board: RoomState['lastScoreboard'],
+  uid: string,
+): {
+  label: '赢' | '输' | '水';
+  netCents: number;
+  betCents: string | null;
+  isAllIn: boolean;
+  claimCents: string | null;
+} | null {
+  if (!board || !uid) return null;
+  const players = Array.isArray(board.playerLines) ? board.playerLines : [];
+  for (const raw of players) {
+    const line = (raw ?? {}) as Record<string, unknown>;
+    if (String(line.uid ?? '') !== uid) continue;
+    const net = Number(line.netCents ?? 0);
+    return {
+      label: scoreNetLabel(net),
+      netCents: net,
+      betCents: optionalCents(line.betCents),
+      isAllIn: line.isAllIn === true,
+      claimCents: optionalCents(line.claimCents),
+    };
+  }
+  const banker =
+    board.bankerSummary && typeof board.bankerSummary === 'object'
+      ? (board.bankerSummary as Record<string, unknown>)
+      : null;
+  if (banker && String(banker.uid ?? '') === uid) {
+    const net = Number(banker.netCents ?? 0);
+    return {
+      label: scoreNetLabel(net),
+      netCents: net,
+      betCents: null,
+      isAllIn: false,
+      claimCents: optionalCents(banker.claimCents),
+    };
+  }
+  return null;
 }
 
 function scoreCumulativeLine(params: {
@@ -1224,7 +1340,7 @@ function scoreFooter(board: RoomState['lastScoreboard']): string {
     ? `庄盈利+${scoreAbsoluteAmount(net)}`
     : net < 0
       ? `庄亏损-${scoreAbsoluteAmount(net)}`
-      : '庄盈亏 0.00';
+      : `庄盈亏 ${scoreRm(0)}`;
   return [
     `\u{1F451} 庄家 @${name} ·`,
     `抢 ${scoreRm(banker.claimCents)} · ${label}→${scoreAbsoluteAmount(banker.netCents)}`,
@@ -1236,6 +1352,174 @@ function scoreFooter(board: RoomState['lastScoreboard']): string {
     `上庄积分：${scoreRm(banker.balanceBeforeCents)}`,
     `庄总积分：${scoreRm(banker.balanceAfterCents)}`,
   ].join('\n');
+}
+
+type MyHistoryData = Awaited<ReturnType<typeof api.roomMyHistory>>;
+type MyHistoryItem = MyHistoryData['items'][number];
+
+function signedRm(cents: string): string {
+  try {
+    const value = BigInt(cents);
+    return `${value > 0n ? '+' : ''}${rm(value)}`;
+  } catch {
+    return '0';
+  }
+}
+
+function netTone(cents: string): 'win' | 'lose' | 'tie' {
+  try {
+    const value = BigInt(cents);
+    if (value > 0n) return 'win';
+    if (value < 0n) return 'lose';
+    return 'tie';
+  } catch {
+    return 'tie';
+  }
+}
+
+function myHistoryRowDetail(item: MyHistoryItem): string {
+  const parts: string[] = [];
+  if (item.handLabel) {
+    parts.push(
+      item.handType === 'NORMAL' && item.points !== null
+        ? `${item.points} 点`
+        : item.points !== null
+          ? `${item.handLabel} ${item.points} 点`
+          : item.handLabel,
+    );
+  }
+  if (item.claimCents) parts.push(`抢 ${rm(item.claimCents)}`);
+  if (item.role === 'PLAYER') {
+    if (item.betCents) parts.push(`${item.isAllIn ? '梭哈' : '下注'} ${rm(item.betCents)}`);
+    if (item.multiplier !== null && item.multiplier > 1) parts.push(`${item.multiplier} 倍`);
+    if (item.bankerNickname) parts.push(`庄家 ${item.bankerNickname}`);
+    if (item.shortfallCents && BigInt(item.shortfallCents) > 0n) {
+      parts.push(`庄家赔付不足，免赔 ${rm(item.shortfallCents)}`);
+    }
+  }
+  return parts.join(' · ');
+}
+
+/** 我的战绩：仅展示本人参与（下注或坐庄）的已结算局次。 */
+function MyHistorySheet({ roomId, onClose }: { roomId: string; onClose: () => void }) {
+  const [data, setData] = useState<MyHistoryData | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [failed, setFailed] = useState(false);
+  const [retryKey, setRetryKey] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setFailed(false);
+    setData(null);
+    api
+      .roomMyHistory(roomId)
+      .then((res) => {
+        if (!cancelled) setData(res);
+      })
+      .catch(() => {
+        if (!cancelled) setFailed(true);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [roomId, retryKey]);
+
+  const summary = data?.summary ?? null;
+
+  return createPortal(
+    <div className="channel-sheet" role="dialog" aria-modal="true" aria-label="我的战绩">
+      <button
+        type="button"
+        className="channel-sheet-backdrop"
+        aria-label="关闭"
+        onClick={onClose}
+      />
+      <div className="channel-sheet-panel">
+        <div className="channel-sheet-handle" aria-hidden />
+        <header className="channel-sheet-head">
+          <div>
+            <small>仅显示我参与的对局</small>
+            <strong>我的战绩</strong>
+          </div>
+          <button type="button" onClick={onClose} aria-label="关闭">
+            ×
+          </button>
+        </header>
+        {summary && (
+          <div className="my-history-summary">
+            <div className={`my-history-total ${netTone(summary.netCents)}`}>
+              <small>累计输赢</small>
+              <strong>{signedRm(summary.netCents)}</strong>
+            </div>
+            <dl>
+              <div>
+                <dt>局数</dt>
+                <dd>{summary.rounds}</dd>
+              </div>
+              <div>
+                <dt>赢</dt>
+                <dd>{summary.wins}</dd>
+              </div>
+              <div>
+                <dt>输</dt>
+                <dd>{summary.losses}</dd>
+              </div>
+              <div>
+                <dt>水</dt>
+                <dd>{summary.ties}</dd>
+              </div>
+              <div>
+                <dt>坐庄</dt>
+                <dd>{summary.bankerRounds}</dd>
+              </div>
+            </dl>
+          </div>
+        )}
+        <div className="channel-sheet-list my-history-list">
+          {loading && <p className="my-history-empty">正在加载战绩…</p>}
+          {!loading && failed && (
+            <div className="my-history-empty">
+              <p>战绩加载失败，请稍后重试</p>
+              <button type="button" onClick={() => setRetryKey((key) => key + 1)}>
+                重新加载
+              </button>
+            </div>
+          )}
+          {!loading && !failed && data && data.items.length === 0 && (
+            <p className="my-history-empty">还没有战绩。下注或坐庄完成一局后，这里会记录每局成绩。</p>
+          )}
+          {!loading
+            && !failed
+            && data?.items.map((item) => {
+              const detail = myHistoryRowDetail(item);
+              return (
+                <article className="my-history-row" key={item.roundId}>
+                  <div className="my-history-row-head">
+                    <strong>第 {item.seqNo} 局</strong>
+                    <span className={`my-history-role${item.role === 'BANKER' ? ' banker' : ''}`}>
+                      {item.role === 'BANKER' ? '庄' : '闲'}
+                    </span>
+                    <time>{formatDateTime(item.finishedAt)}</time>
+                    <span className={`my-history-net ${netTone(item.netCents)}`}>
+                      {signedRm(item.netCents)}
+                    </span>
+                  </div>
+                  {detail && <p>{detail}</p>}
+                </article>
+              );
+            })}
+          {!loading && !failed && data && data.items.length >= data.maxRounds && (
+            <p className="my-history-cap">仅显示最近 {data.maxRounds} 局</p>
+          )}
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
 }
 
 type TipDanmakuPayload = {
@@ -1320,6 +1604,8 @@ export default function GameRoom({
   const [betNotice, setBetNotice] = useState<
     (PrivateBetNoticePayload & { id: number }) | null
   >(null);
+  const [stakeVisibleCount, setStakeVisibleCount] = useState(0);
+  const stakeProgressRoundRef = useRef<string | null>(null);
   /** 新到达的骰子消息在聊天里播放转动 */
   const [animatedDiceIds, setAnimatedDiceIds] = useState<Record<string, boolean>>({});
   /** packetId -> 已领金额（分）；'GONE' 表示已抢光/过期 */
@@ -1394,6 +1680,7 @@ export default function GameRoom({
   const composerInputRequestIdRef = useRef(0);
   const betNoticeTimerRef = useRef<number | null>(null);
   const privateBetNoticeIdRef = useRef(0);
+  const hadLiveBetRef = useRef(false);
   const tipDanmakuIdRef = useRef(0);
   const [tipDanmakuQueue, setTipDanmakuQueue] = useState<Array<TipDanmakuPayload & {
     id: number;
@@ -1418,6 +1705,7 @@ export default function GameRoom({
   const programmaticFeedScrollRef = useRef(false);
   const roomFeatureScrollTopRef = useRef<number | null>(null);
   const [channelOpen, setChannelOpen] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
   const [quickActionsOpen, setQuickActionsOpen] = useState(false);
   /** 任务入口闲置自动收进右边缘，点一下把手先滑出、再点才展开 */
   const [quickActionsDocked, setQuickActionsDocked] = useState(false);
@@ -1431,6 +1719,14 @@ export default function GameRoom({
     const timer = window.setTimeout(() => setQuickActionsDocked(true), 8_000);
     return () => window.clearTimeout(timer);
   }, [quickActionsOpen, quickActionsDocked]);
+
+  useEffect(() => {
+    const hasBet = !!state?.me.bet;
+    if (hadLiveBetRef.current && !hasBet && state?.round?.phase === 'BETTING') {
+      setBetNotice((current) => (current?.status === 'success' ? null : current));
+    }
+    hadLiveBetRef.current = hasBet;
+  }, [state?.me.bet, state?.round?.phase]);
   /** 上翻看历史期间有新消息：不强拉回底部，浮出「有新消息」按钮 */
   const [newBelow, setNewBelow] = useState(false);
   const newBelowRef = useRef(false);
@@ -1579,15 +1875,10 @@ export default function GameRoom({
       window.clearTimeout(betNoticeTimerRef.current);
       betNoticeTimerRef.current = null;
     }
-    setBetNotice({ ...notice, id });
-    const dismissMs =
-      notice.status === 'success' && notice.acceptance?.adjusted
-        ? 7_000
-        : notice.status === 'success'
-          ? 2_200
-          : notice.status === 'failed'
-            ? 3_200
-            : 4_000;
+    setBetNotice({ ...notice, id, roundId: notice.roundId ?? state?.round?.id });
+    // 成功后金额一直留在输入框上方，直到出成绩；失败/超时仍自动收起。
+    if (notice.status === 'success') return;
+    const dismissMs = notice.status === 'failed' ? 3_200 : 4_000;
     betNoticeTimerRef.current = window.setTimeout(() => {
       setBetNotice((current) => (current?.id === id ? null : current));
       betNoticeTimerRef.current = null;
@@ -1617,10 +1908,12 @@ export default function GameRoom({
   const diceDeadline =
     phase === 'SENDING_PACKET' ? state?.round?.diceEndsAt ?? null : null;
   const continuation = state?.continuation ?? null;
+  const nextRoundAt = state?.nextRoundAt ?? null;
   const phaseDeadlineReached = useDeadlineReached(phaseDeadline);
   const repostDeadlineReached = useDeadlineReached(repostDeadline);
   const diceDeadlineReached = useDeadlineReached(diceDeadline);
   const continuationDeadlineReached = useDeadlineReached(continuation?.deadline ?? null);
+  const nextRoundDeadlineReached = useDeadlineReached(nextRoundAt);
   const memberMuteDeadlineReached = useDeadlineReached(
     state?.me.chatMute?.mutedUntil ?? null,
   );
@@ -1633,6 +1926,20 @@ export default function GameRoom({
     );
   const bidFinalCountdownRunning =
     phase === 'BANKER_BID' && phaseDeadlineReached && !bidWindowClosed;
+  const bidLockDigit = (() => {
+    if (!bidFinalCountdownRunning || !activeRoundId) return null;
+    const prefix = `round:${activeRoundId}:bid:countdown:`;
+    for (let index = chat.length - 1; index >= 0; index -= 1) {
+      const message = chat[index];
+      if (!message?.id.startsWith(prefix) || message.type !== 'COUNTDOWN') continue;
+      if (message.id.endsWith(':1')) return '1';
+      if (message.id.endsWith(':2')) return '2';
+      if (message.id.endsWith(':3')) return '3';
+      const payload = parseCountdownPayload(message.content);
+      if (payload?.mode === 'lock') return payload.emoji || '3';
+    }
+    return '3';
+  })();
   const repostWindowOpen =
     phase === 'SENDING_PACKET'
     && state?.round?.canRepostRound === true
@@ -1640,6 +1947,10 @@ export default function GameRoom({
   const continuationActive =
     !!continuation
     && !continuationDeadlineReached;
+  const nextRoundWaiting =
+    !!nextRoundAt
+    && !nextRoundDeadlineReached
+    && !continuationActive;
   const fallbackMutedChatStage = fallbackChatStage(phase);
   const roomGloballyMuted = state?.room.chatMute?.muted === true;
   const policyChatMuted =
@@ -1652,6 +1963,89 @@ export default function GameRoom({
       : state?.chatPolicy?.stage ?? fallbackMutedChatStage;
   const gameStopped = state?.room.roundStartMode === 'STOPPED';
   const idlePhase = !phase || ['WAITING', 'FINISHED', 'CANCELLED'].includes(phase);
+  const selfUid = myUid || session.uid;
+  const myScore = findMyScoreboardResult(state?.lastScoreboard ?? null, selfUid);
+  const availableStakeStrip = ((): StakeStrip | null => {
+    if (betNotice && betNotice.status !== 'success') {
+      return { variant: 'alert', notice: betNotice };
+    }
+    const liveBet = state?.me.bet;
+    const boardSeq = state?.lastScoreboard?.seqNo;
+    const currentSeq = state?.round?.seqNo;
+    const betweenRounds = idlePhase || continuationActive;
+    const thisRoundSettled =
+      !!myScore && boardSeq != null && currentSeq != null && boardSeq === currentSeq;
+    const showResult = !!(myScore && (betweenRounds || thisRoundSettled));
+    const stake =
+      liveBet
+        ? { isAllIn: liveBet.isAllIn, amountCents: liveBet.amountCents }
+        : betNotice?.status === 'success' && betNotice.roundId === state?.round?.id
+          ? {
+              isAllIn: betNotice.action === 'all_in',
+              amountCents: betNotice.amountCents,
+            }
+          : showResult && myScore?.betCents
+            ? { isAllIn: myScore.isAllIn, amountCents: myScore.betCents }
+            : null;
+    const claimedAmountCents =
+      myClaimedAmountCents(state, selfUid)
+      ?? (showResult ? myScore?.claimCents ?? null : null);
+    const segments: StakeSegment[] = [];
+    if (stake) {
+      segments.push({ kind: 'stake', ...stake });
+    }
+    if (claimedAmountCents) {
+      segments.push({ kind: 'claim', amountCents: claimedAmountCents });
+    }
+    if (showResult && myScore) {
+      segments.push({
+        kind: 'result',
+        label: myScore.label,
+        amountCents: String(Math.abs(myScore.netCents)),
+      });
+    }
+    if (segments.length === 0) return null;
+    // 续庄时 currentSeq 已是下一局，必须继续用本局成绩的局号，否则会整条重挂、从头播一遍。
+    const roundId = String(
+      (showResult ? boardSeq ?? currentSeq : currentSeq ?? boardSeq)
+        ?? state?.round?.id
+        ?? 'live',
+    );
+    return { variant: 'progress', roundId, segments };
+  })();
+  const progressRoundId =
+    availableStakeStrip?.variant === 'progress' ? availableStakeStrip.roundId : '';
+  const progressLength =
+    availableStakeStrip?.variant === 'progress' ? availableStakeStrip.segments.length : 0;
+  useEffect(() => {
+    if (availableStakeStrip?.variant === 'alert') return;
+    if (!progressRoundId) {
+      stakeProgressRoundRef.current = null;
+      setStakeVisibleCount(0);
+      return;
+    }
+    if (progressLength === 0) return;
+    if (stakeProgressRoundRef.current !== progressRoundId) {
+      stakeProgressRoundRef.current = progressRoundId;
+      setStakeVisibleCount(1);
+      return;
+    }
+    if (stakeVisibleCount >= progressLength) return;
+    if (stakeVisibleCount === 0) {
+      setStakeVisibleCount(1);
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      setStakeVisibleCount((count) => Math.min(progressLength, count + 1));
+    }, STAKE_STEP_MS);
+    return () => window.clearTimeout(timer);
+  }, [
+    availableStakeStrip?.variant,
+    progressRoundId,
+    progressLength,
+    stakeVisibleCount,
+  ]);
+  const stakeStrip = availableStakeStrip;
   const packetDiceDone =
     phase === 'SENDING_PACKET'
     && (
@@ -1677,10 +2071,16 @@ export default function GameRoom({
       ? repostDeadline
       : diceWindowOpen && diceDeadline
         ? diceDeadline
-        : phaseDeadline;
+        : continuationActive
+          ? continuation?.deadline ?? null
+          : nextRoundWaiting
+            ? nextRoundAt
+            : phaseDeadline;
   const phaseLabel =
     continuationActive
       ? '续庄询问'
+      : nextRoundWaiting
+        ? '准备下一局'
       : gameStopped && idlePhase && !chatMuted
         ? '游戏已结束'
       : chatMuted && mutedChatStage === 'NEXT_ROUND'
@@ -1708,10 +2108,15 @@ export default function GameRoom({
           value: <RemainingValue endsAt={continuation.deadline} />,
           label: '续庄',
         }
+      : nextRoundWaiting && nextRoundAt
+        ? {
+            value: <RemainingValue endsAt={nextRoundAt} />,
+            label: '开局',
+          }
       : bidWindowClosed
       ? { value: '确认', label: '锁庄' }
       : bidFinalCountdownRunning
-        ? { value: '3·2·1', label: '仍可竞价' }
+        ? { value: bidLockDigit ?? '3', label: '仍可竞价' }
       : repostWindowOpen && repostDeadline
         ? {
             value: <RemainingValue endsAt={repostDeadline} />,
@@ -1741,6 +2146,9 @@ export default function GameRoom({
         ? '请在倒计时内确认是否续庄 · 期间所有人暂不可发言'
         : '等待庄家确认是否续庄 · 期间所有人暂不可发言';
     }
+    if (nextRoundWaiting) {
+      return '成绩单已公布，倒计时结束后开启下一局 · 暂不可发言';
+    }
     if (chatMuted && mutedChatStage === 'STARTING') {
       return '阶段开始播报中 · 暂不可发言，播报完成后自动恢复';
     }
@@ -1767,8 +2175,8 @@ export default function GameRoom({
     if (phase === 'SENDING_PACKET') {
       if (repostWindowOpen) {
         return state?.me.isBanker
-          ? '如需取消并退款，请在倒计时内点击下方“重推本局”'
-          : '封盘确认中；庄家可选择取消本局并退款重开';
+          ? '如需取消并退款，请在倒计时内发送「重推」'
+          : '封盘确认中；庄家可发送「重推」取消本局并退款重开';
       }
       if (packetDiceDone) return '庄家投骰已完成，正在等待系统发包';
       if (diceWindowTimedOut) return '庄家未在时限内投骰，系统正在取消本局并原路退款';
@@ -1797,6 +2205,7 @@ export default function GameRoom({
     diceWindowTimedOut,
     continuationActive,
     continuation,
+    nextRoundWaiting,
     chatMuted,
     mutedChatStage,
   ]);
@@ -1859,12 +2268,28 @@ export default function GameRoom({
     for (const msg of chat) {
       if (msg.type === 'SYSTEM') {
         const text = stripAssistHtml(msg.content);
-        items.push({
-          kind: 'system',
-          id: msg.id,
-          text,
-          time: formatTime(msg.at),
-        });
+        const claimEndsAt = state?.round?.claimEndsAt;
+        if (
+          claimEndsAt
+          && isClaimStartCopy(text)
+          && isClaimStartForDeadline(msg.at, claimEndsAt)
+        ) {
+          items.push({
+            kind: 'countdown',
+            id: msg.id,
+            mode: 'claim',
+            endsAt: claimEndsAt,
+            template: claimStartCountdownTemplate(text),
+            time: formatTime(msg.at),
+          });
+        } else {
+          items.push({
+            kind: 'system',
+            id: msg.id,
+            text,
+            time: formatTime(msg.at),
+          });
+        }
       } else if (msg.type === 'COUNTDOWN') {
         const payload = parseCountdownPayload(msg.content);
         // 抢包倒计时气泡已停发；历史局里的同款消息也不再展示
@@ -1899,6 +2324,13 @@ export default function GameRoom({
             afterTemplate: payload?.afterTemplate
               ? stripAssistHtml(payload.afterTemplate)
               : undefined,
+            afterEndsAt:
+              payload?.afterEndsAt
+              ?? (
+                payload?.mode === 'repost' && !packetDiceDone
+                  ? state?.round?.diceEndsAt
+                  : undefined
+              ),
             time: formatTime(msg.at),
           });
         }
@@ -2006,15 +2438,17 @@ export default function GameRoom({
           time: formatTime(msg.at),
         });
       } else {
+        const mine = !!msg.from?.uid && msg.from.uid === myUid;
+        const gameAction = msg.type !== 'EMOJI' ? msg.gameAction : undefined;
         items.push({
           kind: 'chat',
           id: msg.id,
-          mine: !!msg.from?.uid && msg.from.uid === myUid,
+          mine,
           name: msg.from?.nickname ?? '玩家',
           avatar: msg.from?.avatarUrl,
           text: msg.content,
           emoji: msg.type === 'EMOJI',
-          gameAction: msg.type !== 'EMOJI' ? msg.gameAction : undefined,
+          gameAction,
           administrator: msg.from?.role === 'GAME_ADMIN',
           replyTo: msg.replyTo,
           time: formatTime(msg.at),
@@ -2634,6 +3068,9 @@ export default function GameRoom({
               setError(payload.message);
               setDiceSent(false);
               // 指令被拒时立刻同步阶段，避免顶栏仍显示「竞标中」
+              scheduleRefresh();
+            } else if (payload.type === 'chat_notice' && typeof payload.message === 'string') {
+              setError(payload.message);
               scheduleRefresh();
             } else if (
               payload.type === 'tip_thanks' &&
@@ -3749,7 +4186,7 @@ export default function GameRoom({
     displayedMutedStage === 'DICE'
       ? repostWindowOpen
         ? state?.me.isBanker
-          ? '不重推可等待倒计时结束；重推将取消本局并原路退款'
+          ? '不重推可等待倒计时结束；发送「重推」将取消本局并原路退款'
           : '等待庄家确认是否重推本局'
         : canThrowDice
           ? '请在倒计时内投骰，三颗骰子将依次同步到群内'
@@ -3787,12 +4224,8 @@ export default function GameRoom({
     jumpToBottom();
   }
 
-  function repostRound() {
-    if (!repostWindowOpen || !state?.me.isBanker || chatSendPending) return;
-    const result = sendChat('/重推');
-    if (result) void result;
-  }
-
+  const bankerCanRepostByChat =
+    repostWindowOpen && state?.me.isBanker === true && !roomGloballyMuted;
   const composerUnavailable = loading || !state || connState !== 'online';
   const canUseChatGestures =
     !roomGloballyMuted
@@ -3803,7 +4236,7 @@ export default function GameRoom({
   const composerControlsHidden =
     composerUnavailable
     || roomGloballyMuted
-    || chatMuted
+    || (chatMuted && !bankerCanRepostByChat)
     || bidWindowClosed
     || (memberChatMuted && !muteAllowsGameCommand);
   const composerHint =
@@ -3813,6 +4246,8 @@ export default function GameRoom({
         ? null
         : roomGloballyMuted
           ? '互动群已禁言'
+          : bankerCanRepostByChat
+            ? '倒计时内发送「重推」即可取消本局并原路退款'
           : bidWindowClosed
             ? '竞标最终确认 · 暂不可发言'
             : memberChatMuted && !muteAllowsGameCommand
@@ -3898,7 +4333,7 @@ export default function GameRoom({
         </div>
       </div>
 
-      <div className="game-room-feed-shell">
+      <div className={`game-room-feed-shell${stakeStrip || canBid ? ' has-stake-strip' : ''}`}>
         {tipNotice && (
           <div className="room-tip-danmaku-stage" aria-live="polite">
             <div className="room-tip-danmaku" role="status" key={tipNotice.id}>
@@ -4092,6 +4527,7 @@ export default function GameRoom({
                         <p aria-live="polite">
                           <RemainingCopy
                             endsAt={item.endsAt}
+                            afterEndsAt={item.afterEndsAt}
                             mode={item.mode}
                             template={item.template ?? ''}
                             afterTemplate={item.afterTemplate}
@@ -4229,17 +4665,8 @@ export default function GameRoom({
               );
             }
             if (item.kind === 'chat') {
-              const ownBet = item.mine && !!item.gameAction;
-              const ownActionLabel =
-                item.gameAction === 'bid'
-                  ? '我的竞庄'
-                  : item.gameAction === 'all_in'
-                    ? '我的梭哈'
-                    : item.gameAction === 'withdraw'
-                      ? '撤回下注'
-                      : '我的下注';
               return (
-                <div className={`feed-chat ${item.mine ? 'mine' : 'theirs'}${ownBet ? ' own-bet' : ''}`} key={item.id}>
+                <div className={`feed-chat ${item.mine ? 'mine' : 'theirs'}`} key={item.id}>
                   {!item.mine && (
                     <ChatAvatar
                       url={item.avatar}
@@ -4252,16 +4679,16 @@ export default function GameRoom({
                     />
                   )}
                   <div className="feed-chat-body">
-                    {(!item.mine || ownBet) && (
-                      <div className={`feed-chat-name${ownBet ? ' own-bet' : ''}`}>
-                        {ownBet ? ownActionLabel : item.name}
-                        {!ownBet && item.administrator && (
+                    {!item.mine && (
+                      <div className="feed-chat-name">
+                        {item.name}
+                        {item.administrator && (
                           <em className="game-admin-badge">管理员</em>
                         )}
                       </div>
                     )}
                     <LongPressSurface
-                      className={`feed-chat-bubble ${item.emoji ? 'emoji' : ''} ${ownBet ? 'is-bet' : ''}`}
+                      className={`feed-chat-bubble ${item.emoji ? 'emoji' : ''}`}
                       ariaLabel={`来自${item.name}的消息，长按回复`}
                       onLongPress={
                         !item.mine && canUseChatGestures
@@ -4344,6 +4771,20 @@ export default function GameRoom({
             })}
         </div>
 
+        {stakeStrip && (
+          <StakeStatusBar
+            key={
+              stakeStrip.variant === 'progress'
+                ? `progress:${stakeStrip.roundId}`
+                : 'alert'
+            }
+            strip={stakeStrip}
+            visibleCount={
+              stakeStrip.variant === 'progress' ? Math.max(1, stakeVisibleCount) : undefined
+            }
+            onClose={dismissPrivateBetNotice}
+          />
+        )}
         {newBelow && (
           <button
             type="button"
@@ -4355,10 +4796,7 @@ export default function GameRoom({
         )}
       </div>
 
-      <div className="game-room-footer">
-        {betNotice && (
-          <BetResultToast notice={betNotice} onClose={dismissPrivateBetNotice} />
-        )}
+      <div className={`game-room-footer${stakeStrip ? ' has-stake-strip' : ''}`}>
         {state && connState !== 'online' && (
           <div className={`room-connection-bar ${connState}`} role="status">
             <span>
@@ -4404,19 +4842,9 @@ export default function GameRoom({
               void runAction(() => api.continueBanker(roomId, continuation.previousRoundId))
             }
           />
-        ) : chatMuted ? (
+        ) : chatMuted && !bankerCanRepostByChat ? (
           <StageLockPanel stage={displayedMutedStage} detail={stageLockDetail}>
-            {repostWindowOpen && state?.me.isBanker ? (
-              <button
-                className="stage-control-button repost"
-                type="button"
-                disabled={chatSendPending || connState !== 'online'}
-                onClick={repostRound}
-              >
-                <span>{chatSendPending ? '正在重推…' : '重推本局'}</span>
-                <small>取消本局并原路退款重开</small>
-              </button>
-            ) : canThrowDice ? (
+            {canThrowDice ? (
               <button
                 className="stage-control-button dice"
                 type="button"
@@ -4461,12 +4889,20 @@ export default function GameRoom({
             onSend={sendChat}
             disabled={composerControlsHidden}
             busy={betPending || chatSendPending}
-            placeholder=""
+            placeholder={bankerCanRepostByChat ? '发送 重推 取消本局并退款' : ''}
             amountMode={activeReplyTarget ? null : canBid ? 'bid' : canBet ? 'bet' : null}
             bidHighCents={
               canBid && state?.round?.topBids?.[0]
                 ? Number(state.round.topBids[0].amountCents)
                 : null
+            }
+            myBidCents={
+              canBid && state?.me.bidCents ? Number(state.me.bidCents) : null
+            }
+            bidTopIsMine={
+              canBid
+              && !!state?.round?.topBids?.[0]
+              && state.round.topBids[0].uid === (myUid || session.uid)
             }
             restrictedToGameCommands={memberChatMuted}
             inputRequest={composerInputRequest ?? undefined}
@@ -4474,81 +4910,33 @@ export default function GameRoom({
             onCancelReply={() => setReplyTarget(null)}
             stickers={stickers}
             onSendSticker={sendSticker}
-            toolsHighlight={canThrowDice}
-            diceAvailable={canThrowDice}
-            defaultToolTab={canThrowDice ? 'dice' : 'emoji'}
-            dicePanel={
-              canThrowDice ? (
-                <>
-                  <div className="dice-panel-ready-head">
-                    <span className="dice-panel-art" aria-hidden="true">
-                      <Die value={5} />
-                    </span>
-                    <span>
-                      <strong>庄家投骰</strong>
-                      <small>三颗骰子将依次掷出，并同步到互动群</small>
-                    </span>
-                  </div>
-                  <button
-                    className="primary-action dice-action"
-                    type="button"
-                    onClick={sendDice}
-                    disabled={diceSent}
-                  >
-                    {diceSent ? '已发送到群聊…' : '投骰子到群聊'}
-                  </button>
-                </>
-              ) : (
-                <div className="dice-panel-unavailable">
-                  <span className="dice-panel-lock" aria-hidden="true">
-                    <svg viewBox="0 0 24 24">
-                    <rect x="4.5" y="10" width="15" height="10" rx="3" />
-                    <path d="M8 10V7.5a4 4 0 0 1 8 0V10" />
-                    <circle cx="12" cy="15" r="1" />
-                  </svg>
-                </span>
-                <span>
-                  <strong>
-                    {repostWindowOpen && state?.me.isBanker
-                      ? '重推确认中'
-                      : diceWindowTimedOut && state?.me.isBanker
-                        ? '投骰已超时'
-                      : phase === 'SENDING_PACKET' && state?.me.isBanker
-                        ? '本局已经完成投骰'
-                      : '投骰暂不可用'}
-                  </strong>
-                  <small>
-                    {repostWindowOpen && state?.me.isBanker
-                      ? '发送 /重推将取消本局、退款并重新开局'
-                      : diceWindowTimedOut && state?.me.isBanker
-                        ? '系统正在取消本局并原路退回冻结金额'
-                      : phase !== 'SENDING_PACKET'
-                      ? '进入庄家投骰阶段后才可使用'
-                      : state?.me.isBanker
-                        ? '等待系统继续发包流程'
-                        : '仅本局庄家可在投骰阶段使用'}
-                  </small>
-                </span>
-              </div>
-            )
-          }
-          plusActions={[
-            {
-              key: 'packet',
-              icon: <RedPacketIcon />,
-              iconClass: 'packet filled',
-              label: '发红包',
-              onClick: () => openRoomFeature('send-packet'),
-            },
-            {
-              key: 'tip',
-              icon: <TransferIcon />,
-              iconClass: 'tip filled',
-              label: '打赏',
-              onClick: () => openRoomFeature('tip'),
-            },
-          ]}
-        />
+            plusActions={[
+              {
+                key: 'packet',
+                icon: <RedPacketIcon />,
+                iconClass: 'packet filled',
+                label: '发红包',
+                onClick: () => openRoomFeature('send-packet'),
+              },
+              {
+                key: 'tip',
+                icon: <TransferIcon />,
+                iconClass: 'tip filled',
+                label: '打赏',
+                onClick: () => openRoomFeature('tip'),
+              },
+              {
+                key: 'history',
+                icon: <MyHistoryIcon />,
+                iconClass: 'history filled',
+                label: '我的战绩',
+                onClick: () => {
+                  freezeCurrentFeedPosition();
+                  setHistoryOpen(true);
+                },
+              },
+            ]}
+          />
         )}
           </>
         )}
@@ -4588,6 +4976,10 @@ export default function GameRoom({
           document.body,
         )}
 
+      {historyOpen && roomId && (
+        <MyHistorySheet roomId={roomId} onClose={() => setHistoryOpen(false)} />
+      )}
+
       {packetDialog &&
         createPortal(
           <RedPacketDialog
@@ -4605,71 +4997,97 @@ export default function GameRoom({
   );
 }
 
-function BetResultToast({
-  notice,
+function stakeSegmentText(segment: StakeSegment): string {
+  if (segment.kind === 'stake') {
+    return `${segment.isAllIn ? '梭哈' : '下注'}：${rm(segment.amountCents)}`;
+  }
+  if (segment.kind === 'claim') {
+    return `抢：${rm(segment.amountCents)}`;
+  }
+  return `${segment.label}：${rm(segment.amountCents)}`;
+}
+
+function stakeSegmentTone(segment: StakeSegment): string {
+  if (segment.kind === 'claim') return 'claim';
+  if (segment.kind === 'result') {
+    return segment.label === '赢' ? 'win' : segment.label === '输' ? 'lose' : 'tie';
+  }
+  return segment.isAllIn ? 'success all-in' : 'success';
+}
+
+function StakeStatusBar({
+  strip,
+  visibleCount,
   onClose,
 }: {
-  notice: PrivateBetNoticePayload;
+  strip: StakeStrip;
+  visibleCount?: number;
   onClose: () => void;
 }) {
-  const success = notice.status === 'success';
-  const unknown = notice.status === 'unknown';
-  const acceptance = notice.acceptance;
-  const adjusted = success && acceptance?.adjusted === true;
-  const actionName = notice.action === 'all_in' ? '梭哈' : '下注';
-  const title = adjusted
-    ? `${actionName}已自动调整`
-    : success
-      ? `${actionName}成功`
-      : unknown
-        ? '确认超时'
-        : `${actionName}失败`;
-  const detail =
-    success
-      ? '已记录，请等待本局流程'
-      : notice.reason || (unknown ? '请刷新核对后再操作' : '操作未完成');
+  const shown =
+    strip.variant === 'progress'
+      ? strip.segments.slice(
+          0,
+          Math.min(
+            strip.segments.length,
+            Math.max(0, visibleCount ?? strip.segments.length),
+          ),
+        )
+      : [];
+  const newestIndex = shown.length - 1;
+
+  if (strip.variant === 'alert') {
+    const notice = strip.notice;
+    const unknown = notice.status === 'unknown';
+    const actionName = notice.action === 'all_in' ? '梭哈' : '下注';
+    const title = unknown ? '确认超时' : `${actionName}失败`;
+    const detail = notice.reason || (unknown ? '请刷新后再核对' : '操作未完成');
+    return (
+      <div
+        className={`bet-result-toast ${notice.status}`}
+        role="status"
+        aria-live="polite"
+        aria-atomic="true"
+      >
+        <p>
+          {title}：{rm(notice.amountCents)}
+          {detail ? ` · ${detail}` : ''}
+        </p>
+        <button type="button" className="bet-result-toast-close" aria-label="关闭" onClick={onClose}>
+          ×
+        </button>
+      </div>
+    );
+  }
+
+  if (shown.length === 0) return null;
 
   return (
     <div
-      className={`bet-result-toast ${notice.status}${adjusted ? ' adjusted' : ''}`}
+      className="bet-result-toast progress"
       role="status"
       aria-live="polite"
-      aria-atomic="true"
     >
-      <span className="bet-result-toast-mark" aria-hidden>
-        {adjusted ? '↘' : success ? '✓' : unknown ? '…' : '!'}
-      </span>
-      <div className="bet-result-toast-copy">
-        <strong>
-          {title}<i>｜</i>{rm(notice.amountCents)}
-        </strong>
-        {adjusted && acceptance ? (
-          <div className="bet-adjustment-detail">
-            <span>
-              输入 <b>{rm(acceptance.requestedAmountCents)}</b>
-              <i>当前余额 {rm(acceptance.liabilityBalanceCents)}</i>
+      {shown.map((segment, index) => {
+        const isNew = index === newestIndex && shown.length > 1;
+        return (
+          <Fragment key={segment.kind}>
+            {index > 0 && (
+              <span
+                className={`bet-result-toast-dot${isNew ? ' is-new' : ''}`}
+                aria-hidden
+              >
+                ·
+              </span>
+            )}
+            <span
+              className={`bet-result-toast-seg ${stakeSegmentTone(segment)}${isNew ? ' is-new' : ''}`}
+            >
+              {stakeSegmentText(segment)}
             </span>
-            <span>
-              {notice.action === 'all_in'
-                ? '1:1 余额上限'
-                : `${acceptance.liabilityMultiplier} 倍余额上限`}{' '}
-              <b>{rm(acceptance.maxAffordableCents)}</b>
-              {notice.action === 'all_in' ? null : (
-                <i>本局最高 {rm(acceptance.maxAcceptedCents)}</i>
-              )}
-            </span>
-            <span>
-              实际接受 <b>{rm(notice.amountCents)}</b>
-              <i>最大赔付已预留 {rm(acceptance.reservedCents)}</i>
-            </span>
-          </div>
-        ) : (
-          <small>{detail}</small>
-        )}
-      </div>
-      <button type="button" className="bet-result-toast-close" aria-label="关闭" onClick={onClose}>
-        ×
-      </button>
+          </Fragment>
+        );
+      })}
     </div>
   );
 }
@@ -5017,6 +5435,21 @@ function formatTime(value?: string) {
     });
   } catch {
     return undefined;
+  }
+}
+
+function formatDateTime(value?: string | null) {
+  if (!value) return '';
+  try {
+    return new Date(value).toLocaleString('zh-MY', {
+      hour12: false,
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+  } catch {
+    return '';
   }
 }
 

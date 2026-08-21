@@ -2,9 +2,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const calls = vi.hoisted(() => [] as string[]);
 const tx = vi.hoisted(() => ({
-  $queryRaw: vi.fn(async () => {
+  $executeRaw: vi.fn(async () => {
     calls.push('lock');
-    return [];
+    return 0;
   }),
   gameConfig: {},
   agent: {

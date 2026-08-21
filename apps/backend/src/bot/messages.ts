@@ -78,7 +78,7 @@ function bankerProfitLine(netCents: bigint): string {
   const amount = absoluteAmount(netCents);
   if (netCents > 0n) return `庄盈利+${amount}`;
   if (netCents < 0n) return `庄亏损-${amount}`;
-  return '庄盈亏 0.00';
+  return `庄盈亏 ${fromCents(0)}`;
 }
 
 /**  enclosed CJK 必须带 VS16，否则会被中易/Noto 画成「得」「无」方字，而不是彩色表情 */

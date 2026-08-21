@@ -18,7 +18,9 @@ export interface RoundConfig {
   betDurationSeconds: number;
   claimDurationSeconds: number;
   continuationWindowSeconds: number;
-  /** 封盘后允许庄家发送 /重推 取消退款并重开下一局的确认时间 */
+  /** 成绩单公布后，自动开启下一局前的等待秒数 */
+  nextRoundDelaySeconds: number;
+  /** 封盘后允许庄家发送「重推」取消退款并重开下一局的确认时间 */
   repostWindowSeconds: number;
   /** 重推确认结束后，庄家必须完成投骰的时限 */
   bankerDiceTimeoutSeconds: number;
@@ -54,6 +56,7 @@ export const DEFAULT_ROUND_CONFIG: RoundConfig = {
   betDurationSeconds: 50,
   claimDurationSeconds: 40,
   continuationWindowSeconds: 15,
+  nextRoundDelaySeconds: 10,
   repostWindowSeconds: 5,
   bankerDiceTimeoutSeconds: 15,
   bankerBidMinCents: 10_000,
@@ -178,12 +181,12 @@ export const DEFAULT_MESSAGE_TEMPLATES: MessageTemplates = {
   welcome:
     '👋欢迎进入至尊牛牛互动群\n请先完成实名与充值，凑齐人数后自动开局。',
   bidStart:
-    '📢第 {{seqNo}} 局竞标开启\n时长：{{bidSeconds}} 秒\n最低出价：{{minBid}}\n\n首口输入整数；已有最高价后，至少加 100，也可以加更多。\n最后 5 秒有效加价，计时重置为 5 秒。\n进入 3、2、1 后仍可喊价，播报结束后锁标。',
+    '📢第 {{seqNo}} 局竞标开启\n时长：{{bidSeconds}} 秒\n最低出价：{{minBid}}\n\n直接发送整数金额即可出价，多人可同时叫价，截标锁定最高有效价。\n想超当前最高，建议至少加 100。\n最后 5 秒出现新的最高价，计时重置为 5 秒。\n进入 3、2、1 后仍可喊价，播报结束后锁标。',
   bidPlaced:
     '📢叫价更新\n{{player}} 出价 {{amount}}\n当前最高：{{leader}} · {{high}}\n下一口最低 {{next}}，可以更高。',
   bidClosing:
     '⏰竞标截止\n本局出价名单：\n{{bidList}}\n\n当前最高：{{leader}} · {{high}}\n下面开始 3、2、1 倒计时，倒计时结束立刻锁定庄家！',
-  bidCountdownStart: '⏰竞标倒数\n播报结束前仍可按最低加价规则继续竞标。',
+  bidCountdownStart: '⏰竞标倒数\n播报结束前仍可继续出价，截标锁定最高有效价。',
   bidCountdown3: '3',
   bidCountdown2: '2',
   bidCountdown1: '1',
@@ -198,10 +201,10 @@ export const DEFAULT_MESSAGE_TEMPLATES: MessageTemplates = {
   sealedSummary:
     '📋封盘明细\n庄家{{banker}}\n庄钱：{{pot}}\n发包金额：{{packetTotal}}\n发包数量：{{packetCount}} 个\n总下注：{{betTotal}}\n总梭哈：{{shTotal}}\n\n代包手1：{{tailPackerBanker}}（庄家尾包）\n代包手2：{{tailPackerPlayer}}（闲家尾包）\n\n本局下注成功名单：\n{{betList}}',
   dicePrompt:
-    '⏳封盘确认 · {{remaining}} 秒\n请庄家{{banker}}确认本局。\n· 继续本局：确认结束后须在 {{diceSeconds}} 秒内投骰，超时本局自动取消并退款\n· 重推本局：倒计时内发送 /重推，系统会取消整局、原路退回全部冻结金额，并重新开启下一局',
+    '⏳封盘确认 · {{remaining}} 秒\n请庄家{{banker}}确认本局。\n· 继续本局：确认结束后须在 {{diceSeconds}} 秒内投骰，超时本局自动取消并退款\n· 重推本局：倒计时内发送 重推，系统会取消整局、原路退回全部冻结金额，并重新开启下一局',
   betCountdown: '⏰下注倒计时 · 还剩 {{remaining}} 秒\n未出手的抓紧了，时间到立刻封盘！',
   claimStart:
-    '🧧开始抢包 · {{claimSeconds}} 秒\n仅庄家与已下注闲家可领，过期即止。',
+    '🧧开始抢包 · {{claimSeconds}} 秒\n仅庄家与已下注闲家可领，过期即止。未领玩家请尽快，超时按尾包规则补录。',
   claimWarning:
     '🧧领包提醒\n未领玩家请尽快，超时按尾包规则补录。',
   claimCountdown:
@@ -257,6 +260,10 @@ const LEGACY_REROLL_DICE_PROMPT =
   '【庄家投骰】\n请庄家 {{banker}} 在 60 秒内投出 3 颗骰子。\n首次结果公布后有 {{rerollWindow}} 秒确认时间；如需重新投骰，请发送 /重推（每局最多一次）。';
 const LEGACY_STATIC_REPOST_DICE_PROMPT =
   '【封盘确认 · {{repostWindow}} 秒】\n请庄家 {{banker}} 确认本局。\n· 继续本局：倒计时结束后点击投骰\n· 重推本局：倒计时内发送 /重推，系统会取消整局、原路退回全部冻结金额，并重新开启下一局';
+const LEGACY_SLASH_REPOST_DICE_PROMPT =
+  '⏳封盘确认 · {{remaining}} 秒\n请庄家{{banker}}确认本局。\n· 继续本局：确认结束后须在 {{diceSeconds}} 秒内投骰，超时本局自动取消并退款\n· 重推本局：倒计时内发送 /重推，系统会取消整局、原路退回全部冻结金额，并重新开启下一局';
+const LEGACY_SLASH_REPOST_DICE_PROMPT_BRACKET =
+  '【封盘确认 · {{remaining}} 秒】\n请庄家 {{banker}} 确认本局。\n· 继续本局：确认结束后须在 {{diceSeconds}} 秒内投骰，超时本局自动取消并退款\n· 重推本局：倒计时内发送 /重推，系统会取消整局、原路退回全部冻结金额，并重新开启下一局';
 
 /** 后台已保存的旧默认稿；精确匹配才替换，自定义话术不覆盖。 */
 const PREVIOUS_DEFAULT_MESSAGE_TEMPLATES: Partial<
@@ -266,6 +273,7 @@ const PREVIOUS_DEFAULT_MESSAGE_TEMPLATES: Partial<
     '欢迎进入【至尊牛牛】互动群\n\n这里不是旁观大厅，而是本局实时战场。\n请先完成实名与充值，凑齐人数后自动开局。\n准备好了，就留下做局。',
   ],
   bidStart: [
+    '📢第 {{seqNo}} 局竞标开启\n时长：{{bidSeconds}} 秒\n最低出价：{{minBid}}\n\n首口输入整数；已有最高价后，至少加 100，也可以加更多。\n最后 5 秒有效加价，计时重置为 5 秒。\n进入 3、2、1 后仍可喊价，播报结束后锁标。',
     '【第 {{seqNo}} 局 · 庄家竞标开启】\n\n竞标时长：{{bidSeconds}} 秒\n最低出价：{{minBid}}\n\n首口输入整数；已有最高价后，至少加 100，也可以加更多。\n最后 5 秒有效加价，计时重置为 5 秒。\n进入 3、2、1 后仍可喊价，播报结束后锁标。',
     LEGACY_DECIMAL_BID_START,
     LEGACY_FREE_BID_START,
@@ -283,6 +291,7 @@ const PREVIOUS_DEFAULT_MESSAGE_TEMPLATES: Partial<
     '【竞标截止 · 最终确认】\n\n本局出价名单：\n{{bidList}}\n\n当前最高：{{leader}} · {{high}}\n下面开始 3、2、1 倒计时，倒计时结束立刻锁定庄家！',
   ],
   bidCountdownStart: [
+    '⏰竞标倒数\n播报结束前仍可按最低加价规则继续竞标。',
     '【竞标最后倒数】\n播报结束前仍可按最低加价规则继续竞标。',
     LEGACY_CLOSED_BID_COUNTDOWN_START,
     LEGACY_PRE_ONE_BID_COUNTDOWN_START,
@@ -308,7 +317,8 @@ const PREVIOUS_DEFAULT_MESSAGE_TEMPLATES: Partial<
     '【停止下注 · 封盘明细】\n\n庄家：{{banker}}\n庄钱：{{pot}}\n发包金额：{{packetTotal}}\n发包数量：{{packetCount}} 个\n总下注：{{betTotal}}\n总梭哈：{{shTotal}}\n\n代包手1：{{tailPackerBanker}}（庄家尾包）\n代包手2：{{tailPackerPlayer}}（闲家尾包）\n\n本局下注成功名单：\n{{betList}}',
   ],
   dicePrompt: [
-    '【封盘确认 · {{remaining}} 秒】\n请庄家 {{banker}} 确认本局。\n· 继续本局：确认结束后须在 {{diceSeconds}} 秒内投骰，超时本局自动取消并退款\n· 重推本局：倒计时内发送 /重推，系统会取消整局、原路退回全部冻结金额，并重新开启下一局',
+    LEGACY_SLASH_REPOST_DICE_PROMPT_BRACKET,
+    LEGACY_SLASH_REPOST_DICE_PROMPT,
     LEGACY_DICE_PROMPT,
     LEGACY_REROLL_DICE_PROMPT,
     LEGACY_STATIC_REPOST_DICE_PROMPT,
@@ -317,6 +327,7 @@ const PREVIOUS_DEFAULT_MESSAGE_TEMPLATES: Partial<
     '下注倒计时 · 还剩 {{remaining}} 秒\n未出手的抓紧了，时间到立刻封盘！',
   ],
   claimStart: [
+    '🧧开始抢包 · {{claimSeconds}} 秒\n仅庄家与已下注闲家可领，过期即止。',
     '【开始抢包 · {{claimSeconds}} 秒】\n仅庄家与已下注闲家可领，过期即止。',
     LEGACY_CLAIM_START,
   ],
@@ -574,8 +585,8 @@ export async function ensureGameConfigDefaults(): Promise<void> {
             }
             delete merged.diceRerollWindowSeconds;
           }
-          // 上一版默认值为 8 秒；本次产品规则统一调整为 5 秒。
-          if (raw?.repostWindowSeconds === 8) {
+          // 上一版默认值为 8 秒或 3 秒；本次产品规则统一调整为 5 秒。
+          if (raw?.repostWindowSeconds === 8 || raw?.repostWindowSeconds === 3) {
             merged = { ...merged, repostWindowSeconds: 5 };
           }
         }
@@ -683,7 +694,6 @@ const configSchemas = {
       multipliers: z.record(z.number().int().min(1).max(100)).optional(),
       normalMultipliers: z.record(z.number().int().min(1).max(100)).optional(),
       bustThreshold: z.number().int().min(0).max(10).optional(),
-      bustExemptSpecialHands: z.boolean().optional(),
     })
     .strip(),
   betting: z
@@ -731,6 +741,7 @@ const configSchemas = {
       betDurationSeconds: z.number().int().min(5).max(3_600).optional(),
       claimDurationSeconds: z.number().int().min(5).max(3_600).optional(),
       continuationWindowSeconds: z.number().int().min(5).max(300).optional(),
+      nextRoundDelaySeconds: z.number().int().min(3).max(300).optional(),
       repostWindowSeconds: z.number().int().min(3).max(30).optional(),
       bankerDiceTimeoutSeconds: z.number().int().min(5).max(120).optional(),
       bankerBidMinCents: z.number().int().min(1).max(1_000_000_000).optional(),

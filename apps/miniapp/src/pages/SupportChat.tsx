@@ -214,7 +214,6 @@ export default function SupportChat() {
           placeholder="输入消息…"
           stickers={stickers}
           onSendSticker={(id) => void sendSticker(id)}
-          defaultToolTab="emoji"
         />
       </footer>
     </div>

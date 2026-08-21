@@ -257,10 +257,13 @@ describe('下注指令解析', () => {
 });
 
 describe('金额工具', () => {
-  it('toCents / fromCents 互转', () => {
+  it('toCents / fromCents 互转，展示时去掉多余末尾 0', () => {
     expect(toCents('31.2')).toBe(3120);
     expect(toCents('1.04')).toBe(104);
-    expect(fromCents(3120)).toBe('31.20');
+    expect(fromCents(700)).toBe('7');
+    expect(fromCents(0)).toBe('0');
+    expect(fromCents(3120)).toBe('31.2');
+    expect(fromCents(104)).toBe('1.04');
     expect(fromCents(-127147)).toBe('-1271.47');
   });
 

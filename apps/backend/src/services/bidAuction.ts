@@ -45,7 +45,7 @@ function stripHtml(html: string): string {
 }
 
 function formatBidAmount(cents: bigint): string {
-  return fromCents(cents).replace(/\.00$/, '').replace(/(\.\d)0$/, '$1');
+  return fromCents(cents);
 }
 
 export function mentionUser(user: MentionUser): string {
@@ -266,7 +266,7 @@ export async function advanceBidClosingCeremony(params: {
       renderMessage(templates.bidFinalList, {
         bidList: formatBidList(bids),
         leader: leader ? mentionUser(leader.user) : '—',
-        high: leader ? fromCents(leader.amountCents) : '0.00',
+        high: leader ? fromCents(leader.amountCents) : fromCents(0),
       }),
     );
     const sent = await appendSystemChatOnce(

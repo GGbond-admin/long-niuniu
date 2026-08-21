@@ -66,6 +66,7 @@ model User {
   agentBinding           AgentPlayer?
   gameAdminAssignments   GameAdminAssignment[]
   gameAdminActionTargets GameAdminActionLog[]  @relation("GameAdminActionTarget")
+  supportHostRooms       Room[]                @relation("RoomSupportHost")
 
   @@index([inviterId])
   @@index([grandInviterId])
@@ -448,8 +449,11 @@ model Room {
   chatMutedAt          DateTime?             @map("chat_muted_at")
   chatMuteReason       String?               @map("chat_mute_reason")
   chatMutedByAdminId   String?               @map("chat_muted_by_admin_id")
+  /** 本互动群「客服小妹」绑定的真人账号；打赏后由该账号自动致谢 */
+  supportHostUserId    String?               @map("support_host_user_id")
   inviteLink           String?               @map("invite_link") // 已弃用：旧群邀请链接
   bot                  TelegramBot?          @relation(fields: [botId], references: [id])
+  supportHost          User?                 @relation("RoomSupportHost", fields: [supportHostUserId], references: [id], onDelete: SetNull)
   rounds               Round[]
   members              RoomMember[]
   virtualPlayers       VirtualPlayer[]
@@ -459,6 +463,7 @@ model Room {
   gameBudget           GameBudgetAccount?
   createdAt            DateTime              @default(now()) @map("created_at")
 
+  @@index([supportHostUserId])
   @@map("rooms")
 }
 

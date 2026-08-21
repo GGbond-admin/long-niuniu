@@ -123,8 +123,7 @@ function pickPhrase(phrases: unknown): string | null {
 }
 
 function formatPlayAmount(cents: bigint): string {
-  const raw = fromCents(cents);
-  return raw.endsWith('.00') ? raw.slice(0, -3) : raw;
+  return fromCents(cents);
 }
 
 function snapBetAmount(cents: number, min: number, max: number): number {

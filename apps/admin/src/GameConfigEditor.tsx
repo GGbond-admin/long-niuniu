@@ -45,7 +45,7 @@ const MESSAGE_FIELDS: Array<{ key: string; label: string; hint?: string }> = [
   { key: 'dicePrompt', label: '庄家投骰提示' },
   { key: 'bankerDice', label: '庄家开骰结果' },
   { key: 'claimStart', label: '开始抢包' },
-  { key: 'claimWarning', label: '领包提醒' },
+  { key: 'claimWarning', label: '领包提醒（已并入开始抢包，不再单独发送）' },
   { key: 'claimCountdown', label: '抢包倒计时' },
   { key: 'claimExpiredEdit', label: '抢包结束（编辑中）' },
   { key: 'claimExpired', label: '抢包结束' },
@@ -84,6 +84,7 @@ function formatConfigSaveError(error: unknown): string {
     l2Rate: '二级返水',
     bankerBidMinCents: '上庄起拍价',
     bankerBidMaxCents: '最高出价',
+    nextRoundDelaySeconds: '成绩单后开下一局',
     minBetCents: '奖励普通最低',
     minAllInCents: '奖励梭哈最低',
   };
@@ -250,7 +251,7 @@ function HandForm({
         ))}
       </Section>
       <Section title="自爆规则">
-        <Field label="自爆门槛" hint="点数 ≤ 此值判自爆（0–10）">
+        <Field label="自爆门槛" hint="点数 ≤ 此值判自爆（0–10）；特殊牌型固定不自爆">
           <input
             type="number"
             min={0}
@@ -261,20 +262,6 @@ function HandForm({
               onChange({ ...value, bustThreshold: Number(event.target.value) })
             }
           />
-        </Field>
-        <Field label="特殊牌型豁免自爆" hint="开启后豹子等特殊牌型不自爆">
-          <select
-            value={value.bustExemptSpecialHands === false ? '0' : '1'}
-            onChange={(event) =>
-              onChange({
-                ...value,
-                bustExemptSpecialHands: event.target.value === '1',
-              })
-            }
-          >
-            <option value="1">开启</option>
-            <option value="0">关闭</option>
-          </select>
         </Field>
       </Section>
     </>
@@ -430,7 +417,10 @@ function RoundForm({
             }
           />
         </Field>
-        <Field label="续庄确认窗口">
+        <Field
+          label="续庄确认窗口"
+          hint="庄家确认是否续庄的秒数；未确认则转入公开竞标"
+        >
           <input
             type="number"
             min={5}
@@ -444,8 +434,25 @@ function RoundForm({
           />
         </Field>
         <Field
+          label="成绩单后开下一局"
+          hint="公布成绩单后等待几秒再自动开下一局，默认 10 秒。续庄确认可同时进行。"
+        >
+          <input
+            type="number"
+            min={3}
+            max={300}
+            value={value.nextRoundDelaySeconds ?? ''}
+            onChange={(event) =>
+              onChange({
+                ...value,
+                nextRoundDelaySeconds: Number(event.target.value),
+              })
+            }
+          />
+        </Field>
+        <Field
           label="封盘重推确认窗口"
-          hint="庄家可发送 /重推 取消整局、退款并重新开局的秒数"
+          hint="庄家可发送「重推」取消整局、退款并重新开局的秒数"
         >
           <input
             type="number"
@@ -858,7 +865,6 @@ function serializeConfig(key: string, draft: Row): Row {
       multipliers,
       normalMultipliers,
       bustThreshold: intOrThrow(String(draft.bustThreshold ?? ''), '自爆门槛'),
-      bustExemptSpecialHands: draft.bustExemptSpecialHands !== false,
     };
   }
 
@@ -889,6 +895,10 @@ function serializeConfig(key: string, draft: Row): Row {
       continuationWindowSeconds: intOrThrow(
         String(draft.continuationWindowSeconds ?? ''),
         '续庄窗口',
+      ),
+      nextRoundDelaySeconds: intOrThrow(
+        String(draft.nextRoundDelaySeconds ?? 10),
+        '成绩单后开下一局',
       ),
       repostWindowSeconds: intOrThrow(
         String(draft.repostWindowSeconds ?? ''),

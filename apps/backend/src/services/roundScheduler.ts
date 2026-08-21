@@ -1,6 +1,7 @@
 import { PacketChannel, RoundPhase, RoomStartMode } from '@prisma/client';
 import {
   bankerContinuationError,
+  nextRoundReadyAtMs,
   shouldStartWaitingRound,
 } from '../engine/bankerContinuation.js';
 import { redis, withRedisLock } from '../lib/redis.js';
@@ -595,7 +596,21 @@ export class RoundScheduler {
           ) {
             continue;
           }
+          const previousRoundSettings = previous?.configSnapshot
+            ? parseSettingsSnapshot(previous.configSnapshot).round
+            : settings.round;
+          const nextRoundDelaySeconds =
+            previousRoundSettings.nextRoundDelaySeconds ?? 10;
+          const nextRoundReadyAt = nextRoundReadyAtMs(
+            finishedAnnouncement?.createdAt,
+            nextRoundDelaySeconds,
+          );
+          const nextRoundDelayPending =
+            !bankerRepostCancelled
+            && nextRoundReadyAt !== null
+            && now.getTime() < nextRoundReadyAt;
           if (continuationRejected && previous) {
+            if (nextRoundDelayPending) continue;
             await rejectInsufficientContinuation({
               previousRoundId: previous.id,
             }).catch((error) => {
@@ -609,7 +624,6 @@ export class RoundScheduler {
           }
           let continuationError: ReturnType<typeof bankerContinuationError> | undefined;
           if (previous?.bankerId && previous.configSnapshot) {
-            const continuationSettings = parseSettingsSnapshot(previous.configSnapshot);
             continuationError = bankerContinuationError({
               previous: {
                 ...previous,
@@ -617,7 +631,7 @@ export class RoundScheduler {
               },
               next: waiting,
               userId: previous.bankerId,
-              windowSeconds: continuationSettings.round.continuationWindowSeconds,
+              windowSeconds: previousRoundSettings.continuationWindowSeconds,
               now,
             });
           }
@@ -630,6 +644,7 @@ export class RoundScheduler {
               continue;
             }
             if (!funding.sufficient && !funding.autoFundableVirtual) {
+              if (nextRoundDelayPending) continue;
               await rejectInsufficientContinuation({
                 previousRoundId: previous.id,
                 requiredCents: funding.requiredCents,
@@ -662,6 +677,7 @@ export class RoundScheduler {
           ) {
             continue;
           }
+          if (nextRoundDelayPending) continue;
 
           if (continuationError === 'CONTINUATION_WINDOW_EXPIRED' && previous) {
             await appendSystemChatOnce(

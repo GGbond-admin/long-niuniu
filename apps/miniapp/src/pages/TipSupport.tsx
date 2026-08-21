@@ -151,12 +151,7 @@ export default function TipSupport({
       <main className="tip-page-body">
         <section className="tip-page-payee" aria-labelledby="tip-page-title">
           <span className="tip-page-avatar" aria-hidden>
-            <svg viewBox="0 0 24 24">
-              <path d="M5 12a7 7 0 0 1 14 0" />
-              <path d="M5 12v4a2 2 0 0 0 2 2h1v-6H5Z" />
-              <path d="M19 12v4a2 2 0 0 1-2 2h-1v-6h3Z" />
-              <path d="M16 18c-.7 1.2-1.9 2-4 2" />
-            </svg>
+            <img src="/avatars/support-girl.jpg" alt="" />
           </span>
           <div className="tip-page-payee-copy">
             <small>转账给</small>

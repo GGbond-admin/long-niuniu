@@ -90,7 +90,7 @@ const supremeSections: GameRuleDocumentInput['sections'] = [
       '1. 大厅阶段\n' +
       '玩家进入对应群组房间等待开局；系统在凑够最低人数后自动开启下一局。\n' +
       '2. 上庄 · 竞标庄钱\n' +
-      '所有玩家可在倒计时内输入整数金额竞标庄钱；首口自由输入，之后最低需要比当前最高价高 100，也可以加更多，低于最低加价会被拒绝。最高出价者成为本局庄家，相应金额从余额中冻结作「庄池」。\n' +
+      '所有玩家可在倒计时内输入整数金额竞标庄钱；多人可同时出价，系统收下每一口有效金额，截标锁定最高有效价为庄家。想超当前最高，建议至少加 100。最高出价者的金额从余额中冻结作「庄池」。\n' +
       '续庄：上一局做庄的玩家如果选择续庄，将沿用上一局的庄钱继续做庄，无需再次竞标；同一玩家每桌仅可续庄一次。\n' +
       '无人竞标庄钱：本局取消，不进入下注阶段。\n' +
       '余额不足：系统会拒绝竞标并退回出价。\n' +
@@ -109,7 +109,7 @@ const supremeSections: GameRuleDocumentInput['sections'] = [
       '闲家赢：庄家从庄池支付倍数 × 下注，平台抽取闲赢抽水（默认 3%）。\n' +
       '闲家输：按庄家牌型倍数从闲家预留金全额赔付；庄家抽水按本局对赌毛利的 5%，亏损不抽。\n' +
       '梭哈单：无论牌型多大，赢只按 1:1 拿等额下注（同样扣闲赢抽水）、输只赔等额下注。\n' +
-      '同牌型按该牌型规则比较；比较键相同则平局退回。\n' +
+      '同牌型按该牌型规则比较；比较键相同再比整笔金额，完全相同庄家赢。\n' +
       '7. 庄钱不足时的赔付顺序\n' +
       '庄钱就是庄家本局可赔付的最高金额，赔完即止。当庄钱不够赔付全部赢家时，普通与梭哈的赢家一起排队，按以下顺序依次赔付：\n' +
       '① 牌型等级高的先赔（梭哈也按自己抢到的牌型排队）；② 同牌型按该牌型比较规则（普通比点数；对子先后两位再前位；金牛比中间位；其余比金额）；③ 以上全同时下注时间早的先赔。\n' +
@@ -149,8 +149,9 @@ const supremeSections: GameRuleDocumentInput['sections'] = [
       '豹子 / 满牛 / 顺子 / 反顺 / 牛牛：比整笔金额。\n' +
       '对子：先比后两位（99 ＞ 88 ＞ … ＞ 11），后两位相同再比前一位（例：8.99 赢 9.88；9.22 赢 1.22）。\n' +
       '金牛：只比中间金额，前后不算（例：0.90 赢 0.10）。\n' +
-      '比较键相同：视为平局，本对不结算（双方下注金额原路返回）。\n' +
-      '例：1.22 平 1.22；2.80 平 2.80。',
+      '比较键相同：再比整笔金额，金额大者胜（例：10.50 赢 0.50）。\n' +
+      '完全相同：庄家赢（例：庄 1.22 对闲 1.22，庄赢）。\n' +
+      '免死（0.01）：本对判和，退回本金、不赔不赚。',
   },
   {
     id: 'banker',
@@ -396,7 +397,6 @@ export function ruleConfigSummary(settings: GameSettings) {
       multipliers: settings.hand.multipliers,
       normalMultipliers: settings.hand.normalMultipliers,
       bustThreshold: settings.hand.bustThreshold,
-      bustExemptSpecialHands: settings.hand.bustExemptSpecialHands,
     },
     betting: settings.betting,
     fees: settings.fees,
@@ -406,6 +406,7 @@ export function ruleConfigSummary(settings: GameSettings) {
       claimDurationSeconds: settings.round.claimDurationSeconds,
       continuationWindowSeconds:
         settings.round.continuationWindowSeconds,
+      nextRoundDelaySeconds: settings.round.nextRoundDelaySeconds,
       bankerBidMinCents: settings.round.bankerBidMinCents,
       bankerBidMaxCents: settings.round.bankerBidMaxCents,
     },

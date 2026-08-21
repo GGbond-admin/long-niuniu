@@ -243,9 +243,24 @@ describe('庄家投骰与整局重推', () => {
 
     await expect(runCeremony()).resolves.toEqual({
       kind: 'error',
-      message: '封盘确认中，还剩 5 秒；如需取消退款并重开，请发送 /重推',
+      message: '封盘确认中，还剩 5 秒；如需取消退款并重开，请发送 重推',
     });
     expect(memory.events.some((event) => event.type === 'BANKER_DICE')).toBe(false);
+  });
+
+  it('发送「重推」会取消退款并立即开启下一局', async () => {
+    memory.events.length = 0;
+    repostWindow(new Date(Date.now() + 5_000));
+    diceDeadline(new Date(Date.now() + 20_000));
+
+    const result = await handleRoomChatCommand({
+      roomId: 'room-1',
+      userId: 'banker-1',
+      content: '重推',
+    });
+
+    expect(result).toEqual({ kind: 'ok', action: 'repost', echo: '重推' });
+    expect(memory.cancelRound).toHaveBeenCalledWith('round-1', '庄家重推', 'banker-1');
   });
 
   it('/重推会取消退款并立即开启下一局，不会重新投骰', async () => {

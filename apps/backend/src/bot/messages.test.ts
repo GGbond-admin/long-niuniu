@@ -64,28 +64,28 @@ describe('成绩单文案', () => {
     const text = formatScoreboard(scoreboard).join('\n');
 
     expect(text).toContain(
-      `${SCOREBOARD_EMOJI.win} <b>@赢家</b> ·\n抢 1.11 · 下 8.00 · 赢→131.92`,
+      `${SCOREBOARD_EMOJI.win} <b>@赢家</b> ·\n抢 1.11 · 下 8 · 赢→131.92`,
     );
     expect(text).toContain(
       '上局 5001.11 · 本局 5133.03',
     );
     expect(text).toContain(
-      `${SCOREBOARD_EMOJI.lose} <b>@输家</b> ·\n抢 0.22 · 梭哈 2.00 · 输→23.28`,
+      `${SCOREBOARD_EMOJI.lose} <b>@输家</b> ·\n抢 0.22 · 梭哈 2 · 输→23.28`,
     );
     expect(text).toContain(
       '上局 5004.55 · 本局 4981.27',
     );
     expect(text).toContain(
-      `${SCOREBOARD_EMOJI.tie} <b>@平家</b> ·\n抢 2.80 · 下 10.00 · 水→0.00`,
+      `${SCOREBOARD_EMOJI.tie} <b>@平家</b> ·\n抢 2.8 · 下 10 · 水→0`,
     );
     expect(text).toContain(
-      `${SCOREBOARD_EMOJI.banker} <b>庄家 @庄家</b> ·\n抢 0.70 · 输→50.00`,
+      `${SCOREBOARD_EMOJI.banker} <b>庄家 @庄家</b> ·\n抢 0.7 · 输→50`,
     );
     expect(text).toContain('输 1 家 · 赢 1 家 · 水 1 家');
-    expect(text).toContain('上庄费-50.00 · 服务费-38.00 · 代包费-31.20');
-    expect(text).toContain('庄亏损-50.00');
-    expect(text).toContain('上庄积分：1000.00');
-    expect(text).toContain('庄总积分：950.00');
+    expect(text).toContain('上庄费-50 · 服务费-38 · 代包费-31.2');
+    expect(text).toContain('庄亏损-50');
+    expect(text).toContain('上庄积分：1000');
+    expect(text).toContain('庄总积分：950');
     expect(text).toMatch(
       /━━━━━━━━━━━━━━━━━━\n庄家走势\n3点 → 5点 → 4点 → 对子$/,
     );
@@ -135,8 +135,8 @@ describe('成绩单文案', () => {
     expect(text).toContain('<b>庄家 @复核庄家</b>');
     expect(text).toContain('备注：展示信息已核对');
     expect(text).toContain('本次仅更正展示文字，不影响账务。');
-    expect(text).toContain('抢 1.11 · 下 8.00 · 赢→131.92');
-    expect(text).toContain('抢 0.70 · 输→50.00');
+    expect(text).toContain('抢 1.11 · 下 8 · 赢→131.92');
+    expect(text).toContain('抢 0.7 · 输→50');
     expect(text).toMatch(
       /本次仅更正展示文字，不影响账务。\n━━━━━━━━━━━━━━━━━━\n庄家走势\n7点 → 对子$/,
     );
@@ -257,13 +257,13 @@ describe('成绩单文案', () => {
 
     const text = formatScoreboard(scoreboard).join('\n');
     expect(text).toContain(
-      `${SCOREBOARD_EMOJI.win} <b>@喝水玩家</b> ·\n抢 0.88 · 下 5.00 · 赢→0.00（喝水 · 庄钱已赔完）`,
+      `${SCOREBOARD_EMOJI.win} <b>@喝水玩家</b> ·\n抢 0.88 · 下 5 · 赢→0（喝水 · 庄钱已赔完）`,
     );
     expect(text).toContain(`${SCOREBOARD_EMOJI.banker} <b>庄家 @庄家</b>`);
     expect(text).toContain('输 1 家 · 赢 0 家 · 水 0 家');
-    expect(text).toContain('庄盈亏 0.00');
-    expect(text).toContain('上庄积分：1000.00');
-    expect(text).toContain('庄总积分：1000.00');
+    expect(text).toContain('庄盈亏 0');
+    expect(text).toContain('上庄积分：1000');
+    expect(text).toContain('庄总积分：1000');
     expect(text).not.toContain('服务费-');
   });
 });

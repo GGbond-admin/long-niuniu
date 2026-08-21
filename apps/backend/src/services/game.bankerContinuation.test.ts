@@ -124,6 +124,14 @@ const memory = vi.hoisted(() => {
   };
 
   const bankerBidApi = {
+    findUnique: async ({ where }: any) => {
+      const key = where.roundId_userId;
+      if (!key) return null;
+      const existing = [...bids.values()].find(
+        (bid) => bid.roundId === key.roundId && bid.userId === key.userId,
+      );
+      return existing ? { ...existing } : null;
+    },
     findFirst: async ({ where }: any) => {
       const matches = [...bids.values()]
         .filter((bid) => bid.roundId === where.roundId)
@@ -411,35 +419,28 @@ describe('庄家竞拍与续庄完整循环', () => {
     expect(memory.bids.size).toBe(0);
   });
 
-  it('首口保留用户出价，后续至少比当前最高价高 RM100', async () => {
+  it('多人可同时出价，截标锁定最高有效价；不能把自己已经出过的价改低', async () => {
     const first = await placeBankerBid('round-1', 'player-b', 40_000n);
     expect(first.amountCents).toBe(40_000n);
 
-    await expect(
-      placeBankerBid('round-1', 'banker-a', 49_000n),
-    ).rejects.toMatchObject({
-      code: 'BID_INCREMENT_TOO_LOW',
-      details: {
-        currentCents: 40_000n,
-        minimumCents: 50_000n,
-      },
-    });
+    const concurrent = await placeBankerBid('round-1', 'banker-a', 49_000n);
+    expect(concurrent.amountCents).toBe(49_000n);
+
+    const kept = await placeBankerBid('round-1', 'player-b', 30_000n);
+    expect(kept.amountCents).toBe(40_000n);
 
     const jumped = await placeBankerBid('round-1', 'banker-a', 900_000n);
     expect(jumped.amountCents).toBe(900_000n);
 
-    await expect(
-      placeBankerBid('round-1', 'player-b', 909_900n),
-    ).rejects.toMatchObject({
-      code: 'BID_INCREMENT_TOO_LOW',
-      details: {
-        currentCents: 900_000n,
-        minimumCents: 910_000n,
-      },
-    });
+    const raised = await placeBankerBid('round-1', 'player-b', 950_000n);
+    expect(raised.amountCents).toBe(950_000n);
 
-    const higher = await placeBankerBid('round-1', 'player-b', 950_000n);
-    expect(higher.amountCents).toBe(950_000n);
+    const closed = await closeBidding('round-1');
+    expect(closed).toMatchObject({
+      bankerId: 'player-b',
+      potCents: 950_000n,
+      phase: RoundPhase.BETTING,
+    });
   });
 
   it('名义截止后到 3/2/1 播报结束前仍可竞价，最终名单发出后拒绝', async () => {
@@ -487,7 +488,7 @@ describe('庄家竞拍与续庄完整循环', () => {
     expect(higher.extendedEndsAt?.getTime()).toBe(Date.now() + 5_000);
     expect(memory.rounds.get('round-1').bidEndsAt.getTime()).toBe(Date.now() + 5_000);
 
-    // 下一口只要求至少高 RM100，也可以主动加更多
+    // 下一口可以加更多，新的最高价才会重置 5 秒
     round.bidEndsAt = new Date(Date.now() + 3_000);
     const next = await placeBankerBid('round-1', 'player-b', 120_000n);
     expect(next.amountCents).toBe(120_000n);
@@ -500,6 +501,35 @@ describe('庄家竞拍与续庄完整循环', () => {
     expect(early.amountCents).toBe(150_000n);
     expect(early.extendedEndsAt).toBeNull();
     expect(memory.rounds.get('round-1').bidEndsAt.getTime()).toBe(Date.now() + 20_000);
+  });
+
+  it('出价超过可上庄余额时自动降到上限并标记调整', async () => {
+    const { maxAffordableBankerBidCents } = await import('../engine/fees.js');
+    memory.users.get('player-b').wallet.availableCents = 500_000n;
+    const cap = maxAffordableBankerBidCents(
+      500_000,
+      memory.settings.fees,
+      memory.settings.round.bankerBidMaxCents,
+    );
+    const result = await placeBankerBid('round-1', 'player-b', 1_000_000n);
+    expect(result.amountCents).toBe(BigInt(cap));
+    expect(result.adjusted).toBe(true);
+    expect(result.requestedAmountCents).toBe(1_000_000n);
+  });
+
+  it('可上庄余额不够出到当前最高时仍可按自己的上限出价，截标再取最高', async () => {
+    await placeBankerBid('round-1', 'banker-a', 400_000n);
+    memory.users.get('player-b').wallet.availableCents = 200_000n;
+    const { maxAffordableBankerBidCents } = await import('../engine/fees.js');
+    const cap = maxAffordableBankerBidCents(
+      200_000,
+      memory.settings.fees,
+      memory.settings.round.bankerBidMaxCents,
+    );
+    const result = await placeBankerBid('round-1', 'player-b', 500_000n);
+    expect(result.amountCents).toBe(BigInt(cap));
+    expect(result.adjusted).toBe(true);
+    expect(cap).toBeLessThan(400_000);
   });
 
   it('截标时跳过已失去资格的最高出价者', async () => {

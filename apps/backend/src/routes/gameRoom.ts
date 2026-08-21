@@ -11,6 +11,7 @@ import { z } from 'zod';
 import {
   bankerContinuationError,
   continuationDeadline,
+  nextRoundReadyAtMs,
 } from '../engine/bankerContinuation.js';
 import { bettingRange, toCentsBigInt } from '../engine/betting.js';
 import { prisma } from '../lib/prisma.js';
@@ -38,7 +39,6 @@ import { continueBankerWithFallback } from '../services/bankerContinuationFlow.j
 import {
   claimGroupPacket,
   groupPacketDetail,
-  pickTipMessage,
   sendGroupPacket,
   tipSupport,
 } from '../services/groupPacket.js';
@@ -70,6 +70,16 @@ import {
   GLOBAL_ROOM_MUTE_MESSAGE,
   roomMuteStateOf,
 } from '../services/roomModeration.js';
+import {
+  pickSupportThanksMessage,
+  sendSupportHostThanks,
+} from '../services/supportHost.js';
+import {
+  MY_HISTORY_MAX_ROUNDS,
+  buildMyHistoryItem,
+  summarizeMyHistory,
+  type MyHistoryItem,
+} from '../services/myHistory.js';
 
 const amountSchema = z.object({
   amount: z
@@ -363,10 +373,10 @@ async function buildRoomState(roomId: string, userId: string) {
     && new Date(repostEndsAt).getTime() > now.getTime();
 
   let continuation: { previousRoundId: string; mine: boolean; deadline: string } | null = null;
+  let nextRoundAt: string | null = null;
   if (
     room.roundStartMode === 'AUTO'
-    && lastFinished?.bankerId
-    && lastFinished.configSnapshot
+    && lastFinished?.configSnapshot
     && round
   ) {
     const windowSettings = parseSettingsSnapshot(lastFinished.configSnapshot);
@@ -376,25 +386,46 @@ async function buildRoomState(roomId: string, userId: string) {
     const continuationRejected = lastFinished.events.some(
       (event) => event.type === CONTINUATION_REJECTED_INSUFFICIENT,
     );
-    const eligibilityError = bankerContinuationError({
-      previous: {
-        ...lastFinished,
-        continuationStartedAt,
-      },
-      next: round,
-      userId: lastFinished.bankerId,
-      windowSeconds: windowSettings.round.continuationWindowSeconds,
-    });
+    const eligibilityError = lastFinished.bankerId
+      ? bankerContinuationError({
+          previous: {
+            ...lastFinished,
+            continuationStartedAt,
+          },
+          next: round,
+          userId: lastFinished.bankerId,
+          windowSeconds: windowSettings.round.continuationWindowSeconds,
+        })
+      : 'CONTINUATION_NOT_STARTED';
     const deadline = continuationDeadline(
       continuationStartedAt,
       windowSettings.round.continuationWindowSeconds,
     );
-    if (!continuationRejected && !eligibilityError && deadline !== null) {
+    if (
+      lastFinished.bankerId
+      && !continuationRejected
+      && !eligibilityError
+      && deadline !== null
+    ) {
       continuation = {
         previousRoundId: lastFinished.id,
         mine: lastFinished.bankerId === userId,
         deadline: new Date(deadline).toISOString(),
       };
+    }
+    const delayReadyAt = nextRoundReadyAtMs(
+      continuationStartedAt,
+      windowSettings.round.nextRoundDelaySeconds ?? 10,
+    );
+    const startAt = Math.max(delayReadyAt ?? 0, continuation?.deadline
+      ? Date.parse(continuation.deadline)
+      : 0);
+    if (
+      lastFinished.phase === RoundPhase.FINISHED
+      && continuationStartedAt
+      && startAt > now.getTime()
+    ) {
+      nextRoundAt = new Date(startAt).toISOString();
     }
   }
 
@@ -494,6 +525,7 @@ async function buildRoomState(roomId: string, userId: string) {
         }
       : null,
     continuation,
+    nextRoundAt,
     chatPolicy,
     pins,
     config: {
@@ -645,6 +677,43 @@ export async function gameRoomRoutes(app: FastifyInstance) {
       );
     }
     return state;
+  });
+
+  /** 我的战绩：仅返回本人参与（下注或坐庄）且已结算局次的成绩清单。 */
+  app.get('/api/game/rooms/:id/my-history', { preHandler: player }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const userId = (req.user as { sub: string }).sub;
+    const member = await prisma.roomMember.findUnique({
+      where: { roomId_userId: { roomId: id, userId } },
+      select: { status: true },
+    });
+    if (member?.status !== 'ACTIVE') {
+      return reply.code(403).send({ error: 'NOT_IN_ROOM' });
+    }
+    const rounds = await prisma.round.findMany({
+      where: {
+        roomId: id,
+        phase: RoundPhase.FINISHED,
+        OR: [{ bankerId: userId }, { bets: { some: { userId } } }],
+      },
+      orderBy: { seqNo: 'desc' },
+      take: MY_HISTORY_MAX_ROUNDS,
+      select: {
+        id: true,
+        seqNo: true,
+        finishedAt: true,
+        bankerId: true,
+        scoreboard: { select: { playerLines: true, bankerSummary: true } },
+      },
+    });
+    const items = rounds
+      .map((round) => buildMyHistoryItem(round, userId))
+      .filter((item): item is MyHistoryItem => item !== null);
+    return {
+      maxRounds: MY_HISTORY_MAX_ROUNDS,
+      summary: summarizeMyHistory(items),
+      items,
+    };
   });
 
   app.post('/api/game/rooms/:id/bid', { preHandler: player }, async (req) => {
@@ -882,7 +951,7 @@ export async function gameRoomRoutes(app: FastifyInstance) {
     ]);
     if (!user) throw new GameError('USER_NOT_ACTIVE');
     const amount = String(amountCents);
-    const message = result.duplicate ? '打赏已确认，本次不会重复扣款。' : pickTipMessage();
+    const message = result.duplicate ? '打赏已确认，本次不会重复扣款。' : pickSupportThanksMessage();
     const nickname = user.nickname ?? user.uid;
     if (!result.duplicate) {
       appendChat(id, {
@@ -899,6 +968,12 @@ export async function gameRoomRoutes(app: FastifyInstance) {
           avatarUrl: user.avatarUrl,
         },
       });
+      await sendSupportHostThanks({
+        roomId: id,
+        requestId: body.requestId,
+        tipperUserId: userId,
+        message,
+      }).catch(() => false);
       await broadcastToRoomCluster(id, {
         type: 'tip_thanks',
         nickname,
@@ -1381,6 +1456,9 @@ export async function gameRoomRoutes(app: FastifyInstance) {
                       : parseAmountCents(result.echo),
                     extendedEndsAt: result.bidExtendedEndsAt ?? null,
                   }).catch(() => undefined);
+                }
+                if (result.notice) {
+                  reply({ type: 'chat_notice', message: result.notice, requestId });
                 }
               }
               await broadcastToRoomCluster(id, {

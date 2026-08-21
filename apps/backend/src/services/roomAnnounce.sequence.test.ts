@@ -44,6 +44,14 @@ const fixture = vi.hoisted(() => {
         type: 'BANKER_REPOST_WINDOW',
         payload: { endsAt: '2026-08-07T07:01:25.000Z', seconds: 5 },
       },
+      {
+        type: 'BANKER_DICE_DEADLINE',
+        payload: {
+          startsAt: '2026-08-07T07:01:25.000Z',
+          endsAt: '2026-08-07T07:01:40.000Z',
+          seconds: 15,
+        },
+      },
     ],
   };
   const templates = {
@@ -147,7 +155,8 @@ describe('阶段机器人播报顺序', () => {
       mode: 'repost',
       endsAt: '2026-08-07T07:01:25.000Z',
       template: 'dice-prompt @庄家 {{remaining}} 15',
-      afterTemplate: '⏳封盘确认已结束\n请庄家在 15 秒内完成投骰，超时自动取消并退款',
+      afterTemplate: '⏳封盘确认已结束\n请庄家在 {{remaining}} 秒内完成投骰，超时自动取消并退款',
+      afterEndsAt: '2026-08-07T07:01:40.000Z',
     });
   });
 
@@ -195,5 +204,17 @@ describe('阶段机器人播报顺序', () => {
       scoreboardChunkIndex: 0,
     });
     (fixture.round as any).scoreboard = null;
+  });
+
+  it('开始抢包只发一条合并文案', async () => {
+    const messages = await buildRoundAnnounceMessages({
+      roundId: 'round-1',
+      to: RoundPhase.CLAIMING,
+    });
+    expect(shape(messages)).toEqual(['banner:claim-start', 'claim-start']);
+    expect(messages[1]).toMatchObject({
+      kind: 'text',
+      content: 'claim-start 40',
+    });
   });
 });

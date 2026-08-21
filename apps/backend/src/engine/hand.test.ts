@@ -155,9 +155,9 @@ describe('比牌（06 文档 §2）', () => {
     const player = evaluateHand(toCents('9.22'));
     expect(compareHands(banker, player)).toBe(CompareResult.PLAYER_WIN);
   });
-  it('对子后两位与前位都相同才平局：1.22 平 1.22', () => {
+  it('对子完全相同 → 庄赢：庄 1.22 对闲 1.22', () => {
     expect(compareHands(evaluateHand(toCents('1.22')), evaluateHand(toCents('1.22')))).toBe(
-      CompareResult.TIE,
+      CompareResult.BANKER_WIN,
     );
   });
   it('对子先比后两位：8.99 赢 9.88', () => {
@@ -182,10 +182,10 @@ describe('比牌（06 文档 §2）', () => {
     expect(player.type).toBe(HandType.JINNIU);
     expect(compareHands(banker, player)).toBe(CompareResult.PLAYER_WIN);
   });
-  it('金牛中间位相同则平局，前后不算：0.50 平 10.50', () => {
+  it('金牛中间位相同再比整笔金额：10.50 赢 0.50', () => {
     const banker = evaluateHand(toCents('0.50'));
     const player = evaluateHand(toCents('10.50'));
-    expect(compareHands(banker, player)).toBe(CompareResult.TIE);
+    expect(compareHands(banker, player)).toBe(CompareResult.PLAYER_WIN);
   });
   it('普通先比点数：0.09（9点）赢 1.30（4点），即使金额更小', () => {
     const banker = evaluateHand(toCents('1.30'));
@@ -221,10 +221,10 @@ describe('比牌（06 文档 §2）', () => {
       CompareResult.PLAYER_WIN,
     );
   });
-  it('金额完全相同 → 平局', () => {
-    const a = evaluateHand(toCents('2.80'));
-    const b = evaluateHand(toCents('2.80'));
-    expect(compareHands(a, b)).toBe(CompareResult.TIE);
+  it('金额完全相同 → 庄赢', () => {
+    const banker = evaluateHand(toCents('2.80'));
+    const player = evaluateHand(toCents('2.80'));
+    expect(compareHands(banker, player)).toBe(CompareResult.BANKER_WIN);
   });
 });
 
@@ -286,20 +286,23 @@ describe('自爆（06 文档 §2.1）', () => {
     expect(h.type).toBe(HandType.NORMAL);
     expect(isBust(h)).toBe(true);
   });
-  it('特殊牌型豁免：金牛 0.10（1点）不自爆', () => {
+  it('特殊牌型永不自爆：金牛 0.10（1点）不自爆', () => {
     const h = evaluateHand(toCents('0.10'));
     expect(h.type).toBe(HandType.JINNIU);
     expect(h.points).toBe(1);
     expect(isBust(h)).toBe(false);
   });
-  it('豁免关闭时金牛 0.10 判自爆', () => {
-    const h = evaluateHand(toCents('0.10'));
-    expect(isBust(h, { ...DEFAULT_HAND_CONFIG, bustExemptSpecialHands: false })).toBe(true);
+  it('特殊牌型永不自爆：满牛 1.00（1点）不自爆，即使自爆线拉满', () => {
+    const h = evaluateHand(toCents('1.00'));
+    expect(h.type).toBe(HandType.MANNIU);
+    expect(h.points).toBe(1);
+    expect(isBust(h)).toBe(false);
+    expect(isBust(h, { ...DEFAULT_HAND_CONFIG, bustThreshold: 10 })).toBe(false);
   });
-  it('免死 0.01 永不自爆（即使豁免关闭）', () => {
+  it('免死 0.01 永不自爆', () => {
     const h = evaluateHand(toCents('0.01'));
     expect(h.type).toBe(HandType.MIANSI);
     expect(isBust(h)).toBe(false);
-    expect(isBust(h, { ...DEFAULT_HAND_CONFIG, bustExemptSpecialHands: false })).toBe(false);
+    expect(isBust(h, { ...DEFAULT_HAND_CONFIG, bustThreshold: 10 })).toBe(false);
   });
 });

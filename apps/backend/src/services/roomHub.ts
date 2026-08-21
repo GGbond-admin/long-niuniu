@@ -100,8 +100,10 @@ export type CountdownPayload = {
   endsAt?: string;
   /** 文案模板，可用 {{remaining}} */
   template?: string;
-  /** 倒计时结束后替换显示的文案 */
+  /** 倒计时结束后替换显示的文案，可用 {{remaining}} 接投骰时限 */
   afterTemplate?: string;
+  /** 结束后文案对应的截止时间，通常是庄家投骰时限 */
+  afterEndsAt?: string;
   /** lock 模式：当前展示的大号数字（3/2/1） */
   emoji?: string;
 };
@@ -1205,6 +1207,7 @@ export function ensureRoundAnnouncement(params: {
                     endsAt: message.endsAt,
                     template: message.template,
                     afterTemplate: message.afterTemplate,
+                    afterEndsAt: message.afterEndsAt,
                   } satisfies CountdownPayload),
                   from: null,
                 }, lease);

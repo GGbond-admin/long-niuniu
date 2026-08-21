@@ -23,6 +23,7 @@ import {
   unmuteGameAdminMember,
   updateGameAdminAssignment,
 } from '../services/gameAdmin.js';
+import { bindSupportHost, unbindSupportHost } from '../services/supportHost.js';
 
 const gameCodeSchema = z.string().trim().min(2).max(64).regex(/^[A-Z0-9_]+$/);
 const resourceIdSchema = z.string().trim().min(1).max(64);
@@ -223,6 +224,36 @@ export async function gameAdminRoutes(app: FastifyInstance) {
       return {
         items: await listGameAdminCandidates(gameCode, query.q, query.limit),
       };
+    },
+  );
+
+  app.put(
+    '/api/admin/games/:gameCode/support-host',
+    { preHandler: assignmentManagers },
+    async (req) => {
+      const { gameCode } = z.object({ gameCode: gameCodeSchema }).parse(req.params);
+      const { userId } = z.object({ userId: resourceIdSchema }).parse(req.body);
+      const host = await bindSupportHost({
+        gameCode,
+        userId,
+        platformAdminId: (req.user as { sub: string }).sub,
+        ip: req.ip,
+      });
+      return { ok: true, host };
+    },
+  );
+
+  app.delete(
+    '/api/admin/games/:gameCode/support-host',
+    { preHandler: assignmentManagers },
+    async (req) => {
+      const { gameCode } = z.object({ gameCode: gameCodeSchema }).parse(req.params);
+      await unbindSupportHost({
+        gameCode,
+        platformAdminId: (req.user as { sub: string }).sub,
+        ip: req.ip,
+      });
+      return { ok: true, host: null };
     },
   );
 

@@ -135,7 +135,7 @@ vi.mock('./gameSettings.js', () => ({
     },
   })),
   parseSettingsSnapshot: vi.fn(() => ({
-    round: { continuationWindowSeconds: 15 },
+    round: { continuationWindowSeconds: 15, nextRoundDelaySeconds: 10 },
   })),
 }));
 
@@ -273,6 +273,57 @@ describe('续庄窗口结束后的调度', () => {
       'room-1',
       'round-1',
     );
+  });
+
+  it('续庄局结束后，成绩单公布未满设定秒数时不立刻开下一局', async () => {
+    memory.previous.isContinued = true;
+    memory.previous.continuationUsed = true;
+    memory.previous.events = [
+      {
+        type: 'ROOM_ANNOUNCED_FINISHED',
+        createdAt: new Date('2026-08-07T07:00:15.000Z'),
+      },
+    ];
+    const scheduler = new RoundScheduler();
+    await scheduler.tick();
+
+    expect(memory.startRound).not.toHaveBeenCalled();
+    expect(memory.appendSystemChatOnce).not.toHaveBeenCalled();
+  });
+
+  it('续庄局结束后，成绩单公布满设定秒数再公开竞标', async () => {
+    memory.previous.isContinued = true;
+    memory.previous.continuationUsed = true;
+    const scheduler = new RoundScheduler();
+    await scheduler.tick();
+
+    expect(memory.startRound).toHaveBeenCalledWith(
+      'round-2',
+      false,
+      undefined,
+      'AUTO',
+    );
+  });
+
+  it('余额不足降级也要等成绩单阅读时间结束后再公开竞标', async () => {
+    memory.previous.events = [
+      {
+        type: 'ROOM_ANNOUNCED_FINISHED',
+        createdAt: new Date('2026-08-07T07:00:15.000Z'),
+      },
+    ];
+    memory.bankerContinuationFunding.mockResolvedValue({
+      requiredCents: 80_000n,
+      availableCents: 10_000n,
+      sufficient: false,
+      autoFundableVirtual: false,
+    });
+
+    const scheduler = new RoundScheduler();
+    await scheduler.tick();
+
+    expect(memory.rejectInsufficientContinuation).not.toHaveBeenCalled();
+    expect(memory.startRound).not.toHaveBeenCalled();
   });
 
   it('成绩单完成事件落库前不启动续庄计时或公开竞标', async () => {

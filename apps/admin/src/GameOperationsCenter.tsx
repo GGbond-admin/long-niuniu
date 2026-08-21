@@ -384,7 +384,9 @@ function countdownDisplay(content: string, now: number): string {
     const payload = JSON.parse(content) as {
       mode?: string;
       endsAt?: string;
+      afterEndsAt?: string;
       template?: string;
+      afterTemplate?: string;
       emoji?: string;
     };
     if (payload.mode === 'lock') return payload.emoji || '3';
@@ -392,6 +394,22 @@ function countdownDisplay(content: string, now: number): string {
       ? Math.max(0, Math.ceil((new Date(payload.endsAt).getTime() - now) / 1_000))
       : 0;
     const template = payload.template || '⏰ 剩余 {{remaining}} 秒';
+    if (payload.mode === 'repost' && remaining <= 0) {
+      const afterRemaining = payload.afterEndsAt
+        ? Math.max(0, Math.ceil((new Date(payload.afterEndsAt).getTime() - now) / 1_000))
+        : null;
+      const after =
+        payload.afterTemplate
+        || '⏳封盘确认已结束\n请庄家在 {{remaining}} 秒内完成投骰，超时自动取消并退款';
+      if (afterRemaining !== null && afterRemaining > 0) {
+        if (after.includes('{{remaining}}')) {
+          return after.replace(/\{\{\s*remaining\s*\}\}/g, String(afterRemaining));
+        }
+        return after.replace(/在\s*\d+\s*秒内/, `在 ${afterRemaining} 秒内`);
+      }
+      if (afterRemaining === 0) return '⏳投骰时间已结束\n本局正在自动取消并退款';
+      return after.replace(/\{\{\s*remaining\s*\}\}/g, '0');
+    }
     return template.replace(/\{\{\s*remaining\s*\}\}/g, String(remaining));
   } catch {
     return content;

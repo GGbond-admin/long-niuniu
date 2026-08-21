@@ -1,4 +1,5 @@
 import type { GameError } from './game.js';
+import { fromCents } from '../engine/betting.js';
 
 /**
  * 玩家可见错误的统一中文文案。
@@ -7,12 +8,14 @@ import type { GameError } from './game.js';
  */
 
 function formatRangeAmount(value: unknown): string | null {
-  if (typeof value === 'bigint') return (Number(value) / 100).toFixed(2);
-  if (typeof value === 'string' && /^\d+$/.test(value)) {
-    return (Number(value) / 100).toFixed(2);
+  try {
+    if (typeof value === 'bigint') return fromCents(value);
+    if (typeof value === 'string' && /^-?\d+$/.test(value)) return fromCents(value);
+    if (typeof value === 'number' && Number.isFinite(value)) return fromCents(Math.round(value));
+    return null;
+  } catch {
+    return null;
   }
-  if (typeof value !== 'number' || !Number.isFinite(value)) return null;
-  return (value / 100).toFixed(2);
 }
 
 function formatWholeRinggitAmount(value: unknown): string | null {
@@ -59,6 +62,7 @@ const GAME_ERROR_MESSAGES: Record<string, string> = {
   BID_MUST_BE_INTEGER: '竞标金额必须是整数，请勿输入小数',
   BID_INCREMENT_TOO_LOW: '竞标金额至少需要比当前最高价高 100',
   BID_OUT_OF_RANGE: '竞标金额超出范围',
+  BANKER_BID_CAP_TOO_LOW: '你目前账号里的余额不够出当前最低上庄价',
   BET_OUT_OF_RANGE: '下注金额超出范围',
   BELOW_BET_MIN: '低于最低下注金额',
   ABOVE_BET_MAX: '超过最高下注金额',
@@ -119,6 +123,18 @@ export function gameErrorMessage(error: GameError): string {
     const minimum = formatWholeRinggitAmount(error.details?.minimumCents);
     if (minimum) return `下一口最低 ${minimum}`;
   }
+  if (error.code === 'BANKER_BID_CAP_TOO_LOW') {
+    const max = formatWholeRinggitAmount(error.details?.maxCents);
+    const minimum = formatWholeRinggitAmount(error.details?.minimumCents);
+    const maxCents = Number(error.details?.maxCents ?? 0);
+    if (!Number.isFinite(maxCents) || maxCents < 100) {
+      return '你目前账号里的余额预留下庄费和服务费后无法上庄';
+    }
+    if (max && minimum) {
+      return `你目前账号里的余额目前只能标 ${max} 的庄，低于当前最低出价 ${minimum}`;
+    }
+    if (max) return `你目前账号里的余额目前只能标 ${max} 的庄`;
+  }
   const rangeKey = GAME_ERROR_AMOUNT_KEY[error.code];
   if (rangeKey) {
     const amount = formatRangeAmount(error.details?.[rangeKey]);
@@ -172,6 +188,11 @@ const CANCEL_REASON_MESSAGES: Record<string, string> = {
 };
 
 /** 取消原因：内部码映射为中文；运营填写的自由文本原样透出。 */
+export function bankerBidAdjustedNotice(maxCents: unknown): string {
+  const amount = formatWholeRinggitAmount(maxCents) ?? '该金额';
+  return `你目前账号里的余额目前只能标 ${amount} 的庄，已按此金额出价`;
+}
+
 export function cancelReasonText(reason: string | null | undefined): string {
   if (!reason) return '运营取消';
   return CANCEL_REASON_MESSAGES[reason] ?? reason;

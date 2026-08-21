@@ -533,17 +533,45 @@ describe('单局结算（06 文档 §6 / 04 文档 T01–T08）', () => {
     expect(r2.totalRakeCents).toBe(0);
   });
 
-  it('T04 金额完全相同 → 平局不结算不抽水', () => {
+  it('T04 金额完全相同 → 庄赢（按庄家牌型倍数赔付）', () => {
     const r = settleRound({
       bankerUserId: 'banker',
-      bankerClaimCents: toCents('2.80'),
+      bankerClaimCents: toCents('2.80'), // 牛牛
       potCents: toCents('1000'),
-      players: [{ userId: 'p1', betCents: toCents('10'), claimCents: toCents('2.80') }],
+      players: [
+        { userId: 'p1', betCents: toCents('10'), claimCents: toCents('2.80'), reservedCents: toCents('170') },
+      ],
       handConfig,
     });
-    expect(r.pairs[0].outcome).toBe('TIE');
-    expect(r.pairs[0].rakeCents).toBe(0);
-    expect(r.stats.tie).toBe(1);
+    expect(r.pairs[0].outcome).toBe('BANKER_WIN');
+    expect(r.pairs[0].handMultiplier).toBe(10); // 牛牛 10 倍
+    expect(r.pairs[0].paidCents).toBe(toCents('100'));
+    expect(r.stats.playerLose).toBe(1);
+  });
+
+  it('比较键相同再比整笔金额：庄金牛 0.50 输给闲金牛 10.50', () => {
+    const r = settleRound({
+      bankerUserId: 'banker',
+      bankerClaimCents: toCents('0.50'),
+      potCents: toCents('1000'),
+      players: [{ userId: 'p1', betCents: toCents('10'), claimCents: toCents('10.50') }],
+      handConfig,
+    });
+    expect(r.pairs[0].outcome).toBe('PLAYER_WIN');
+  });
+
+  it('特殊牌型永不自爆：闲满牛 1.00（1点）赢庄牛牛 0.19', () => {
+    const r = settleRound({
+      bankerUserId: 'banker',
+      bankerClaimCents: toCents('0.19'), // 牛牛（10点）
+      potCents: toCents('1000'),
+      players: [{ userId: 'p1', betCents: toCents('53'), claimCents: toCents('1.00') }], // 满牛，点数 1
+      handConfig,
+    });
+    expect(r.pairs[0].isBustPlayer).toBe(false);
+    expect(r.pairs[0].outcome).toBe('PLAYER_WIN');
+    expect(r.pairs[0].handMultiplier).toBe(15); // 满牛 15 倍
+    expect(r.pairs[0].paidCents).toBe(toCents('795')); // 53 × 15
   });
 
   it('同点（10点）比金额：2.80 赢 1.09', () => {

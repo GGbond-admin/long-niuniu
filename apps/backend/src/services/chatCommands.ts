@@ -1,5 +1,5 @@
 /**
- * 网页互动群聊天指令：数字竞标/下注、sh 梭哈、0 撤回、/重推整局。
+ * 网页互动群聊天指令：数字竞标/下注、sh 梭哈、0 撤回、发送「重推」整局。
  */
 import { RoundPhase } from '@prisma/client';
 import { fromCents, toCentsBigInt } from '../engine/betting.js';
@@ -31,7 +31,7 @@ import {
   roomChatPolicyMessage,
 } from './roomChatPolicy.js';
 import { WalletError } from './wallet.js';
-import { gameErrorMessage, walletErrorMessage } from './errorMessages.js';
+import { gameErrorMessage, walletErrorMessage, bankerBidAdjustedNotice } from './errorMessages.js';
 
 export type ChatCommandAction =
   | 'repost'
@@ -65,6 +65,8 @@ export type ChatCommandResult =
       acceptance?: BetAcceptanceDetails;
       /** 竞标防狙击：最后 5 秒新高价触发的新截止时间 */
       bidExtendedEndsAt?: Date;
+      /** 出价被余额上限截断后的说明，成功落标仍发给本人 */
+      notice?: string;
     }
   | {
       kind: 'error';
@@ -119,10 +121,6 @@ export function privateBetConfirmationFor(
       };
 }
 
-function compactMoney(cents: bigint): string {
-  return fromCents(cents).replace(/\.00$/, '').replace(/(\.\d)0$/, '$1');
-}
-
 function parseCommandAmountCents(amount: string): bigint {
   try {
     return toCentsBigInt(amount);
@@ -145,7 +143,7 @@ function successfulBetCommand(
   const acceptedCents = result?.acceptedCents ?? requestedCents;
   const adjusted = result?.adjusted ?? acceptedCents !== requestedCents;
   const echo = adjusted
-    ? `${action === 'all_in' ? 'sh' : ''}${compactMoney(acceptedCents)}`
+    ? `${action === 'all_in' ? 'sh' : ''}${fromCents(acceptedCents)}`
     : originalEcho;
   const acceptance =
     result?.liabilityBalanceCents !== undefined
@@ -295,7 +293,7 @@ export async function throwBankerDice(params: {
       );
       return {
         kind: 'error',
-        message: `封盘确认中，还剩 ${remaining} 秒；如需取消退款并重开，请发送 /重推`,
+        message: `封盘确认中，还剩 ${remaining} 秒；如需取消退款并重开，请发送 重推`,
       };
     }
     const diceDeadline = await prisma.roundEvent.findFirst({
@@ -598,7 +596,7 @@ export async function handleRoomChatCommand(params: {
     return { kind: 'muted', message: roomChatPolicyMessage(chatPolicy) };
   }
 
-  // /重推：封盘确认窗口内由庄家取消整局、原路退款，并立即准备下一局。
+  // 重推：封盘确认窗口内由庄家发送「重推」取消整局、原路退款，并立即准备下一局。
   if (repostCommand) {
     try {
       const locked = await withRedisLock(
@@ -719,6 +717,7 @@ export async function handleRoomChatCommand(params: {
         action: 'bid',
         echo: (acceptedAmountCents / 100n).toString(),
         amountCents: acceptedAmountCents.toString(),
+        ...(bid.adjusted ? { notice: bankerBidAdjustedNotice(acceptedAmountCents) } : {}),
         ...(bid?.extendedEndsAt ? { bidExtendedEndsAt: bid.extendedEndsAt } : {}),
       };
     } catch (e) {

@@ -19,7 +19,12 @@ import {
   MAX_MONEY_CENTS,
   type BetAdjustmentReason,
 } from '../engine/betting.js';
-import { bankerSeatFee, packetTotal } from '../engine/fees.js';
+import {
+  bankerBidReserveCents,
+  bankerSeatFee,
+  maxAffordableBankerBidCents,
+  packetTotal,
+} from '../engine/fees.js';
 import { evaluateHand, HAND_LABEL, maxPayoutMultiplier } from '../engine/hand.js';
 import {
   effectiveTurnoverForBanker,
@@ -362,11 +367,11 @@ export async function startRound(
 }
 
 /**
- * 竞标防狙击：主计时最后 5 秒内出现有效加价时，把剩余时间拉回 5 秒。
- * 3/2/1 已开始后仍接受加价，但不再打断最终倒数。
+ * 竞标防狙击：主计时最后 5 秒内出现新的最高价时，把剩余时间拉回 5 秒。
+ * 3/2/1 已开始后仍接受出价，但不再打断最终倒数。
  */
 const BID_EXTENSION_WINDOW_MS = 5_000;
-/** 首口之后，玩家出价必须至少比当前最高价高 RM100。 */
+/** 播报「下一口参考」与假人加价步长：当前最高 + RM100。截标仍按全场最高有效价锁定庄家。 */
 export const BANKER_BID_INCREMENT_CENTS = 10_000n;
 
 export async function placeBankerBid(roundId: string, userId: string, amountCents: bigint) {
@@ -384,44 +389,80 @@ export async function placeBankerBid(roundId: string, userId: string, amountCent
     });
     if (finalListSent) throw new GameError('PHASE_ENDED');
 
-    const topBid = await tx.bankerBid.findFirst({
-      where: { roundId },
-      orderBy: [{ amountCents: 'desc' }, { createdAt: 'asc' }],
-      select: { amountCents: true },
-    });
-    if (topBid) {
-      const minimumCents = topBid.amountCents + BANKER_BID_INCREMENT_CENTS;
-      if (amountCents < minimumCents) {
-        throw new GameError('BID_INCREMENT_TOO_LOW', {
-          currentCents: topBid.amountCents,
-          minimumCents,
-          incrementCents: BANKER_BID_INCREMENT_CENTS,
-        });
-      }
-    }
-    const acceptedAmountCents = amountCents;
+    const [topBid, ownBid] = await Promise.all([
+      tx.bankerBid.findFirst({
+        where: { roundId },
+        orderBy: [{ amountCents: 'desc' }, { createdAt: 'asc' }],
+        select: { amountCents: true },
+      }),
+      tx.bankerBid.findUnique({
+        where: { roundId_userId: { roundId, userId } },
+        select: { amountCents: true },
+      }),
+    ]);
     const settings = parseSettingsSnapshot(round.configSnapshot);
-    const amount = safeNumber(acceptedAmountCents, 'bid');
-    if (
-      amount < settings.round.bankerBidMinCents ||
-      amount > settings.round.bankerBidMaxCents
-    ) {
+    const user = await requireGameUser(tx, userId, round.roomId, 'bid');
+    const roomMinCents = BigInt(settings.round.bankerBidMinCents);
+    const roomMaxCents = BigInt(settings.round.bankerBidMaxCents);
+    const walletCapCents = BigInt(
+      maxAffordableBankerBidCents(
+        safeNumber(user.wallet.availableCents, 'available'),
+        settings.fees,
+        settings.round.bankerBidMaxCents,
+      ),
+    );
+    if (amountCents > roomMaxCents) {
       throw new GameError('BID_OUT_OF_RANGE', {
         minCents: settings.round.bankerBidMinCents,
         maxCents: settings.round.bankerBidMaxCents,
       });
     }
-    const user = await requireGameUser(tx, userId, round.roomId, 'bid');
-    const baseFees =
-      bankerSeatFee(amount, settings.fees) + settings.fees.serviceFeeCents;
-    if (user.wallet.availableCents < acceptedAmountCents + BigInt(baseFees)) {
-      throw new GameError('INSUFFICIENT_BALANCE');
+    let acceptedAmountCents = amountCents;
+    let adjusted = false;
+    if (acceptedAmountCents > walletCapCents) {
+      if (walletCapCents < roomMinCents) {
+        throw new GameError('BANKER_BID_CAP_TOO_LOW', {
+          maxCents: walletCapCents,
+          minimumCents: roomMinCents,
+        });
+      }
+      acceptedAmountCents = walletCapCents;
+      adjusted = true;
+    } else if (acceptedAmountCents < roomMinCents) {
+      throw new GameError('BID_OUT_OF_RANGE', {
+        minCents: settings.round.bankerBidMinCents,
+        maxCents: settings.round.bankerBidMaxCents,
+      });
     }
-    // 收官前 5 秒内若出现新的最高价，则把倒计时重置为 5 秒，给他人反超空间
+    // 多人可同时出价；各自金额都收下，截标再取最高。不能把自己已经出过的价改低。
+    if (ownBid && acceptedAmountCents < ownBid.amountCents) {
+      acceptedAmountCents = ownBid.amountCents;
+    }
+    const amount = safeNumber(acceptedAmountCents, 'bid');
+    if (user.wallet.availableCents < BigInt(bankerBidReserveCents(amount, settings.fees))) {
+      throw new GameError('BANKER_BID_CAP_TOO_LOW', {
+        maxCents: walletCapCents,
+        minimumCents: roomMinCents,
+      });
+    }
+    if (ownBid && acceptedAmountCents === ownBid.amountCents) {
+      const existing = await tx.bankerBid.findUnique({
+        where: { roundId_userId: { roundId, userId } },
+      });
+      if (!existing) throw new GameError('ROUND_NOT_FOUND');
+      return {
+        ...existing,
+        extendedEndsAt: null,
+        requestedAmountCents: amountCents,
+        adjusted,
+      };
+    }
+    // 只有新的全场最高价才重置最后 5 秒，避免同时喊低价把倒计时一直拉长。
     const now = Date.now();
     let extendedEndsAt: Date | null = null;
-    if (round.bidEndsAt.getTime() - now <= BID_EXTENSION_WINDOW_MS) {
-      // 3 已经播出后保持 3→2→1 连续推进；期间仍可继续按 RM100 加价。
+    const isNewHigh = acceptedAmountCents > (topBid?.amountCents ?? 0n);
+    if (isNewHigh && round.bidEndsAt.getTime() - now <= BID_EXTENSION_WINDOW_MS) {
+      // 3 已经播出后保持 3→2→1 连续推进；期间仍可继续出价。
       const finalCountdownStarted = await tx.roundEvent.findFirst({
         where: { roundId, type: 'BID_COUNTDOWN_3' },
         select: { id: true },
@@ -458,7 +499,7 @@ export async function placeBankerBid(roundId: string, userId: string, amountCent
       { amountCents: String(acceptedAmountCents) },
       userId,
     );
-    return { ...bid, extendedEndsAt };
+    return { ...bid, extendedEndsAt, requestedAmountCents: amountCents, adjusted };
   });
 }
 
@@ -486,8 +527,7 @@ export async function closeBidding(roundId: string) {
         throw error;
       }
       const amount = safeNumber(bid.amountCents, 'bid');
-      const baseFees = bankerSeatFee(amount, settings.fees) + settings.fees.serviceFeeCents;
-      const required = bid.amountCents + BigInt(baseFees);
+      const required = BigInt(bankerBidReserveCents(amount, settings.fees));
       if (bidder.wallet.availableCents >= required) {
         winningBid = bid;
         reserveCents = required;

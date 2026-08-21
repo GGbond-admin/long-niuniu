@@ -61,9 +61,8 @@ async function loadRound(roundId: string) {
       packet: true,
       scoreboard: true,
       events: {
-        where: { type: 'BANKER_REPOST_WINDOW' },
+        where: { type: { in: ['BANKER_REPOST_WINDOW', 'BANKER_DICE_DEADLINE'] } },
         select: { type: true, payload: true },
-        take: 1,
       },
     },
   });
@@ -118,6 +117,7 @@ export type AnnounceMessage = (
       endsAt: string;
       template: string;
       afterTemplate?: string;
+      afterEndsAt?: string;
     }
 ) & {
   /** 发送本条前等待的毫秒数：给红包卡片留出停留时间，避免立刻被顶出屏幕 */
@@ -153,6 +153,7 @@ function countdown(
   endsAt: Date | null | undefined,
   template: string,
   afterTemplate?: string,
+  afterEndsAt?: Date | null,
 ): AnnounceMessage | null {
   if (!endsAt) return null;
   return {
@@ -161,6 +162,7 @@ function countdown(
     endsAt: endsAt.toISOString(),
     template: stripHtml(template),
     afterTemplate: afterTemplate ? stripHtml(afterTemplate) : undefined,
+    afterEndsAt: afterEndsAt ? afterEndsAt.toISOString() : undefined,
   };
 }
 
@@ -217,7 +219,7 @@ export async function buildRoundAnnounceMessages(params: {
     const live = countdown(
       'bid',
       round.bidEndsAt,
-      '竞标倒计时 · 还剩 {{remaining}} 秒\n首次报整数，后续每次至少加 100。',
+      '竞标倒计时 · 还剩 {{remaining}} 秒\n直接发送整数金额即可，截标取最高。',
     );
     if (live) messages.push(live);
     return messages;
@@ -281,11 +283,19 @@ export async function buildRoundAnnounceMessages(params: {
     const repostEndsAt = eventEndsAt(
       round.events.find((item) => item.type === 'BANKER_REPOST_WINDOW')?.payload,
     );
+    const diceEndsAt =
+      eventEndsAt(
+        round.events.find((item) => item.type === 'BANKER_DICE_DEADLINE')?.payload,
+      )
+      ?? (repostEndsAt
+        ? new Date(repostEndsAt.getTime() + diceSeconds * 1_000)
+        : null);
     const live = countdown(
       'repost',
       repostEndsAt,
       prompt,
-      `⏳封盘确认已结束\n请庄家在 ${diceSeconds} 秒内完成投骰，超时自动取消并退款`,
+      `⏳封盘确认已结束\n请庄家在 {{remaining}} 秒内完成投骰，超时自动取消并退款`,
+      diceEndsAt,
     );
     return [
       banner('bet-stop'),
@@ -302,10 +312,6 @@ export async function buildRoundAnnounceMessages(params: {
       banner('claim-start'),
       {
         ...text(stripHtml(renderMessage(templates.claimStart, { claimSeconds }))),
-        delayMs: 2_000,
-      },
-      {
-        ...text(stripHtml(renderMessage(templates.claimWarning, { claimSeconds }))),
         delayMs: 2_000,
       },
     ];

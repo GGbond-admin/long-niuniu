@@ -70,7 +70,8 @@ export async function getProfitPoolConfig(): Promise<ProfitPoolConfig> {
 }
 
 async function lockProfitPoolStructure(tx: Prisma.TransactionClient): Promise<void> {
-  await tx.$queryRaw`SELECT pg_advisory_xact_lock(784526190817::bigint)`;
+  // pg_advisory_xact_lock 返回 void；Prisma 6 的 $queryRaw 无法反序列化该列，必须用 $executeRaw。
+  await tx.$executeRaw`SELECT pg_advisory_xact_lock(784526190817::bigint)`;
 }
 
 export async function setProfitPoolConfig(
