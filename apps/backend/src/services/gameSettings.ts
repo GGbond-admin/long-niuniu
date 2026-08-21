@@ -587,6 +587,14 @@ function normalizeFeeSnapshot(rawFees: Partial<FeeConfig> | undefined): FeeConfi
   return merged;
 }
 
+function normalizeBettingSnapshot(rawBetting: Partial<BettingConfig> | undefined): BettingConfig {
+  const { playerCoefTiers: _legacy, ...rest } = {
+    ...DEFAULT_BETTING_CONFIG,
+    ...(rawBetting ?? {}),
+  } as BettingConfig & { playerCoefTiers?: unknown };
+  return rest;
+}
+
 export function parseSettingsSnapshot(value: Prisma.JsonValue | null): GameSettings {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new Error('ROUND_CONFIG_SNAPSHOT_MISSING');
@@ -602,7 +610,7 @@ export function parseSettingsSnapshot(value: Prisma.JsonValue | null): GameSetti
         ...raw.hand?.normalMultipliers,
       },
     },
-    betting: { ...DEFAULT_BETTING_CONFIG, ...raw.betting },
+    betting: normalizeBettingSnapshot(raw.betting),
     fees: normalizeFeeSnapshot(raw.fees),
     rebate: { ...DEFAULT_REBATE_CONFIG, ...raw.rebate },
     round: { ...DEFAULT_ROUND_CONFIG, ...raw.round },
@@ -625,16 +633,6 @@ const configSchemas = {
       shMinCents: z.number().int().min(1).max(100_000_000).optional(),
       betRatio: z.number().positive().max(1).optional(),
       shRatio: z.number().positive().max(1).optional(),
-      playerCoefTiers: z
-        .array(
-          z.object({
-            maxPlayers: z.number().int().min(1).max(100_000),
-            coef: z.number().positive().max(100),
-          }),
-        )
-        .min(1)
-        .max(20)
-        .optional(),
     })
     .strict()
     .superRefine((value, ctx) => {
@@ -647,32 +645,6 @@ const configSchemas = {
           code: z.ZodIssueCode.custom,
           message: 'BET_MIN_EXCEEDS_ALL_IN_MIN',
           path: ['betMinCents'],
-        });
-      }
-      const tiers = value.playerCoefTiers;
-      if (!tiers) return;
-      for (let index = 1; index < tiers.length; index += 1) {
-        if (tiers[index]!.maxPlayers <= tiers[index - 1]!.maxPlayers) {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            message: 'PLAYER_TIERS_MUST_ASCEND',
-            path: ['playerCoefTiers', index, 'maxPlayers'],
-          });
-        }
-      }
-      const terminalIndex = tiers.findIndex((tier) => tier.maxPlayers >= 100);
-      if (terminalIndex >= 0 && terminalIndex !== tiers.length - 1) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: 'PLAYER_TIER_AFTER_TERMINAL',
-          path: ['playerCoefTiers', terminalIndex + 1],
-        });
-      }
-      if (tiers[tiers.length - 1]!.maxPlayers < 100) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: 'PLAYER_TIERS_MUST_COVER_ROOM_CAPACITY',
-          path: ['playerCoefTiers', tiers.length - 1, 'maxPlayers'],
         });
       }
     }),

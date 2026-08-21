@@ -24,37 +24,6 @@ describe('游戏配置跨字段校验', () => {
     ).toThrow();
   });
 
-  it('拒绝人数分档乱序或在覆盖房间上限后继续追加', () => {
-    expect(() =>
-      validateGameConfig('betting', {
-        playerCoefTiers: [
-          { maxPlayers: 20, coef: 1.5 },
-          { maxPlayers: 9, coef: 2 },
-        ],
-      }),
-    ).toThrow();
-    expect(() =>
-      validateGameConfig('betting', {
-        playerCoefTiers: [
-          { maxPlayers: 100, coef: 1.5 },
-          { maxPlayers: 9999, coef: 1 },
-        ],
-      }),
-    ).toThrow();
-  });
-
-  it('接受严格递增且覆盖最大房间人数的分档', () => {
-    expect(
-      validateGameConfig('betting', {
-        playerCoefTiers: [
-          { maxPlayers: 9, coef: 2 },
-          { maxPlayers: 20, coef: 1.5 },
-          { maxPlayers: 100, coef: 1 },
-        ],
-      }),
-    ).toBeTruthy();
-  });
-
   it('封盘重推确认窗口只允许 3 至 30 秒', () => {
     expect(() =>
       validateGameConfig('round', { repostWindowSeconds: 2 }),

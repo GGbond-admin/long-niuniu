@@ -11,7 +11,6 @@ import {
 } from '../bot/messages.js';
 import { prisma } from '../lib/prisma.js';
 import { cancelReasonText } from './errorMessages.js';
-import { countEligiblePlayers } from './eligiblePlayers.js';
 import {
   getMessageTemplatesForRoom,
   parseSettingsSnapshot,
@@ -225,9 +224,8 @@ export async function buildRoundAnnounceMessages(params: {
   }
 
   if (params.to === RoundPhase.BETTING) {
-    const players = await countEligiblePlayers(round.room.id);
     const range = settings
-      ? bettingRange(Number(round.potCents), Math.max(players, 1), settings.betting)
+      ? bettingRange(Number(round.potCents), settings.betting)
       : null;
     const bankerLabel = banker ? mention(banker) : '—';
     const pot = fromCents(round.potCents);

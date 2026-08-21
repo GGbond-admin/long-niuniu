@@ -12,36 +12,33 @@ import {
 } from './betting.js';
 import { dailyCommission } from './rebate.js';
 
-// 用系数=1 的档位来校验基础公式
-const flatConfig = {
-  ...DEFAULT_BETTING_CONFIG,
-  playerCoefTiers: [{ maxPlayers: Infinity, coef: 1.0 }],
-};
-
 describe('动态范围（06 文档 §3）', () => {
   it('庄钱 25000 → 满注 0.6% 为 3~150，满梭哈 5% 为 30~1250', () => {
-    const r = bettingRange(toCents('25000'), 30, flatConfig);
+    const r = bettingRange(toCents('25000'));
     expect(r.betMinCents).toBe(toCents('3'));
     expect(r.betMaxCents).toBe(toCents('150'));
     expect(r.shMinCents).toBe(toCents('30'));
     expect(r.shMaxCents).toBe(toCents('1250'));
   });
-  it('庄钱 10000 → 下注 3~60，梭哈 30~500', () => {
-    const r = bettingRange(toCents('10000'), 30, flatConfig);
+  it('庄钱 10000、默认满注 0.6% → 下注上限 60，满梭哈 5% → 500', () => {
+    const r = bettingRange(toCents('10000'));
     expect(r.betMaxCents).toBe(toCents('60'));
     expect(r.shMaxCents).toBe(toCents('500'));
   });
-  it('庄钱 8540 → 下注上限 51.24', () => {
-    const r = bettingRange(toCents('8540'), 30, flatConfig);
+  it('后台满注 0.5%、满梭哈 5%：上庄 10000 → 3~50 / 30~500', () => {
+    const config = { ...DEFAULT_BETTING_CONFIG, betRatio: 0.005, shRatio: 0.05 };
+    const r = bettingRange(toCents('10000'), config);
+    expect(r.betMinCents).toBe(toCents('3'));
+    expect(r.betMaxCents).toBe(toCents('50'));
+    expect(r.shMinCents).toBe(toCents('30'));
+    expect(r.shMaxCents).toBe(toCents('500'));
+  });
+  it('庄钱 8540、默认 0.6% → 下注上限 51.24', () => {
+    const r = bettingRange(toCents('8540'));
     expect(r.betMaxCents).toBe(toCents('51.24'));
   });
-  it('人数少 → 系数上调（默认 <10 人 ×2）', () => {
-    const r = bettingRange(toCents('25000'), 8);
-    expect(r.betMaxCents).toBe(toCents('300')); // 150 × 2
-    expect(r.shMaxCents).toBe(toCents('2500')); // 1250 × 2
-  });
   it('庄钱再小也不关闭梭哈，普通/梭哈上限仍保底到最低额', () => {
-    const r = bettingRange(toCents('300'), 30, flatConfig);
+    const r = bettingRange(toCents('300'));
     expect(r.shMinCents).toBe(toCents('30'));
     expect(r.shMaxCents).toBe(toCents('30'));
     expect(validateBet(toCents('30'), true, r).ok).toBe(true);
@@ -49,7 +46,7 @@ describe('动态范围（06 文档 §3）', () => {
     expect(r.betMaxCents).toBe(toCents('3'));
   });
   it('范围校验：普通与梭哈都受房间上限', () => {
-    const r = bettingRange(toCents('25000'), 30, flatConfig);
+    const r = bettingRange(toCents('25000'));
     expect(validateBet(toCents('10'), false, r).ok).toBe(true);
     expect(validateBet(toCents('151'), false, r).ok).toBe(false);
     expect(validateBet(toCents('29.99'), true, r).ok).toBe(false);

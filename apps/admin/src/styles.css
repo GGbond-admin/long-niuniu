@@ -2538,6 +2538,10 @@ td button:hover, .actions button:hover, .panel-title > button:hover {
   background: #c6544b;
   box-shadow: 0 0 0 4px rgba(198, 84, 75, 0.12);
 }
+.ops-mode-status.preparing > i {
+  background: #d08a1a;
+  box-shadow: 0 0 0 4px rgba(208, 138, 26, 0.14);
+}
 .ops-mode-status span { min-width: 0; }
 .ops-mode-status strong {
   display: block;
@@ -2569,6 +2573,9 @@ td button:hover, .actions button:hover, .panel-title > button:hover {
   font-size: 8px;
   font-weight: 500;
   opacity: 0.68;
+}
+.ops-lifecycle-actions .ops-recover-table {
+  grid-column: 1 / -1;
 }
 .ops-room-controls .ops-end-game,
 .ops-room-controls .ops-mute-toggle.danger-action {

@@ -9,7 +9,6 @@ import { prisma } from '../lib/prisma.js';
 import { withRedisLock } from '../lib/redis.js';
 import { announceBidPlaced } from './bidAuction.js';
 import { runBankerDiceCeremony } from './chatCommands.js';
-import { countEligiblePlayers } from './eligiblePlayers.js';
 import {
   BANKER_BID_INCREMENT_CENTS,
   bankerContinuationFunding,
@@ -291,12 +290,6 @@ async function actOnBetPhase(roomId: string, roundId: string) {
   if (settings.round.assistantEnabled === false) return;
 
   const snap = parseSettingsSnapshot(round.configSnapshot);
-  const members = await countEligiblePlayers(roomId);
-  const range = bettingRange(
-    Number(round.potCents),
-    Math.max(1, members),
-    snap.betting,
-  );
 
   // 错开出手，避免同一秒全员下注
   let index = 0;
@@ -327,11 +320,7 @@ async function actOnBetPhase(roomId: string, roundId: string) {
       if (ownBet) return;
       await topUpVirtualIfNeeded(profile.userId);
 
-      const liveRange = bettingRange(
-        Number(current.potCents),
-        Math.max(1, members),
-        snap.betting,
-      );
+      const liveRange = bettingRange(Number(current.potCents), snap.betting);
 
       const availableCents = profile.user.wallet?.availableCents ?? 0n;
       const shMaxCents = BigInt(liveRange.shMaxCents);

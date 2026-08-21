@@ -35,7 +35,6 @@ import { blindIndex, decryptSecret, encryptSecret, normalizeIdentity } from '../
 import { prisma } from '../lib/prisma.js';
 import { checkTngClaimLink, checkTngDeepLink } from '../lib/tngPacketUrl.js';
 import { serializable } from '../lib/transaction.js';
-import { countEligiblePlayers } from './eligiblePlayers.js';
 import {
   getGameSettings,
   parseSettingsSnapshot,
@@ -542,10 +541,6 @@ export async function closeBidding(roundId: string) {
   });
 }
 
-async function activePlayerCount(tx: Tx, roomId: string): Promise<number> {
-  return countEligiblePlayers(roomId, tx);
-}
-
 export interface PlaceBetResult {
   bet: Bet;
   requestedCents: bigint;
@@ -578,10 +573,8 @@ export async function placeBet(
     if (round.bankerId === userId) throw new GameError('BANKER_CANNOT_BET');
     const user = await requireGameUser(tx, userId, round.roomId, isAllIn ? 'allIn' : 'bet');
     const settings = parseSettingsSnapshot(round.configSnapshot);
-    const players = await activePlayerCount(tx, round.roomId);
     const range = bettingRange(
       safeNumber(round.potCents, 'pot'),
-      Math.max(1, players),
       settings.betting,
     );
 

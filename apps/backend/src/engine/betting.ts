@@ -1,7 +1,7 @@
 /**
  * 动态下注范围 — 对应《06-公式与数值配置总表》第 3 节
- * 普通满注 = 庄钱 × 0.6% × 人数系数，再受「余额 ÷ 本局最高倍数」约束（向下取整到完整 RM）。
- * 满梭哈 = 庄钱 × 5% × 人数系数，再与当前余额取较小值；赔付仍固定 1:1。
+ * 普通满注 = 庄钱 × 普通下注比例（后台可配，默认 0.6%），再受「余额 ÷ 本局最高倍数」约束。
+ * 满梭哈 = 庄钱 × 梭哈比例（后台可配，默认 5%），再与当前余额取较小值；赔付仍固定 1:1。
  */
 
 export interface BettingConfig {
@@ -9,8 +9,6 @@ export interface BettingConfig {
   shMinCents: number;       // 默认 3000 (RM30)
   betRatio: number;         // 默认 0.006（满注 0.6%）
   shRatio: number;          // 默认 0.05（满梭哈 5%）
-  /** 人数系数分档：按 maxPlayers 升序匹配第一个满足 players <= maxPlayers 的档位 */
-  playerCoefTiers: Array<{ maxPlayers: number; coef: number }>;
 }
 
 export const DEFAULT_BETTING_CONFIG: BettingConfig = {
@@ -18,19 +16,7 @@ export const DEFAULT_BETTING_CONFIG: BettingConfig = {
   shMinCents: 3000,
   betRatio: 0.006,
   shRatio: 0.05,
-  playerCoefTiers: [
-    { maxPlayers: 9, coef: 2.0 },
-    { maxPlayers: 20, coef: 1.5 },
-    { maxPlayers: 9999, coef: 1.0 },
-  ],
 };
-
-export function playerCoef(playerCount: number, config: BettingConfig = DEFAULT_BETTING_CONFIG): number {
-  for (const tier of config.playerCoefTiers) {
-    if (playerCount <= tier.maxPlayers) return tier.coef;
-  }
-  return 1.0;
-}
 
 export interface BettingRange {
   betMinCents: number;
@@ -87,7 +73,7 @@ export function maxAffordableBetCents(
  * - 低于玩法最低额仍拒绝；
  * - 普通下注高于房间上限或余额赔付能力时自动降额；
  * - 普通下注预留覆盖本局最高倍数的最坏损失；
- * - 梭哈固定 1:1，预留 = 注额本身；房间上限 = 庄钱 × 梭哈比例 × 人数系数，再与余额取较小值。
+ * - 梭哈固定 1:1，预留 = 注额本身；房间上限 = 庄钱 × 梭哈比例，再与余额取较小值。
  */
 export function acceptBetAmount(params: {
   requestedCents: bigint;
@@ -146,12 +132,10 @@ export function acceptBetAmount(params: {
 
 export function bettingRange(
   potCents: number,
-  playerCount: number,
   config: BettingConfig = DEFAULT_BETTING_CONFIG,
 ): BettingRange {
-  const coef = playerCoef(playerCount, config);
-  const betMax = Math.floor(potCents * config.betRatio * coef);
-  const shMax = Math.floor(potCents * config.shRatio * coef);
+  const betMax = Math.floor(potCents * config.betRatio);
+  const shMax = Math.floor(potCents * config.shRatio);
   return {
     betMinCents: config.betMinCents,
     betMaxCents: Math.max(betMax, config.betMinCents),

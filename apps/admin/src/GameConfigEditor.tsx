@@ -5,7 +5,7 @@ type Row = Record<string, any>;
 
 const configMeta: Record<string, { label: string; hint: string }> = {
   hand: { label: '牌型规则', hint: '牌型倍数、爆点门槛与特殊牌型' },
-  betting: { label: '下注规则', hint: '普通下注、梭哈与人数系数' },
+  betting: { label: '下注规则', hint: '普通下注、梭哈满额比例与最低额' },
   fees: { label: '费用规则', hint: '庄位费、服务费、红包费与抽水' },
   round: { label: '牌局流程', hint: '阶段时长、竞标范围与自动化开关' },
   rebate: { label: '返水口径', hint: '本游戏有效流水与三级返水比例' },
@@ -234,12 +234,6 @@ function BettingForm({
   value: Row;
   onChange: (next: Row) => void;
 }) {
-  const tiers: Array<{ maxPlayers: number; coef: number }> = Array.isArray(
-    value.playerCoefTiers,
-  )
-    ? value.playerCoefTiers
-    : [];
-
   return (
     <>
       <Section title="下注金额下限">
@@ -252,7 +246,7 @@ function BettingForm({
             }
           />
         </Field>
-        <Field label="梭哈最低" hint="RM；梭哈固定 1:1，最高额 = 庄钱 × 梭哈比例 × 人数系数">
+        <Field label="梭哈最低" hint="RM；梭哈固定 1:1，最高额 = 庄钱 × 梭哈比例">
           <input
             inputMode="decimal"
             value={value.shMinCents ?? ''}
@@ -263,7 +257,7 @@ function BettingForm({
         </Field>
       </Section>
       <Section title="上限比例（相对庄钱）">
-        <Field label="普通下注比例" hint="% ，满注。例如 0.6 表示庄钱的 0.6%">
+        <Field label="普通下注比例" hint="% ，满注。例如 0.5 表示上庄 10000 时上限 RM50">
           <input
             value={value.betRatio ?? ''}
             onChange={(event) =>
@@ -271,7 +265,7 @@ function BettingForm({
             }
           />
         </Field>
-        <Field label="梭哈比例" hint="% ，满梭哈。例如 5 表示庄钱的 5%">
+        <Field label="梭哈比例" hint="% ，满梭哈。例如 5 表示上庄 10000 时上限 RM500">
           <input
             value={value.shRatio ?? ''}
             onChange={(event) =>
@@ -279,68 +273,6 @@ function BettingForm({
             }
           />
         </Field>
-      </Section>
-      <Section title="人数系数分档">
-        <p className="cfg-help">
-          按「人数上限」从小到大匹配：实际人数 ≤ 上限时使用该系数。普通满注与满梭哈都会乘这个系数。上限越大越靠后。
-        </p>
-        {tiers.map((tier, index) => (
-          <div className="cfg-tier-row" key={index}>
-            <Field label="人数上限">
-              <input
-                inputMode="numeric"
-                value={tier.maxPlayers ?? ''}
-                onChange={(event) => {
-                  const next = tiers.map((item, i) =>
-                    i === index
-                      ? { ...item, maxPlayers: event.target.value }
-                      : item,
-                  );
-                  onChange({ ...value, playerCoefTiers: next });
-                }}
-              />
-            </Field>
-            <Field label="系数">
-              <input
-                inputMode="decimal"
-                value={tier.coef ?? ''}
-                onChange={(event) => {
-                  const next = tiers.map((item, i) =>
-                    i === index
-                      ? { ...item, coef: event.target.value }
-                      : item,
-                  );
-                  onChange({ ...value, playerCoefTiers: next });
-                }}
-              />
-            </Field>
-            <button
-              type="button"
-              className="small"
-              disabled={tiers.length <= 1}
-              onClick={() =>
-                onChange({
-                  ...value,
-                  playerCoefTiers: tiers.filter((_, i) => i !== index),
-                })
-              }
-            >
-              删除
-            </button>
-          </div>
-        ))}
-        <button
-          type="button"
-          className="small"
-          onClick={() =>
-            onChange({
-              ...value,
-              playerCoefTiers: [...tiers, { maxPlayers: 99, coef: 1 }],
-            })
-          }
-        >
-          + 增加分档
-        </button>
       </Section>
     </>
   );
@@ -877,13 +809,6 @@ function serializeConfig(key: string, draft: Row): Row {
   }
 
   if (key === 'betting') {
-    const tiers = Array.isArray(draft.playerCoefTiers)
-      ? draft.playerCoefTiers.map((tier: Row, index: number) => ({
-          maxPlayers: intOrThrow(String(tier.maxPlayers ?? ''), `分档${index + 1}人数上限`),
-          coef: numOrThrow(String(tier.coef ?? ''), `分档${index + 1}系数`),
-        }))
-      : [];
-    if (!tiers.length) throw new Error('至少保留一档人数系数');
     return {
       betMinCents:
         typeof draft.betMinCents === 'string'
@@ -901,7 +826,6 @@ function serializeConfig(key: string, draft: Row): Row {
         typeof draft.shRatio === 'string'
           ? percentToRatio(draft.shRatio)
           : numOrThrow(String(draft.shRatio ?? ''), '梭哈比例'),
-      playerCoefTiers: tiers,
     };
   }
 
@@ -1044,9 +968,6 @@ function toFormDraft(key: string, raw: Row): Row {
       shMinCents: centsToRm(raw.shMinCents),
       betRatio: ratioToPercent(raw.betRatio),
       shRatio: ratioToPercent(raw.shRatio),
-      playerCoefTiers: Array.isArray(raw.playerCoefTiers)
-        ? raw.playerCoefTiers
-        : [],
     };
   }
   if (key === 'fees') {

@@ -122,13 +122,13 @@ describe('阶段机器人播报顺序', () => {
     ]);
   });
 
-  it('开注范围按在场合格人数计算，不用已下注人数', async () => {
+  it('开注范围只按庄钱与满额比例计算', async () => {
     const { bettingRange } = await import('../engine/betting.js');
     await buildRoundAnnounceMessages({
       roundId: 'round-1',
       to: RoundPhase.BETTING,
     });
-    expect(bettingRange).toHaveBeenCalledWith(500_000, 15, fixture.settings.betting);
+    expect(bettingRange).toHaveBeenCalledWith(500_000, fixture.settings.betting);
   });
 
   it('封盘时只提示投骰，等待发包留到开骰之后', async () => {

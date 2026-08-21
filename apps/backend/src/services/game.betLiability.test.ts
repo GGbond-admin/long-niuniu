@@ -88,10 +88,7 @@ const memory = vi.hoisted(() => {
       round.betEndsAt = new Date(Date.now() + 60_000);
       round.configSnapshot = {
         hand: DEFAULT_HAND_CONFIG,
-        betting: {
-          ...DEFAULT_BETTING_CONFIG,
-          playerCoefTiers: [{ maxPlayers: 9999, coef: 1 }],
-        },
+        betting: DEFAULT_BETTING_CONFIG,
         fees: DEFAULT_FEE_CONFIG,
         rebate: {},
         round: {},

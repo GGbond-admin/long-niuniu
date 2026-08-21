@@ -278,6 +278,10 @@ const opsErrorMessages: Record<string, string> = {
   INVALID_PACKET_HOST:
     '该链接域名不被允许。请使用 TNG App 分享的官方链接（links.tngdigital.com.my）',
   INVALID_PHASE: '当前牌局阶段已变化，请刷新后重试',
+  ROUND_START_DISABLED: '当前无法开局，请先恢复牌桌或打开自动开局',
+  ROOM_GLOBAL_MUTED: '请先解除全群禁言再开局',
+  ROOM_PAUSED: '游戏入口已关闭，请先打开入口',
+  NOT_ENOUGH_PLAYERS: '人数不足，无法开局',
   BANKER_DICE_NOT_READY: '庄家尚未完成投骰，请稍后再登记红包链接',
   TNG_ACCOUNT_NOT_FOUND: '所选发包账号不存在，请重新选择',
   TNG_ACCOUNT_INACTIVE: '所选发包账号已停用，请更换账号',
@@ -570,6 +574,15 @@ export default function GameOperationsCenter({ admin }: { admin: Admin }) {
   const hasActiveRound =
     roomHasActiveRound
     || rounds.some((round) => activePhases.has(round.phase) && round.phase !== 'WAITING');
+  const latestRound = rounds[0];
+  const previousRound = rounds[1];
+  const preparingNextRound =
+    selectedRoom?.chatPolicy?.stage === 'NEXT_ROUND'
+    || (
+      !hasActiveRound
+      && latestRound?.phase === 'WAITING'
+      && previousRound?.phase === 'CANCELLED'
+    );
   const canStartRound = !!selectedRoom && selectedRoom.status === 'ACTIVE' && !hasActiveRound;
   const isTerminalRound = !!detail && (detail.phase === 'FINISHED' || detail.phase === 'CANCELLED');
   const isLiveControlRound = !!detail && activePhases.has(detail.phase) && detail.phase !== 'WAITING';
@@ -685,6 +698,7 @@ export default function GameOperationsCenter({ admin }: { admin: Admin }) {
           ?? (game.botService?.autoStart ? 'AUTO' : 'MANUAL'),
         chatMutedAt: game.room.chatMutedAt ?? null,
         chatMuteReason: game.room.chatMuteReason ?? null,
+        chatPolicy: game.chatPolicy ?? null,
         botService: game.botService,
         packetChannel: (game.packetChannel as string) === 'INTERNAL' ? 'INTERNAL' : 'TNG',
         bankerBidMinCents: Number(game.bankerBidMinCents ?? 10_000),
@@ -1128,6 +1142,7 @@ export default function GameOperationsCenter({ admin }: { admin: Admin }) {
             );
           } else if (['round', 'claim', 'activity', 'reward'].includes(payload.type ?? '')) {
             void loadContext(roomId).catch(() => undefined);
+            void loadRooms(roomId).catch(() => undefined);
           }
         } catch {
           // 忽略非协议消息。
@@ -1725,32 +1740,77 @@ export default function GameOperationsCenter({ admin }: { admin: Admin }) {
               </button>
 
               <p className="ops-control-layer">② 游戏运行</p>
-              <div className={`ops-mode-status ${roomStartMode.toLowerCase()}`}>
+              <div className={`ops-mode-status ${preparingNextRound ? 'preparing' : roomStartMode.toLowerCase()}`}>
                 <i />
                 <span>
                   <strong>
-                    {roomStartMode === 'AUTO'
-                      ? '自动连续运行'
-                      : roomStartMode === 'STOPPED'
-                        ? hasActiveRound
-                          ? '本局结束后停局'
-                          : '游戏已结束'
-                        : hasActiveRound
-                          ? '手动单局进行中'
-                          : '等待正常开局'}
+                    {preparingNextRound
+                      ? '牌桌正在准备下一局'
+                      : roomStartMode === 'AUTO'
+                        ? '自动连续运行'
+                        : roomStartMode === 'STOPPED'
+                          ? hasActiveRound
+                            ? '本局结束后停局'
+                            : '游戏已结束'
+                          : hasActiveRound
+                            ? '手动单局进行中'
+                            : '等待正常开局'}
                   </strong>
                   <small>
-                    {roomStartMode === 'AUTO'
-                      ? '每局结束后自动进入下一局'
-                      : roomStartMode === 'STOPPED'
-                        ? hasActiveRound
-                          ? '当前局照常完成，下一局不会启动'
-                          : '需正常开局或打开自动开局'
-                        : '本局结束后停在等待区'}
+                    {preparingNextRound
+                      ? roomStartMode === 'STOPPED' || roomStartMode === 'MANUAL'
+                        ? '玩家端可能仍显示准备中。点「恢复牌桌」立即开下一局'
+                        : '系统应自动进入下一局；若卡住请点「恢复牌桌」'
+                      : roomStartMode === 'AUTO'
+                        ? '每局结束后自动进入下一局'
+                        : roomStartMode === 'STOPPED'
+                          ? hasActiveRound
+                            ? '当前局照常完成，下一局不会启动'
+                            : '需正常开局、打开自动开局或恢复牌桌'
+                          : '本局结束后停在等待区'}
                   </small>
                 </span>
               </div>
               <div className="ops-lifecycle-actions">
+                {preparingNextRound && (
+                  <button
+                    type="button"
+                    className="primary-action ops-recover-table"
+                    disabled={!!busy || selectedRoom.status !== 'ACTIVE' || roomGloballyMuted}
+                    title={
+                      roomGloballyMuted
+                        ? '请先解除全群禁言'
+                        : selectedRoom.status !== 'ACTIVE'
+                          ? '请先打开游戏入口'
+                          : '跳过最低人数，立即开启下一局'
+                    }
+                    onClick={() => {
+                      if (
+                        !window.confirm(
+                          '确认恢复牌桌？将立即开启下一局（跳过最低人数），用于解开「准备下一局」卡住。',
+                        )
+                      ) {
+                        return;
+                      }
+                      void run('recover-table', async () => {
+                        const next = await post<{
+                          botService: {
+                            autoStart: boolean;
+                            assistantEnabled: boolean;
+                            roundStartMode: 'MANUAL' | 'AUTO' | 'STOPPED';
+                          };
+                        }>(`/api/admin/rooms/${selectedRoom.id}/recover-table`, {});
+                        setAssistantEnabled(next.botService.assistantEnabled);
+                        setBotAutoStart(next.botService.autoStart);
+                        await loadRooms(selectedRoom.id);
+                        await loadContext(selectedRoom.id);
+                      });
+                    }}
+                  >
+                    恢复牌桌
+                    <small>立即开启下一局</small>
+                  </button>
+                )}
                 <button
                   type="button"
                   className="primary-action"
@@ -1908,7 +1968,15 @@ export default function GameOperationsCenter({ admin }: { admin: Admin }) {
                 {' · '}
                 运行 {roomStartMode === 'AUTO' ? '自动连续' : roomStartMode === 'STOPPED' ? '已结束' : '手动单局'}
                 {' · '}
-                群聊 {roomGloballyMuted ? '全群禁言' : '正常'}
+                群聊 {
+                  roomGloballyMuted
+                    ? '全群禁言'
+                    : preparingNextRound || selectedRoom?.chatPolicy?.stage === 'NEXT_ROUND'
+                      ? '准备下一局'
+                      : selectedRoom?.chatPolicy?.muted
+                        ? '阶段禁言'
+                        : '正常'
+                }
                 {' · '}
                 发包 {internalPacketMode ? '系统红包' : 'TNG 链接'}
               </p>

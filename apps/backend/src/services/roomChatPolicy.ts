@@ -1,4 +1,4 @@
-import { RoundPhase, UserKind } from '@prisma/client';
+import { RoomStartMode, RoundPhase, UserKind } from '@prisma/client';
 import { bankerSeatFee } from '../engine/fees.js';
 import { prisma } from '../lib/prisma.js';
 import { parseSettingsSnapshot } from './gameSettings.js';
@@ -35,6 +35,11 @@ export type ChatPolicyRoundSnapshot = {
   events: Array<{ type: string; createdAt: Date }>;
 };
 
+export type ChatPolicyOptions = {
+  /** 没有下一局调度时，不得把玩家锁在「准备下一局」。 */
+  roundStartMode?: RoomStartMode | null;
+};
+
 const OPEN_POLICY: RoomChatPolicy = { muted: false, stage: null };
 
 function muted(stage: Exclude<RoomChatPolicyStage, null>): RoomChatPolicy {
@@ -56,12 +61,38 @@ function cancelledAfterDiceStarted(round: ChatPolicyRoundSnapshot): boolean {
   );
 }
 
+/** 调度器确实会衔接下局时，才把玩家锁在「准备下一局」。 */
+export function willAutoAdvanceNextRound(
+  roundStartMode: RoomStartMode | null | undefined,
+  previous?: Pick<ChatPolicyRoundSnapshot, 'phase' | 'cancelReason'> | null,
+): boolean {
+  if (roundStartMode === RoomStartMode.AUTO) return true;
+  return (
+    roundStartMode === RoomStartMode.MANUAL
+    && previous?.phase === RoundPhase.CANCELLED
+    && previous.cancelReason === '庄家重推'
+  );
+}
+
+function nextRoundOrIdle(
+  roundStartMode: RoomStartMode | null | undefined,
+  previous?: Pick<ChatPolicyRoundSnapshot, 'phase' | 'cancelReason'> | null,
+): RoomChatPolicy {
+  return willAutoAdvanceNextRound(roundStartMode, previous)
+    ? muted('NEXT_ROUND')
+    : OPEN_POLICY;
+}
+
 function finishedRoundPolicy(
   round: ChatPolicyRoundSnapshot,
   now: Date,
+  roundStartMode: RoomStartMode | null | undefined,
 ): RoomChatPolicy {
   const announced = round.events.find((event) => event.type === ROOM_ANNOUNCED_FINISHED);
   if (!announced) return muted('SETTLING');
+  if (roundStartMode !== RoomStartMode.AUTO) {
+    return OPEN_POLICY;
+  }
   const continuationRejected = round.events.some(
     (event) => event.type === CONTINUATION_REJECTED_INSUFFICIENT,
   );
@@ -91,7 +122,9 @@ function finishedRoundPolicy(
 export function deriveRoomChatPolicy(
   recentRounds: ChatPolicyRoundSnapshot[],
   now = new Date(),
+  options: ChatPolicyOptions = {},
 ): RoomChatPolicy {
+  const roundStartMode = options.roundStartMode ?? RoomStartMode.MANUAL;
   const active = recentRounds.find(
     (round) =>
       round.phase !== RoundPhase.WAITING
@@ -121,11 +154,11 @@ export function deriveRoomChatPolicy(
       : muted('STARTING');
   }
   if (current.phase === RoundPhase.FINISHED) {
-    return finishedRoundPolicy(current, now);
+    return finishedRoundPolicy(current, now, roundStartMode);
   }
   if (current.phase === RoundPhase.CANCELLED) {
     return cancelledAfterDiceStarted(current)
-      ? muted('NEXT_ROUND')
+      ? nextRoundOrIdle(roundStartMode, current)
       : OPEN_POLICY;
   }
   if (current.phase === RoundPhase.WAITING) {
@@ -133,13 +166,13 @@ export function deriveRoomChatPolicy(
       (round) => round.seqNo === current.seqNo - 1,
     );
     if (previous?.phase === RoundPhase.FINISHED) {
-      return finishedRoundPolicy(previous, now);
+      return finishedRoundPolicy(previous, now, roundStartMode);
     }
     if (
       previous?.phase === RoundPhase.CANCELLED
       && cancelledAfterDiceStarted(previous)
     ) {
-      return muted('NEXT_ROUND');
+      return nextRoundOrIdle(roundStartMode, previous);
     }
   }
   return OPEN_POLICY;
@@ -187,37 +220,43 @@ export async function getRoomChatPolicy(
   roomId: string,
   now = new Date(),
 ): Promise<RoomChatPolicy> {
-  const rounds = await prisma.round.findMany({
-    where: { roomId },
-    orderBy: { seqNo: 'desc' },
-    take: 2,
-    select: {
-      id: true,
-      seqNo: true,
-      phase: true,
-      bankerId: true,
-      potCents: true,
-      isContinued: true,
-      continuationUsed: true,
-      cancelReason: true,
-      configSnapshot: true,
-      events: {
-        where: {
-          type: {
-            in: [
-              ROOM_ANNOUNCED_FINISHED,
-              CONTINUATION_REJECTED_INSUFFICIENT,
-              `ROOM_ANNOUNCED_${RoundPhase.BANKER_BID}`,
-              `ROOM_ANNOUNCED_${RoundPhase.BETTING}`,
-              `ROOM_ANNOUNCED_${RoundPhase.SENDING_PACKET}`,
-              'BANKER_REPOST_WINDOW',
-            ],
+  const [room, rounds] = await Promise.all([
+    prisma.room.findUnique({
+      where: { id: roomId },
+      select: { roundStartMode: true },
+    }),
+    prisma.round.findMany({
+      where: { roomId },
+      orderBy: { seqNo: 'desc' },
+      take: 2,
+      select: {
+        id: true,
+        seqNo: true,
+        phase: true,
+        bankerId: true,
+        potCents: true,
+        isContinued: true,
+        continuationUsed: true,
+        cancelReason: true,
+        configSnapshot: true,
+        events: {
+          where: {
+            type: {
+              in: [
+                ROOM_ANNOUNCED_FINISHED,
+                CONTINUATION_REJECTED_INSUFFICIENT,
+                `ROOM_ANNOUNCED_${RoundPhase.BANKER_BID}`,
+                `ROOM_ANNOUNCED_${RoundPhase.BETTING}`,
+                `ROOM_ANNOUNCED_${RoundPhase.SENDING_PACKET}`,
+                'BANKER_REPOST_WINDOW',
+              ],
+            },
           },
+          select: { type: true, createdAt: true },
         },
-        select: { type: true, createdAt: true },
       },
-    },
-  });
+    }),
+  ]);
   const continuationRound = rounds.find(
     (round) =>
       round.phase === RoundPhase.FINISHED
@@ -274,5 +313,6 @@ export async function getRoomChatPolicy(
           : false,
     })),
     now,
+    { roundStartMode: room?.roundStartMode ?? RoomStartMode.MANUAL },
   );
 }

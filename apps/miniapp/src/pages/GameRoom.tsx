@@ -1603,6 +1603,8 @@ export default function GameRoom({
     continuationActive
       ? 'CONTINUATION'
       : state?.chatPolicy?.stage ?? fallbackMutedChatStage;
+  const gameStopped = state?.room.roundStartMode === 'STOPPED';
+  const idlePhase = !phase || ['WAITING', 'FINISHED', 'CANCELLED'].includes(phase);
   const packetDiceDone =
     phase === 'SENDING_PACKET'
     && (
@@ -1632,6 +1634,8 @@ export default function GameRoom({
   const phaseLabel =
     continuationActive
       ? '续庄询问'
+      : gameStopped && idlePhase && !chatMuted
+        ? '游戏已结束'
       : chatMuted && mutedChatStage === 'NEXT_ROUND'
         ? '准备下一局'
         : chatMuted && mutedChatStage === 'STARTING'
@@ -1695,6 +1699,9 @@ export default function GameRoom({
     }
     if (chatMuted && mutedChatStage === 'NEXT_ROUND') {
       return '系统正在准备下一局 · 暂不可发言';
+    }
+    if (gameStopped && idlePhase) {
+      return '本场已结束，等待运营重新开局';
     }
     if (chatMuted && mutedChatStage === 'SETTLING') {
       return phase === 'CLAIM_EXPIRED'

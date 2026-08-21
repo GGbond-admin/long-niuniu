@@ -75,6 +75,7 @@ import {
   type RoomObserver,
 } from '../services/roomHub.js';
 import { setRoomMuteState } from '../services/roomModeration.js';
+import { getRoomChatPolicy } from '../services/roomChatPolicy.js';
 import {
   buildRoundAnnounceMessages,
   type AnnounceBanner,
@@ -1108,6 +1109,16 @@ export async function adminGameRoutes(app: FastifyInstance) {
         ] as const),
       ),
     );
+    const chatPolicyByRoom = new Map(
+      await Promise.all(
+        items
+          .filter((item) => item.room)
+          .map(async (item) => [
+            item.room!.id,
+            await getRoomChatPolicy(item.room!.id),
+          ] as const),
+      ),
+    );
     const defaultSettings = settingsByGame.get(SUPREME_NIUNIU_GAME_CODE);
     return {
       items: items.map((item) => {
@@ -1122,6 +1133,7 @@ export async function adminGameRoutes(app: FastifyInstance) {
             autoStart: roundStartMode === RoomStartMode.AUTO,
             roundStartMode,
           },
+          chatPolicy: item.room ? chatPolicyByRoom.get(item.room.id) ?? null : null,
           packetChannel: settings.round.packetChannel === 'INTERNAL' ? 'INTERNAL' : 'TNG',
           bankerBidMinCents: settings.round.bankerBidMinCents,
           bankerBidMaxCents: settings.round.bankerBidMaxCents,
@@ -1637,6 +1649,68 @@ export async function adminGameRoutes(app: FastifyInstance) {
         assistantEnabled: true,
         autoStart: false,
         roundStartMode: RoomStartMode.STOPPED,
+      },
+    };
+  });
+
+  /** 从「准备下一局」卡住状态恢复：跳过最低人数，立即开启下一局。 */
+  app.post('/api/admin/rooms/:id/recover-table', { preHandler: operations }, async (req) => {
+    const { id } = req.params as { id: string };
+    const adminId = (req.user as { sub: string }).sub;
+    const room = await requireSupportedRoom(id);
+    const waiting = await ensureWaitingRound(id);
+    if (waiting.phase !== RoundPhase.WAITING) throw new GameError('INVALID_PHASE');
+    const previousMode = room.roundStartMode ?? RoomStartMode.MANUAL;
+    let startSource: 'MANUAL' | 'AUTO' = 'MANUAL';
+    let nextMode = previousMode;
+    if (previousMode === RoomStartMode.STOPPED) {
+      await setRoomStartMode(id, RoomStartMode.MANUAL, adminId);
+      nextMode = RoomStartMode.MANUAL;
+    } else if (previousMode === RoomStartMode.AUTO) {
+      startSource = 'AUTO';
+    }
+    const started = await startRound(waiting.id, true, adminId, startSource);
+    await prisma.auditLog.create({
+      data: {
+        adminId,
+        action: 'table_recover_next_round',
+        target: id,
+        before: {
+          roundStartMode: previousMode,
+          waitingRoundId: waiting.id,
+        },
+        after: {
+          roomId: id,
+          roundId: started.id,
+          phase: started.phase,
+          seqNo: started.seqNo,
+          roundStartMode: nextMode,
+          autoStart: nextMode === RoomStartMode.AUTO,
+          force: true,
+        },
+        ip: req.ip,
+      },
+    });
+    systemChat(
+      id,
+      `【运营恢复】牌桌已从准备状态恢复，第 ${started.seqNo} 局开始竞标。`,
+      { force: true },
+    );
+    emitTransition(started.id, started.roomId, RoundPhase.WAITING, started.phase);
+    broadcastToRoomObservers(id, {
+      type: 'bot_service',
+      roomId: id,
+      assistantEnabled: true,
+      autoStart: nextMode === RoomStartMode.AUTO,
+      roundStartMode: nextMode,
+    });
+    return {
+      ok: true,
+      round: started,
+      botService: {
+        assistantEnabled: true,
+        autoStart: nextMode === RoomStartMode.AUTO,
+        roundStartMode: nextMode,
       },
     };
   });

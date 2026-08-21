@@ -1196,6 +1196,7 @@ export type RoomState = {
       mutedAt: string | null;
       reason: string | null;
     };
+    roundStartMode?: 'MANUAL' | 'AUTO' | 'STOPPED';
   };
   chatPolicy: {
     /** 服务端阶段禁言为权威；旧服务端缺失时页面按 round.phase 安全回退。 */

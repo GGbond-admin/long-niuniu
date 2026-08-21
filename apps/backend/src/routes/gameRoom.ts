@@ -14,7 +14,6 @@ import {
 } from '../engine/bankerContinuation.js';
 import { bettingRange, toCentsBigInt } from '../engine/betting.js';
 import { prisma } from '../lib/prisma.js';
-import { countEligiblePlayers } from '../services/eligiblePlayers.js';
 import {
   canClaimPacket,
   currentRoundForRoom,
@@ -220,7 +219,6 @@ async function buildRoomState(roomId: string, userId: string) {
     settings,
     chatPolicy,
     bankerRow,
-    eligiblePlayers,
     claimable,
     diceEvents,
     lastFinished,
@@ -238,9 +236,6 @@ async function buildRoomState(roomId: string, userId: string) {
           where: { id: round.bankerId },
           select: { uid: true, nickname: true, avatarUrl: true },
         })
-      : Promise.resolve(null),
-    round?.phase === RoundPhase.BETTING
-      ? countEligiblePlayers(roomId)
       : Promise.resolve(null),
     round?.packet && round.phase === RoundPhase.CLAIMING && !myClaim
       ? canClaimPacket(round.packet.id, userId)
@@ -305,12 +300,8 @@ async function buildRoomState(roomId: string, userId: string) {
         }
       : null;
   const betRange =
-    round?.phase === RoundPhase.BETTING && eligiblePlayers !== null
-      ? bettingRange(
-          Number(round.potCents),
-          Math.max(1, eligiblePlayers),
-          settings.betting,
-        )
+    round?.phase === RoundPhase.BETTING
+      ? bettingRange(Number(round.potCents), settings.betting)
       : null;
   const topBids = (round?.bids ?? [])
     .slice()
@@ -419,6 +410,7 @@ async function buildRoomState(roomId: string, userId: string) {
       members: room._count.members,
       online: onlineCount(room.id),
       chatMute: roomMuteStateOf(room),
+      roundStartMode: room.roundStartMode,
     },
     me: {
       joined: member?.status === 'ACTIVE',
