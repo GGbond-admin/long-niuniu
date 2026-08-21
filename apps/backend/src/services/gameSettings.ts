@@ -20,9 +20,9 @@ export interface RoundConfig {
   continuationWindowSeconds: number;
   /** 成绩单公布后，自动开启下一局前的等待秒数 */
   nextRoundDelaySeconds: number;
-  /** 封盘后允许庄家发送「重推」取消退款并重开下一局的确认时间 */
+  /** 兼容字段：封盘后允许重推的窗口；现已与 bankerDiceTimeoutSeconds 对齐 */
   repostWindowSeconds: number;
-  /** 重推确认结束后，庄家必须完成投骰的时限 */
+  /** 封盘后庄家选择投骰开包或重推退款的统一时限 */
   bankerDiceTimeoutSeconds: number;
   bankerBidMinCents: number;
   bankerBidMaxCents: number;
@@ -57,7 +57,7 @@ export const DEFAULT_ROUND_CONFIG: RoundConfig = {
   claimDurationSeconds: 40,
   continuationWindowSeconds: 15,
   nextRoundDelaySeconds: 10,
-  repostWindowSeconds: 5,
+  repostWindowSeconds: 15,
   bankerDiceTimeoutSeconds: 15,
   bankerBidMinCents: 10_000,
   bankerBidMaxCents: 100_000_000,
@@ -201,7 +201,7 @@ export const DEFAULT_MESSAGE_TEMPLATES: MessageTemplates = {
   sealedSummary:
     '📋封盘明细\n庄家{{banker}}\n庄钱：{{pot}}\n发包金额：{{packetTotal}}\n发包数量：{{packetCount}} 个\n总下注：{{betTotal}}\n总梭哈：{{shTotal}}\n\n代包手1：{{tailPackerBanker}}（庄家尾包）\n代包手2：{{tailPackerPlayer}}（闲家尾包）\n\n本局下注成功名单：\n{{betList}}',
   dicePrompt:
-    '⏳封盘确认 · {{remaining}} 秒\n请庄家{{banker}}确认本局。\n· 继续本局：确认结束后须在 {{diceSeconds}} 秒内投骰，超时本局自动取消并退款\n· 重推本局：倒计时内发送 重推，系统会取消整局、原路退回全部冻结金额，并重新开启下一局',
+    '⏳封盘确认 · {{remaining}} 秒\n请庄家{{banker}}在倒计时内选择：\n· 投骰开包：继续本局\n· 重推退款：取消本局并原路退回全部冻结金额\n超时未选择将自动取消并退款',
   betCountdown: '⏰下注倒计时 · 还剩 {{remaining}} 秒\n未出手的抓紧了，时间到立刻封盘！',
   claimStart:
     '🧧开始抢包 · {{claimSeconds}} 秒\n仅庄家与已下注闲家可领，过期即止。未领玩家请尽快，超时按尾包规则补录。',
@@ -317,6 +317,8 @@ const PREVIOUS_DEFAULT_MESSAGE_TEMPLATES: Partial<
     '【停止下注 · 封盘明细】\n\n庄家：{{banker}}\n庄钱：{{pot}}\n发包金额：{{packetTotal}}\n发包数量：{{packetCount}} 个\n总下注：{{betTotal}}\n总梭哈：{{shTotal}}\n\n代包手1：{{tailPackerBanker}}（庄家尾包）\n代包手2：{{tailPackerPlayer}}（闲家尾包）\n\n本局下注成功名单：\n{{betList}}',
   ],
   dicePrompt: [
+    '⏳封盘确认 · {{remaining}} 秒\n请庄家{{banker}}确认本局。\n· 继续本局：现在即可投骰开包；超时未投将自动取消并退款\n· 重推本局：倒计时内发送 重推，系统会取消整局、原路退回全部冻结金额，并重新开启下一局',
+    '⏳封盘确认 · {{remaining}} 秒\n请庄家{{banker}}确认本局。\n· 继续本局：确认结束后须在 {{diceSeconds}} 秒内投骰，超时本局自动取消并退款\n· 重推本局：倒计时内发送 重推，系统会取消整局、原路退回全部冻结金额，并重新开启下一局',
     LEGACY_SLASH_REPOST_DICE_PROMPT_BRACKET,
     LEGACY_SLASH_REPOST_DICE_PROMPT,
     LEGACY_DICE_PROMPT,
@@ -585,9 +587,13 @@ export async function ensureGameConfigDefaults(): Promise<void> {
             }
             delete merged.diceRerollWindowSeconds;
           }
-          // 上一版默认值为 8 秒或 3 秒；本次产品规则统一调整为 5 秒。
-          if (raw?.repostWindowSeconds === 8 || raw?.repostWindowSeconds === 3) {
-            merged = { ...merged, repostWindowSeconds: 5 };
+          // 旧默认 3/5/8 秒重推窗口已并入 15 秒投骰/重推确认时限。
+          if (
+            raw?.repostWindowSeconds === 8
+            || raw?.repostWindowSeconds === 3
+            || raw?.repostWindowSeconds === 5
+          ) {
+            merged = { ...merged, repostWindowSeconds: 15 };
           }
         }
         if (key === 'messages') {
@@ -742,7 +748,7 @@ const configSchemas = {
       claimDurationSeconds: z.number().int().min(5).max(3_600).optional(),
       continuationWindowSeconds: z.number().int().min(5).max(300).optional(),
       nextRoundDelaySeconds: z.number().int().min(3).max(300).optional(),
-      repostWindowSeconds: z.number().int().min(3).max(30).optional(),
+      repostWindowSeconds: z.number().int().min(5).max(120).optional(),
       bankerDiceTimeoutSeconds: z.number().int().min(5).max(120).optional(),
       bankerBidMinCents: z.number().int().min(1).max(1_000_000_000).optional(),
       bankerBidMaxCents: z.number().int().min(1).max(10_000_000_000).optional(),

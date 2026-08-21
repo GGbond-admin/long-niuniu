@@ -33,35 +33,13 @@ export function bankerSeatFee(potCents: number, config: FeeConfig = DEFAULT_FEE_
   return Math.round(potCents * config.bankerSeatFeeRatio);
 }
 
-/** 竞标时需备足：庄钱 + 上庄费 + 服务费（代包费在锁定庄家后才按人数计） */
-export function bankerBidReserveCents(
-  bidCents: number,
-  config: FeeConfig = DEFAULT_FEE_CONFIG,
-): number {
-  return bidCents + bankerSeatFee(bidCents, config) + config.serviceFeeCents;
-}
-
 /**
- * 当前余额最多能出的上庄整数金额（分）。
- * 需同时扣上庄费与服务费，故略低于账面可用余额。
+ * 竞标预估代包费人数：当前在房人数。
+ * 关盘时代包费按「庄家 + 已下注闲家」实算；预留用在房人数，避免接近满额上庄后封盘余额不够。
  */
-export function maxAffordableBankerBidCents(
-  availableCents: number,
-  config: FeeConfig = DEFAULT_FEE_CONFIG,
-  roomMaxCents = Number.MAX_SAFE_INTEGER,
-): number {
-  if (!Number.isSafeInteger(availableCents) || availableCents < 100) return 0;
-  const leftover = availableCents - config.serviceFeeCents;
-  if (leftover < 100) return 0;
-  const ratio = Math.max(0, config.bankerSeatFeeRatio);
-  const roomMax = Math.floor(Math.max(0, roomMaxCents) / 100) * 100;
-  let candidate = Math.min(Math.floor(leftover / (1 + ratio)), roomMax);
-  candidate = Math.floor(candidate / 100) * 100;
-  while (candidate >= 100) {
-    if (bankerBidReserveCents(candidate, config) <= availableCents) return candidate;
-    candidate -= 100;
-  }
-  return 0;
+export function packetReserveHeads(memberCount: number): number {
+  if (!Number.isFinite(memberCount) || memberCount < 1) return 1;
+  return Math.floor(memberCount);
 }
 
 /** 红包总额 = 参与人数 × 人均单价（参与人数 = 庄家 + 已下注闲家） */
@@ -72,6 +50,52 @@ export function packetTotal(participantCount: number, config: FeeConfig = DEFAUL
 /** 代包费 = 本局红包总额 */
 export function packetAgentFee(participantCount: number, config: FeeConfig = DEFAULT_FEE_CONFIG): number {
   return packetTotal(participantCount, config);
+}
+
+/** 截标实际冻结：庄钱 + 上庄费 + 服务费。代包费关盘时再从剩余可用余额冻。 */
+export function bankerBidFreezeCents(
+  bidCents: number,
+  config: FeeConfig = DEFAULT_FEE_CONFIG,
+): number {
+  return bidCents + bankerSeatFee(bidCents, config) + config.serviceFeeCents;
+}
+
+/** 竞标须备足：冻结额 + 预估代包费（按房间人数）。不预留代包费时第三参为 0。 */
+export function bankerBidReserveCents(
+  bidCents: number,
+  config: FeeConfig = DEFAULT_FEE_CONFIG,
+  packetParticipantCount = 0,
+): number {
+  const packetHeads = Math.max(0, Math.floor(packetParticipantCount));
+  return bankerBidFreezeCents(bidCents, config) + packetTotal(packetHeads, config);
+}
+
+/**
+ * 当前余额最多能出的上庄整数金额（分）。
+ * 须覆盖上庄费、服务费，以及按房间人数预估的代包费，故低于账面可用余额。
+ */
+export function maxAffordableBankerBidCents(
+  availableCents: number,
+  config: FeeConfig = DEFAULT_FEE_CONFIG,
+  roomMaxCents = Number.MAX_SAFE_INTEGER,
+  packetParticipantCount = 0,
+): number {
+  if (!Number.isSafeInteger(availableCents) || availableCents < 100) return 0;
+  const packetHeads = Math.max(0, Math.floor(packetParticipantCount));
+  const leftover =
+    availableCents - config.serviceFeeCents - packetTotal(packetHeads, config);
+  if (leftover < 100) return 0;
+  const ratio = Math.max(0, config.bankerSeatFeeRatio);
+  const roomMax = Math.floor(Math.max(0, roomMaxCents) / 100) * 100;
+  let candidate = Math.min(Math.floor(leftover / (1 + ratio)), roomMax);
+  candidate = Math.floor(candidate / 100) * 100;
+  while (candidate >= 100) {
+    if (bankerBidReserveCents(candidate, config, packetHeads) <= availableCents) {
+      return candidate;
+    }
+    candidate -= 100;
+  }
+  return 0;
 }
 
 export interface BankerFees {

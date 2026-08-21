@@ -11111,6 +11111,33 @@ body.tg-native-back-visible :is(
   display:flex;
   justify-content:center;
 }
+.room-stage-lock-action.banker-choice{
+  padding:8px 12px 4px;
+}
+.banker-choice-actions{
+  width:100%;
+  max-width:420px;
+  display:grid;
+  gap:8px;
+}
+.banker-choice-actions.dual{
+  grid-template-columns:1fr 1fr;
+}
+.banker-choice-actions .stage-control-button{
+  max-width:none;
+  flex-direction:column;
+  gap:2px;
+  min-height:46px;
+  padding:8px 10px;
+}
+.stage-control-button.repost{
+  border-color:rgba(168,148,118,.18);
+  background:rgba(255,255,255,.035);
+  color:rgba(213,189,135,.82);
+}
+.stage-control-button.repost small{
+  color:rgba(213,189,135,.4);
+}
 .continuation-confirm,
 .stage-control-button{
   width:100%;

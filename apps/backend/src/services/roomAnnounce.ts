@@ -264,14 +264,13 @@ export async function buildRoundAnnounceMessages(params: {
   }
 
   if (params.to === RoundPhase.SENDING_PACKET) {
-    const repostSeconds = settings?.round.repostWindowSeconds ?? 5;
-    const diceSeconds = settings?.round.bankerDiceTimeoutSeconds ?? 15;
+    const choiceSeconds = settings?.round.bankerDiceTimeoutSeconds ?? 15;
     let prompt = stripHtml(
       renderMessage(templates.dicePrompt, {
         banker: banker ? mention(banker) : '庄家',
-        repostWindow: repostSeconds,
+        repostWindow: choiceSeconds,
         remaining: '{{remaining}}',
-        diceSeconds,
+        diceSeconds: choiceSeconds,
       }),
     );
     if (!prompt.includes('{{remaining}}')) {
@@ -288,19 +287,25 @@ export async function buildRoundAnnounceMessages(params: {
         round.events.find((item) => item.type === 'BANKER_DICE_DEADLINE')?.payload,
       )
       ?? (repostEndsAt
-        ? new Date(repostEndsAt.getTime() + diceSeconds * 1_000)
+        ? new Date(repostEndsAt.getTime() + choiceSeconds * 1_000)
         : null);
+    const splitWindows =
+      !!repostEndsAt
+      && !!diceEndsAt
+      && diceEndsAt.getTime() > repostEndsAt.getTime();
     const live = countdown(
       'repost',
-      repostEndsAt,
+      splitWindows ? repostEndsAt : diceEndsAt ?? repostEndsAt,
       prompt,
-      `⏳封盘确认已结束\n请庄家在 {{remaining}} 秒内完成投骰，超时自动取消并退款`,
-      diceEndsAt,
+      splitWindows
+        ? `⏳封盘确认已结束\n请庄家在 {{remaining}} 秒内完成投骰，超时自动取消并退款`
+        : undefined,
+      splitWindows ? diceEndsAt : undefined,
     );
     return [
       banner('bet-stop'),
       text(buildSealedSummary(templates, round, banker)),
-      live ?? text(prompt.replace(/\{\{\s*remaining\s*\}\}/g, String(repostSeconds))),
+      live ?? text(prompt.replace(/\{\{\s*remaining\s*\}\}/g, String(choiceSeconds))),
     ];
   }
 

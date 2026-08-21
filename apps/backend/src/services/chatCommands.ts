@@ -281,25 +281,17 @@ export async function throwBankerDice(params: {
   }
   const existing = await latestBankerDiceEvent(round.id);
   if (!existing) {
-    const repostWindow = await prisma.roundEvent.findFirst({
-      where: { roundId: round.id, type: BANKER_REPOST_WINDOW_EVENT },
-      select: { payload: true },
-    });
+    const [repostWindow, diceDeadline] = await Promise.all([
+      prisma.roundEvent.findFirst({
+        where: { roundId: round.id, type: BANKER_REPOST_WINDOW_EVENT },
+        select: { payload: true },
+      }),
+      prisma.roundEvent.findFirst({
+        where: { roundId: round.id, type: BANKER_DICE_DEADLINE_EVENT },
+        select: { payload: true },
+      }),
+    ]);
     const repostEndsAt = repostEndsAtFromPayload(repostWindow?.payload);
-    if (repostEndsAt && Date.now() < repostEndsAt.getTime()) {
-      const remaining = Math.max(
-        1,
-        Math.ceil((repostEndsAt.getTime() - Date.now()) / 1_000),
-      );
-      return {
-        kind: 'error',
-        message: `封盘确认中，还剩 ${remaining} 秒；如需取消退款并重开，请发送 重推`,
-      };
-    }
-    const diceDeadline = await prisma.roundEvent.findFirst({
-      where: { roundId: round.id, type: BANKER_DICE_DEADLINE_EVENT },
-      select: { payload: true },
-    });
     const diceEndsAt =
       repostEndsAtFromPayload(diceDeadline?.payload)
       ?? (repostEndsAt
@@ -596,7 +588,7 @@ export async function handleRoomChatCommand(params: {
     return { kind: 'muted', message: roomChatPolicyMessage(chatPolicy) };
   }
 
-  // 重推：封盘确认窗口内由庄家发送「重推」取消整局、原路退款，并立即准备下一局。
+  // 重推：封盘确认时限内由庄家发送「重推」取消整局、原路退款，并立即准备下一局。
   if (repostCommand) {
     try {
       const locked = await withRedisLock(
@@ -623,7 +615,7 @@ export async function handleRoomChatCommand(params: {
           });
           const repostEndsAt = repostEndsAtFromPayload(repostWindow?.payload);
           if (repostEndsAt && Date.now() >= repostEndsAt.getTime()) {
-            return { kind: 'error', message: '重推确认时间已结束，请继续完成庄家投骰' };
+            return { kind: 'error', message: '确认时间已结束，本局正在自动取消' };
           }
 
           const cancelled = await cancelRound(

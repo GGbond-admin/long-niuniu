@@ -13,7 +13,7 @@ const fixture = vi.hoisted(() => {
       bidDurationSeconds: 30,
       betDurationSeconds: 50,
       claimDurationSeconds: 30,
-      repostWindowSeconds: 5,
+      repostWindowSeconds: 15,
       bankerDiceTimeoutSeconds: 15,
       tailPackerBankerName: '庄家尾包',
       tailPackerPlayerName: '闲家尾包',
@@ -42,13 +42,13 @@ const fixture = vi.hoisted(() => {
     events: [
       {
         type: 'BANKER_REPOST_WINDOW',
-        payload: { endsAt: '2026-08-07T07:01:25.000Z', seconds: 5 },
+        payload: { endsAt: '2026-08-07T07:01:35.000Z', seconds: 15 },
       },
       {
         type: 'BANKER_DICE_DEADLINE',
         payload: {
-          startsAt: '2026-08-07T07:01:25.000Z',
-          endsAt: '2026-08-07T07:01:40.000Z',
+          startsAt: '2026-08-07T07:01:20.000Z',
+          endsAt: '2026-08-07T07:01:35.000Z',
           seconds: 15,
         },
       },
@@ -153,11 +153,10 @@ describe('阶段机器人播报顺序', () => {
     expect(messages[2]).toMatchObject({
       kind: 'countdown',
       mode: 'repost',
-      endsAt: '2026-08-07T07:01:25.000Z',
+      endsAt: '2026-08-07T07:01:35.000Z',
       template: 'dice-prompt @庄家 {{remaining}} 15',
-      afterTemplate: '⏳封盘确认已结束\n请庄家在 {{remaining}} 秒内完成投骰，超时自动取消并退款',
-      afterEndsAt: '2026-08-07T07:01:40.000Z',
     });
+    expect((messages[2] as { afterEndsAt?: string }).afterEndsAt).toBeUndefined();
   });
 
   it('完成播报为成绩单分段提供稳定语义键', async () => {

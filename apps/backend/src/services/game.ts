@@ -20,9 +20,11 @@ import {
   type BetAdjustmentReason,
 } from '../engine/betting.js';
 import {
+  bankerBidFreezeCents,
   bankerBidReserveCents,
   bankerSeatFee,
   maxAffordableBankerBidCents,
+  packetReserveHeads,
   packetTotal,
 } from '../engine/fees.js';
 import { evaluateHand, HAND_LABEL, maxPayoutMultiplier } from '../engine/hand.js';
@@ -67,6 +69,13 @@ export type VirtualCapability =
   | 'claimSim';
 
 type Tx = Prisma.TransactionClient;
+
+async function packetReserveParticipantCount(tx: Tx, roomId: string): Promise<number> {
+  const members = await tx.roomMember.count({
+    where: { roomId, status: 'ACTIVE' },
+  });
+  return packetReserveHeads(members);
+}
 
 const ACTIVE_PHASES: RoundPhase[] = [
   RoundPhase.WAITING,
@@ -402,6 +411,7 @@ export async function placeBankerBid(roundId: string, userId: string, amountCent
     ]);
     const settings = parseSettingsSnapshot(round.configSnapshot);
     const user = await requireGameUser(tx, userId, round.roomId, 'bid');
+    const packetHeads = await packetReserveParticipantCount(tx, round.roomId);
     const roomMinCents = BigInt(settings.round.bankerBidMinCents);
     const roomMaxCents = BigInt(settings.round.bankerBidMaxCents);
     const walletCapCents = BigInt(
@@ -409,6 +419,7 @@ export async function placeBankerBid(roundId: string, userId: string, amountCent
         safeNumber(user.wallet.availableCents, 'available'),
         settings.fees,
         settings.round.bankerBidMaxCents,
+        packetHeads,
       ),
     );
     if (amountCents > roomMaxCents) {
@@ -439,7 +450,7 @@ export async function placeBankerBid(roundId: string, userId: string, amountCent
       acceptedAmountCents = ownBid.amountCents;
     }
     const amount = safeNumber(acceptedAmountCents, 'bid');
-    if (user.wallet.availableCents < BigInt(bankerBidReserveCents(amount, settings.fees))) {
+    if (user.wallet.availableCents < BigInt(bankerBidReserveCents(amount, settings.fees, packetHeads))) {
       throw new GameError('BANKER_BID_CAP_TOO_LOW', {
         maxCents: walletCapCents,
         minimumCents: roomMinCents,
@@ -515,6 +526,7 @@ export async function closeBidding(roundId: string) {
       throw new GameError('INVALID_PHASE');
     }
     const settings = parseSettingsSnapshot(round.configSnapshot);
+    const packetHeads = await packetReserveParticipantCount(tx, round.roomId);
     let winningBid: (typeof round.bids)[number] | null = null;
     let reserveCents = 0n;
     for (const bid of round.bids) {
@@ -527,10 +539,10 @@ export async function closeBidding(roundId: string) {
         throw error;
       }
       const amount = safeNumber(bid.amountCents, 'bid');
-      const required = BigInt(bankerBidReserveCents(amount, settings.fees));
+      const required = BigInt(bankerBidReserveCents(amount, settings.fees, packetHeads));
       if (bidder.wallet.availableCents >= required) {
         winningBid = bid;
-        reserveCents = required;
+        reserveCents = BigInt(bankerBidFreezeCents(amount, settings.fees));
         break;
       }
     }
@@ -1018,6 +1030,7 @@ export async function closeBetting(roundId: string) {
     const participants = round.bets.length + 1;
     const totalCents = BigInt(packetTotal(participants, settings.fees));
     const bankerWallet = await tx.wallet.findUnique({ where: { userId: round.bankerId } });
+    // 截标只冻庄钱+上庄费+服务费；代包费从剩余可用余额冻。可用不够时取消，避免发包后托管失败。
     if (!bankerWallet || bankerWallet.availableCents < totalCents) {
       return cancelRoundTx(tx, round.id, 'BANKER_PACKET_FEE_INSUFFICIENT');
     }
@@ -1049,19 +1062,18 @@ export async function closeBetting(roundId: string) {
       participants,
       packetTotalCents: String(totalCents),
     });
-    const repostStartsAt = Date.now();
-    const repostEndsAt =
-      repostStartsAt + settings.round.repostWindowSeconds * 1_000;
-    const diceEndsAt =
-      repostEndsAt + settings.round.bankerDiceTimeoutSeconds * 1_000;
+    const choiceStartsAt = Date.now();
+    const choiceSeconds = settings.round.bankerDiceTimeoutSeconds;
+    const choiceEndsAt = choiceStartsAt + choiceSeconds * 1_000;
+    const choiceEndsAtIso = new Date(choiceEndsAt).toISOString();
     await event(tx, round.id, 'BANKER_REPOST_WINDOW', {
-      endsAt: new Date(repostEndsAt).toISOString(),
-      seconds: settings.round.repostWindowSeconds,
+      endsAt: choiceEndsAtIso,
+      seconds: choiceSeconds,
     });
     await event(tx, round.id, 'BANKER_DICE_DEADLINE', {
-      startsAt: new Date(repostEndsAt).toISOString(),
-      endsAt: new Date(diceEndsAt).toISOString(),
-      seconds: settings.round.bankerDiceTimeoutSeconds,
+      startsAt: new Date(choiceStartsAt).toISOString(),
+      endsAt: choiceEndsAtIso,
+      seconds: choiceSeconds,
     });
     return updated;
   });

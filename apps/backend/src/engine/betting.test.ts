@@ -4,6 +4,7 @@ import {
   acceptBetAmount,
   bettingRange,
   fromCents,
+  fromPacketCents,
   maxAffordableBetCents,
   parseBetMessage,
   toCents,
@@ -265,6 +266,14 @@ describe('金额工具', () => {
     expect(fromCents(3120)).toBe('31.2');
     expect(fromCents(104)).toBe('1.04');
     expect(fromCents(-127147)).toBe('-1271.47');
+  });
+
+  it('fromPacketCents 始终保留两位小数，不丢掉红包金额末尾 0', () => {
+    expect(fromPacketCents(190)).toBe('1.90');
+    expect(fromPacketCents(90)).toBe('0.90');
+    expect(fromPacketCents(100)).toBe('1.00');
+    expect(fromPacketCents(111)).toBe('1.11');
+    expect(fromPacketCents(0)).toBe('0.00');
   });
 
   it('大额字符串直接精确解析为 BigInt，不经过 Number 舍入', () => {

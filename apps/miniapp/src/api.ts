@@ -1278,7 +1278,7 @@ export type RoomState = {
     diceStarted?: boolean;
     /** 封盘后允许庄家取消退款并重开下一局的截止时间 */
     repostEndsAt?: string | null;
-    /** 重推确认结束后，庄家必须投骰的截止时间 */
+    /** 庄家必须在此时限内投骰或重推；超时自动取消 */
     diceEndsAt?: string | null;
     canRepostRound?: boolean;
     participantCount: number | null;
@@ -1345,12 +1345,23 @@ export function roomWsUrl(roomId: string, ticket: string): string {
 }
 
 export function rm(cents: string | number | bigint): string {
+  return formatRm(cents, 'trim');
+}
+
+/** 红包/抢包金额：始终两位小数，与领取记录一致（1.90 不收成 1.9）。 */
+export function rmPacket(cents: string | number | bigint): string {
+  return formatRm(cents, 'fixed');
+}
+
+function formatRm(cents: string | number | bigint, fraction: 'trim' | 'fixed'): string {
   const n = BigInt(cents);
   const sign = n < 0n ? '-' : '';
   const abs = n < 0n ? -n : n;
   const whole = abs / 100n;
   const frac = abs % 100n;
+  const fracStr = frac.toString().padStart(2, '0');
+  if (fraction === 'fixed') return `${sign}${whole}.${fracStr}`;
   if (frac === 0n) return `${sign}${whole}`;
   if (frac % 10n === 0n) return `${sign}${whole}.${frac / 10n}`;
-  return `${sign}${whole}.${frac.toString().padStart(2, '0')}`;
+  return `${sign}${whole}.${fracStr}`;
 }

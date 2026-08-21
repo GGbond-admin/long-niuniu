@@ -134,7 +134,7 @@ function repostWindow(endsAt: Date) {
     id: 'repost-window',
     roundId: 'round-1',
     type: 'BANKER_REPOST_WINDOW',
-    payload: { endsAt: endsAt.toISOString(), seconds: 5 },
+    payload: { endsAt: endsAt.toISOString(), seconds: 15 },
     createdAt: new Date(),
   });
 }
@@ -236,22 +236,23 @@ describe('庄家投骰与整局重推', () => {
     expect(memory.chats.some((message) => message.content.includes('【庄家开骰】'))).toBe(true);
   });
 
-  it('封盘确认窗口内禁止提前投骰', async () => {
+  it('封盘确认窗口内可以投骰继续本局', async () => {
     memory.events.length = 0;
-    repostWindow(new Date(Date.now() + 5_000));
-    diceDeadline(new Date(Date.now() + 20_000));
+    const choiceEndsAt = new Date(Date.now() + 15_000);
+    repostWindow(choiceEndsAt);
+    diceDeadline(choiceEndsAt);
 
-    await expect(runCeremony()).resolves.toEqual({
-      kind: 'error',
-      message: '封盘确认中，还剩 5 秒；如需取消退款并重开，请发送 重推',
-    });
-    expect(memory.events.some((event) => event.type === 'BANKER_DICE')).toBe(false);
+    const pending = runCeremony();
+    await vi.runAllTimersAsync();
+    await expect(pending).resolves.toMatchObject({ kind: 'ok' });
+    expect(memory.events.some((event) => event.type === 'BANKER_DICE')).toBe(true);
   });
 
   it('发送「重推」会取消退款并立即开启下一局', async () => {
     memory.events.length = 0;
-    repostWindow(new Date(Date.now() + 5_000));
-    diceDeadline(new Date(Date.now() + 20_000));
+    const choiceEndsAt = new Date(Date.now() + 15_000);
+    repostWindow(choiceEndsAt);
+    diceDeadline(choiceEndsAt);
 
     const result = await handleRoomChatCommand({
       roomId: 'room-1',
@@ -265,8 +266,9 @@ describe('庄家投骰与整局重推', () => {
 
   it('/重推会取消退款并立即开启下一局，不会重新投骰', async () => {
     memory.events.length = 0;
-    repostWindow(new Date(Date.now() + 5_000));
-    diceDeadline(new Date(Date.now() + 20_000));
+    const choiceEndsAt = new Date(Date.now() + 15_000);
+    repostWindow(choiceEndsAt);
+    diceDeadline(choiceEndsAt);
 
     const result = await handleRoomChatCommand({
       roomId: 'room-1',
@@ -308,15 +310,16 @@ describe('庄家投骰与整局重推', () => {
 
     expect(result).toEqual({
       kind: 'error',
-      message: '重推确认时间已结束，请继续完成庄家投骰',
+      message: '确认时间已结束，本局正在自动取消',
     });
     expect(memory.cancelRound).not.toHaveBeenCalled();
   });
 
   it('已经开始投骰后不能再重推', async () => {
     memory.events.length = 0;
-    repostWindow(new Date(Date.now() + 5_000));
-    diceDeadline(new Date(Date.now() + 20_000));
+    const choiceEndsAt = new Date(Date.now() + 15_000);
+    repostWindow(choiceEndsAt);
+    diceDeadline(choiceEndsAt);
     memory.events.push({
       id: 'started-dice',
       roundId: 'round-1',
@@ -340,8 +343,9 @@ describe('庄家投骰与整局重推', () => {
 
   it('15 秒投骰时间结束后拒绝再投骰', async () => {
     memory.events.length = 0;
-    repostWindow(new Date(Date.now() - 15_000));
-    diceDeadline(new Date(Date.now() - 1));
+    const expired = new Date(Date.now() - 1);
+    repostWindow(expired);
+    diceDeadline(expired);
 
     await expect(runCeremony()).resolves.toEqual({
       kind: 'error',

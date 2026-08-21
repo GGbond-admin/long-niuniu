@@ -34,15 +34,15 @@ describe('游戏配置跨字段校验', () => {
     ).toThrow(/上庄起拍价不能高于最高出价/);
   });
 
-  it('封盘重推确认窗口只允许 3 至 30 秒', () => {
+  it('封盘确认时限只允许 5 至 120 秒', () => {
     expect(() =>
-      validateGameConfig('round', { repostWindowSeconds: 2 }),
+      validateGameConfig('round', { repostWindowSeconds: 4 }),
     ).toThrow();
     expect(() =>
-      validateGameConfig('round', { repostWindowSeconds: 31 }),
+      validateGameConfig('round', { repostWindowSeconds: 121 }),
     ).toThrow();
     expect(
-      validateGameConfig('round', { repostWindowSeconds: 5 }),
+      validateGameConfig('round', { repostWindowSeconds: 15 }),
     ).toBeTruthy();
   });
 

@@ -76,10 +76,10 @@ describe('成绩单文案', () => {
       '上局 5004.55 · 本局 4981.27',
     );
     expect(text).toContain(
-      `${SCOREBOARD_EMOJI.tie} <b>@平家</b> ·\n抢 2.8 · 下 10 · 水→0`,
+      `${SCOREBOARD_EMOJI.tie} <b>@平家</b> ·\n抢 2.80 · 下 10 · 水→0`,
     );
     expect(text).toContain(
-      `${SCOREBOARD_EMOJI.banker} <b>庄家 @庄家</b> ·\n抢 0.7 · 输→50`,
+      `${SCOREBOARD_EMOJI.banker} <b>庄家 @庄家</b> ·\n抢 0.70 · 输→50`,
     );
     expect(text).toContain('输 1 家 · 赢 1 家 · 水 1 家');
     expect(text).toContain('上庄费-50 · 服务费-38 · 代包费-31.2');
@@ -136,7 +136,7 @@ describe('成绩单文案', () => {
     expect(text).toContain('备注：展示信息已核对');
     expect(text).toContain('本次仅更正展示文字，不影响账务。');
     expect(text).toContain('抢 1.11 · 下 8 · 赢→131.92');
-    expect(text).toContain('抢 0.7 · 输→50');
+    expect(text).toContain('抢 0.70 · 输→50');
     expect(text).toMatch(
       /本次仅更正展示文字，不影响账务。\n━━━━━━━━━━━━━━━━━━\n庄家走势\n7点 → 对子$/,
     );

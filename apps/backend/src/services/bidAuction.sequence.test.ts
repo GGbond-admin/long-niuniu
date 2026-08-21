@@ -73,6 +73,7 @@ vi.mock('./gameSettings.js', () => ({
 
 vi.mock('./roomHub.js', () => ({
   rebroadcastRoomState: vi.fn(async () => undefined),
+  broadcastToRoomCluster: vi.fn(async () => undefined),
   systemChat: vi.fn((_roomId: string, content: string) => {
     memory.actions.push(content.startsWith('bid-final-list') ? 'bid-final-list' : content);
   }),

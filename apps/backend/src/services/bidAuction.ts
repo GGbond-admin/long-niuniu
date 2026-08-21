@@ -17,6 +17,7 @@ import {
 import {
   appendAssistantChatOnce,
   appendSystemChatOnce,
+  broadcastToRoomCluster,
   rebroadcastRoomState,
   systemChat,
 } from './roomHub.js';
@@ -60,7 +61,9 @@ async function loadBids(roundId: string) {
   return prisma.bankerBid.findMany({
     where: { roundId },
     include: {
-      user: { select: { uid: true, nickname: true, tgUsername: true } },
+      user: {
+        select: { uid: true, nickname: true, tgUsername: true, avatarUrl: true },
+      },
     },
     orderBy: [{ amountCents: 'desc' }, { createdAt: 'asc' }],
   });
@@ -91,7 +94,7 @@ export async function announceBidPlaced(params: {
     getMessageTemplatesForRoom(params.roomId),
     prisma.user.findUnique({
       where: { id: params.userId },
-      select: { uid: true, nickname: true, tgUsername: true },
+      select: { uid: true, nickname: true, tgUsername: true, avatarUrl: true },
     }),
     loadBids(params.roundId),
   ]);
@@ -116,6 +119,30 @@ export async function announceBidPlaced(params: {
     content = content ? `${content}\n\n${notice}` : notice;
   }
   if (content) systemChat(params.roomId, content);
+  const leaderUser = leader?.user ?? bidder;
+  // 聊天播报即时到达；底部「当前最高」读的是房间状态。
+  // 假人加价不会走 activity 心跳，这里直接推最高价，避免等 30 秒整桌刷新。
+  await broadcastToRoomCluster(params.roomId, {
+    type: 'bid_update',
+    roundId: params.roundId,
+    highCents: String(highCents),
+    nextCents: String(highCents + BANKER_BID_INCREMENT_CENTS),
+    bidCount: bids.length,
+    amountCents: String(params.amountCents),
+    leader: {
+      uid: leaderUser.uid,
+      nickname: leaderUser.nickname ?? leaderUser.uid,
+      avatarUrl: leaderUser.avatarUrl ?? null,
+    },
+    bidder: {
+      uid: bidder.uid,
+      nickname: bidder.nickname ?? bidder.uid,
+      avatarUrl: bidder.avatarUrl ?? null,
+    },
+    ...(params.extendedEndsAt
+      ? { bidEndsAt: params.extendedEndsAt.toISOString() }
+      : {}),
+  }).catch(() => undefined);
   if (params.extendedEndsAt) {
     // 立即重播房间状态，让前端倒计时同步跳回新的截止时间
     await rebroadcastRoomState({

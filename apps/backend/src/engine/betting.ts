@@ -208,7 +208,10 @@ export function toCentsBigInt(amount: string): bigint {
   return cents;
 }
 
-export function fromCents(cents: string | number | bigint): string {
+function formatCents(
+  cents: string | number | bigint,
+  fraction: 'trim' | 'fixed',
+): string {
   const n =
     typeof cents === 'bigint'
       ? cents
@@ -219,7 +222,18 @@ export function fromCents(cents: string | number | bigint): string {
   const abs = n < 0n ? -n : n;
   const whole = abs / 100n;
   const frac = abs % 100n;
+  const fracStr = frac.toString().padStart(2, '0');
+  if (fraction === 'fixed') return `${sign}${whole}.${fracStr}`;
   if (frac === 0n) return `${sign}${whole}`;
   if (frac % 10n === 0n) return `${sign}${whole}.${frac / 10n}`;
-  return `${sign}${whole}.${frac.toString().padStart(2, '0')}`;
+  return `${sign}${whole}.${fracStr}`;
+}
+
+export function fromCents(cents: string | number | bigint): string {
+  return formatCents(cents, 'trim');
+}
+
+/** 红包/抢包金额：始终两位小数，与 TNG 领取记录一致（1.90 不收成 1.9）。 */
+export function fromPacketCents(cents: string | number | bigint): string {
+  return formatCents(cents, 'fixed');
 }

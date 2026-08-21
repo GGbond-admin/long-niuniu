@@ -1,5 +1,5 @@
 import type { RoundScoreboard } from '@prisma/client';
-import { fromCents } from '../engine/betting.js';
+import { fromCents, fromPacketCents } from '../engine/betting.js';
 import { compareScoreboardHandOrder } from '../engine/settlement.js';
 
 export type ScoreboardPresentation = {
@@ -142,7 +142,7 @@ export function formatScoreboard(
     const playerNote = userId ? presentation.playerNotes?.[userId]?.trim() : '';
     lines.push(
       `${result.symbol} <b>${mention(player, presentation.playerAliases?.[userId])}</b> ·`,
-      `抢 ${fromCents(String(player.claimCents))} · ${player.isAllIn ? '梭哈' : '下'} ${fromCents(String(player.betCents))} · ${result.label}→${absoluteAmount(player.netCents)}${shortfallText}`,
+      `抢 ${fromPacketCents(String(player.claimCents))} · ${player.isAllIn ? '梭哈' : '下'} ${fromCents(String(player.betCents))} · ${result.label}→${absoluteAmount(player.netCents)}${shortfallText}`,
       cumulativeLine({
         beforeCents: player.balanceBeforeCents,
         afterCents: player.balanceAfterCents,
@@ -168,7 +168,7 @@ export function formatScoreboard(
   lines.push(
     '━━━━━━━━━━━━━━━━━━',
     `${SCOREBOARD_EMOJI.banker} <b>庄家 ${bankerMention}</b> ·`,
-    `抢 ${fromCents(String(banker.claimCents))} · ${bankerLabel}→${absoluteAmount(bankerNet)}`,
+    `抢 ${fromPacketCents(String(banker.claimCents))} · ${bankerLabel}→${absoluteAmount(bankerNet)}`,
     `输 ${pairStats.lost} 家 · 赢 ${pairStats.won} 家 · 水 ${pairStats.tied} 家`,
     ...bankerFeeLines(banker),
     bankerProfitLine(bankerNet),

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { api, rm } from '../api';
+import { api, rmPacket } from '../api';
 import { formatClaimTime } from '../lib/datetime';
 import { goBack } from '../lib/nav';
 import { getCachedSession } from '../sessionStore';
@@ -189,7 +189,7 @@ export default function PacketDetail({ overlay = false }: { overlay?: boolean } 
           ) : amountCents ? (
             <div className="wx-rp-result-amount">
               <span className="wx-rp-result-amount-unit">RM</span>
-              <b>{rm(amountCents)}</b>
+              <b>{rmPacket(amountCents)}</b>
               <i>已存入零钱余额</i>
             </div>
           ) : null}
@@ -199,8 +199,8 @@ export default function PacketDetail({ overlay = false }: { overlay?: boolean } 
       <section className="wx-rp-result-sheet" aria-label="领取名单">
         <div className="wx-rp-result-sheet-head">
           {count > 0
-            ? `已领取 ${claims.length}/${count} 个，共 RM ${rm(totalCents)}`
-            : `已领取 ${claims.length} 个，共 RM ${rm(totalCents)}`}
+            ? `已领取 ${claims.length}/${count} 个，共 RM ${rmPacket(totalCents)}`
+            : `已领取 ${claims.length} 个，共 RM ${rmPacket(totalCents)}`}
           {grabbedOut ? '，已抢光' : ''}
         </div>
 
@@ -249,7 +249,7 @@ export default function PacketDetail({ overlay = false }: { overlay?: boolean } 
                   <small>{formatClaimTime(claim.at)}</small>
                 </div>
                 <div className="wx-rp-result-row-amt">
-                  <b>RM {rm(claim.amountCents)}</b>
+                  <b>RM {rmPacket(claim.amountCents)}</b>
                   {isLucky && <span className="wx-rp-result-lucky">手气最佳</span>}
                 </div>
               </div>

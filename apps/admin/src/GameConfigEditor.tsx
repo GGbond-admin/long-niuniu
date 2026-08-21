@@ -42,7 +42,7 @@ const MESSAGE_FIELDS: Array<{ key: string; label: string; hint?: string }> = [
   { key: 'betCountdown', label: '下注倒计时' },
   { key: 'sealed', label: '封盘提示' },
   { key: 'sealedSummary', label: '封盘明细' },
-  { key: 'dicePrompt', label: '庄家投骰提示' },
+  { key: 'dicePrompt', label: '庄家确认提示' },
   { key: 'bankerDice', label: '庄家开骰结果' },
   { key: 'claimStart', label: '开始抢包' },
   { key: 'claimWarning', label: '领包提醒（已并入开始抢包，不再单独发送）' },
@@ -451,25 +451,8 @@ function RoundForm({
           />
         </Field>
         <Field
-          label="封盘重推确认窗口"
-          hint="庄家可发送「重推」取消整局、退款并重新开局的秒数"
-        >
-          <input
-            type="number"
-            min={3}
-            max={30}
-            value={value.repostWindowSeconds ?? ''}
-            onChange={(event) =>
-              onChange({
-                ...value,
-                repostWindowSeconds: Number(event.target.value),
-              })
-            }
-          />
-        </Field>
-        <Field
-          label="庄家投骰时限"
-          hint="重推确认结束后必须完成投骰；超时自动取消并退款"
+          label="庄家确认时限"
+          hint="封盘后庄家有这么多秒选择「投骰开包」或「重推退款」；超时自动取消并原路退款"
         >
           <input
             type="number"
@@ -888,6 +871,10 @@ function serializeConfig(key: string, draft: Row): Row {
   }
 
   if (key === 'round') {
+    const choiceSeconds = intOrThrow(
+      String(draft.bankerDiceTimeoutSeconds ?? ''),
+      '庄家确认时限',
+    );
     return {
       bidDurationSeconds: intOrThrow(String(draft.bidDurationSeconds ?? ''), '竞标时长'),
       betDurationSeconds: intOrThrow(String(draft.betDurationSeconds ?? ''), '下注时长'),
@@ -900,14 +887,8 @@ function serializeConfig(key: string, draft: Row): Row {
         String(draft.nextRoundDelaySeconds ?? 10),
         '成绩单后开下一局',
       ),
-      repostWindowSeconds: intOrThrow(
-        String(draft.repostWindowSeconds ?? ''),
-        '封盘重推确认窗口',
-      ),
-      bankerDiceTimeoutSeconds: intOrThrow(
-        String(draft.bankerDiceTimeoutSeconds ?? ''),
-        '庄家投骰时限',
-      ),
+      bankerDiceTimeoutSeconds: choiceSeconds,
+      repostWindowSeconds: choiceSeconds,
       bankerBidMinCents: moneyField(draft.bankerBidMinCents, '上庄起拍价'),
       bankerBidMaxCents: moneyField(draft.bankerBidMaxCents, '最高出价'),
       trendLength: intOrThrow(String(draft.trendLength ?? ''), '走势条长度'),

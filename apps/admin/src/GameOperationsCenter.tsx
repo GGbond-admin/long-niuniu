@@ -407,8 +407,7 @@ function countdownDisplay(content: string, now: number): string {
         }
         return after.replace(/在\s*\d+\s*秒内/, `在 ${afterRemaining} 秒内`);
       }
-      if (afterRemaining === 0) return '⏳投骰时间已结束\n本局正在自动取消并退款';
-      return after.replace(/\{\{\s*remaining\s*\}\}/g, '0');
+      return '⏳确认时间已结束\n本局正在自动取消并退款';
     }
     return template.replace(/\{\{\s*remaining\s*\}\}/g, String(remaining));
   } catch {

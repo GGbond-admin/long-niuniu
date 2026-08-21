@@ -504,12 +504,13 @@ describe('庄家竞拍与续庄完整循环', () => {
   });
 
   it('出价超过可上庄余额时自动降到上限并标记调整', async () => {
-    const { maxAffordableBankerBidCents } = await import('../engine/fees.js');
+    const { maxAffordableBankerBidCents, packetReserveHeads } = await import('../engine/fees.js');
     memory.users.get('player-b').wallet.availableCents = 500_000n;
     const cap = maxAffordableBankerBidCents(
       500_000,
       memory.settings.fees,
       memory.settings.round.bankerBidMaxCents,
+      packetReserveHeads(2),
     );
     const result = await placeBankerBid('round-1', 'player-b', 1_000_000n);
     expect(result.amountCents).toBe(BigInt(cap));
@@ -520,11 +521,12 @@ describe('庄家竞拍与续庄完整循环', () => {
   it('可上庄余额不够出到当前最高时仍可按自己的上限出价，截标再取最高', async () => {
     await placeBankerBid('round-1', 'banker-a', 400_000n);
     memory.users.get('player-b').wallet.availableCents = 200_000n;
-    const { maxAffordableBankerBidCents } = await import('../engine/fees.js');
+    const { maxAffordableBankerBidCents, packetReserveHeads } = await import('../engine/fees.js');
     const cap = maxAffordableBankerBidCents(
       200_000,
       memory.settings.fees,
       memory.settings.round.bankerBidMaxCents,
+      packetReserveHeads(2),
     );
     const result = await placeBankerBid('round-1', 'player-b', 500_000n);
     expect(result.amountCents).toBe(BigInt(cap));

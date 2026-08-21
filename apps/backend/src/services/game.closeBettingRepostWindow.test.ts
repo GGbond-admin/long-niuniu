@@ -56,7 +56,7 @@ vi.mock('./gameSettings.js', () => ({
     },
     round: {
       claimDurationSeconds: 40,
-      repostWindowSeconds: 5,
+      repostWindowSeconds: 15,
       bankerDiceTimeoutSeconds: 15,
     },
   })),
@@ -78,23 +78,23 @@ describe('封盘重推确认窗口', () => {
     events.length = 0;
   });
 
-  it('封盘事务会记录可重推截止时间', async () => {
+  it('封盘后投骰与重推共用 15 秒确认时限', async () => {
     await closeBetting('round-1');
 
     expect(events).toContainEqual({
       roundId: 'round-1',
       type: 'BANKER_REPOST_WINDOW',
       payload: {
-        endsAt: '2026-08-19T05:00:05.000Z',
-        seconds: 5,
+        endsAt: '2026-08-19T05:00:15.000Z',
+        seconds: 15,
       },
     });
     expect(events).toContainEqual({
       roundId: 'round-1',
       type: 'BANKER_DICE_DEADLINE',
       payload: {
-        startsAt: '2026-08-19T05:00:05.000Z',
-        endsAt: '2026-08-19T05:00:20.000Z',
+        startsAt: '2026-08-19T05:00:00.000Z',
+        endsAt: '2026-08-19T05:00:15.000Z',
         seconds: 15,
       },
     });

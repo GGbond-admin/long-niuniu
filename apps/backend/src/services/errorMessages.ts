@@ -185,6 +185,9 @@ export function tngIngestMessage(code: string): string {
 const CANCEL_REASON_MESSAGES: Record<string, string> = {
   NO_VALID_BANKER_BID: '本局无有效竞标，自动流局',
   NOT_ENOUGH_PLAYERS: '人数不足，自动流局',
+  NO_BETS: '无人下注，自动流局',
+  BANKER_PACKET_FEE_INSUFFICIENT:
+    '庄家剩余可用余额不足支付本局代包费（红包金额）。上庄时除庄钱外还需预留下庄费、服务费和按人数计算的代包费',
 };
 
 /** 取消原因：内部码映射为中文；运营填写的自由文本原样透出。 */
