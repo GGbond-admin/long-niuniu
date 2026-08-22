@@ -191,6 +191,18 @@ export function phaseChatPolicy(phase: string | null | undefined): RoomChatPolic
   return OPEN_POLICY;
 }
 
+/**
+ * 进行中的开骰/抢包/结算必须压过历史窗口策略。
+ * 取消局复用局号后，最近 N 条可能全是 WAITING/CANCELLED，推导会误判可发言。
+ */
+export function resolveRoomChatPolicy(
+  derived: RoomChatPolicy,
+  livePhase: string | null | undefined,
+): RoomChatPolicy {
+  const hard = phaseChatPolicy(livePhase);
+  return hard.muted ? hard : derived;
+}
+
 export function roomChatPolicyMessage(policy: RoomChatPolicy): string {
   switch (policy.stage) {
     case 'DICE':
@@ -219,47 +231,73 @@ function continuationWindowSeconds(configSnapshot: unknown): number | null {
   }
 }
 
+const chatPolicyEventTypes = [
+  ROOM_ANNOUNCED_FINISHED,
+  CONTINUATION_REJECTED_INSUFFICIENT,
+  `ROOM_ANNOUNCED_${RoundPhase.BANKER_BID}`,
+  `ROOM_ANNOUNCED_${RoundPhase.BETTING}`,
+  `ROOM_ANNOUNCED_${RoundPhase.SENDING_PACKET}`,
+  'BANKER_REPOST_WINDOW',
+];
+
+const chatPolicyRoundSelect = {
+  id: true,
+  seqNo: true,
+  phase: true,
+  bankerId: true,
+  potCents: true,
+  isContinued: true,
+  continuationUsed: true,
+  cancelReason: true,
+  configSnapshot: true,
+  events: {
+    where: {
+      type: { in: chatPolicyEventTypes },
+    },
+    select: { type: true, createdAt: true },
+  },
+};
+
 export async function getRoomChatPolicy(
   roomId: string,
   now = new Date(),
 ): Promise<RoomChatPolicy> {
-  const [room, rounds] = await Promise.all([
+  const [room, liveRounds, recentRounds] = await Promise.all([
     prisma.room.findUnique({
       where: { id: roomId },
       select: { roundStartMode: true },
     }),
     prisma.round.findMany({
+      where: {
+        roomId,
+        phase: { notIn: [RoundPhase.FINISHED, RoundPhase.CANCELLED] },
+      },
+      orderBy: { seqNo: 'desc' },
+      take: 2,
+      select: chatPolicyRoundSelect,
+    }),
+    prisma.round.findMany({
       where: { roomId },
       orderBy: [{ seqNo: 'desc' }, { createdAt: 'desc' }],
       take: 4,
-      select: {
-        id: true,
-        seqNo: true,
-        phase: true,
-        bankerId: true,
-        potCents: true,
-        isContinued: true,
-        continuationUsed: true,
-        cancelReason: true,
-        configSnapshot: true,
-        events: {
-          where: {
-            type: {
-              in: [
-                ROOM_ANNOUNCED_FINISHED,
-                CONTINUATION_REJECTED_INSUFFICIENT,
-                `ROOM_ANNOUNCED_${RoundPhase.BANKER_BID}`,
-                `ROOM_ANNOUNCED_${RoundPhase.BETTING}`,
-                `ROOM_ANNOUNCED_${RoundPhase.SENDING_PACKET}`,
-                'BANKER_REPOST_WINDOW',
-              ],
-            },
-          },
-          select: { type: true, createdAt: true },
-        },
-      },
+      select: chatPolicyRoundSelect,
     }),
   ]);
+  const live =
+    liveRounds.find((round) => round.phase !== RoundPhase.WAITING)
+    ?? liveRounds[0]
+    ?? null;
+  const seen = new Set<string>();
+  const rounds = [];
+  if (live) {
+    rounds.push(live);
+    seen.add(live.id);
+  }
+  for (const round of recentRounds) {
+    if (seen.has(round.id)) continue;
+    rounds.push(round);
+    seen.add(round.id);
+  }
   const continuationRound = rounds.find(
     (round) =>
       round.phase === RoundPhase.FINISHED
@@ -302,20 +340,23 @@ export async function getRoomChatPolicy(
       // 配置异常时交由续庄事务/调度器报错；策略保持禁言，不提前解禁。
     }
   }
-  return deriveRoomChatPolicy(
-    rounds.map((round) => ({
-      ...round,
-      continuationWindowSeconds: continuationWindowSeconds(round.configSnapshot),
-      continuationFundingSufficient:
-        continuationFunding?.roundId === round.id
-          ? continuationFunding.sufficient
-          : null,
-      autoFundableVirtual:
-        continuationFunding?.roundId === round.id
-          ? continuationFunding.autoFundableVirtual
-          : false,
-    })),
-    now,
-    { roundStartMode: room?.roundStartMode ?? RoomStartMode.MANUAL },
+  return resolveRoomChatPolicy(
+    deriveRoomChatPolicy(
+      rounds.map((round) => ({
+        ...round,
+        continuationWindowSeconds: continuationWindowSeconds(round.configSnapshot),
+        continuationFundingSufficient:
+          continuationFunding?.roundId === round.id
+            ? continuationFunding.sufficient
+            : null,
+        autoFundableVirtual:
+          continuationFunding?.roundId === round.id
+            ? continuationFunding.autoFundableVirtual
+            : false,
+      })),
+      now,
+      { roundStartMode: room?.roundStartMode ?? RoomStartMode.MANUAL },
+    ),
+    live?.phase,
   );
 }

@@ -1341,6 +1341,13 @@ export async function adminOperationsRoutes(app: FastifyInstance) {
   );
 
   // ── 客服聊天 / 动画贴纸 ──
+  app.get('/api/admin/support/unread-total', { preHandler: support }, async () => {
+    const total = await prisma.chatMessage.count({
+      where: { senderType: 'USER', readAt: null },
+    });
+    return { total };
+  });
+
   app.get('/api/admin/support/threads', { preHandler: support }, async () => {
     const latest = await prisma.chatMessage.findMany({
       distinct: ['userId'],

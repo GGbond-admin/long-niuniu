@@ -3455,7 +3455,9 @@ body.tg-fullscreen .room-tip-notice {
   background: var(--fill) !important;
   transform: translate(-50%, -50%) scale(0.92);
 }
-.cash-page .cash-nav,
-.tip-page .tip-page-nav {
+.cash-page .cash-nav {
   background: var(--bg);
+}
+.tip-page .tip-page-nav {
+  background: transparent;
 }

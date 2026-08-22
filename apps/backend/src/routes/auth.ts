@@ -48,7 +48,10 @@ export async function authRoutes(app: FastifyInstance) {
   /**
    * Mini App 登录：校验 initData → 登录/注册 → 返回准入状态 + 会话 token
    */
-  app.post('/api/auth/login', async (req, reply) => {
+  app.post(
+    '/api/auth/login',
+    { config: { rateLimit: { max: 120, timeWindow: '1 minute' } } },
+    async (req, reply) => {
     const body = loginSchema.parse(req.body);
 
     // 开发模式模拟登录：initData = "dev:<tgId>:<昵称>"（仅 development 生效）
@@ -114,7 +117,10 @@ export async function authRoutes(app: FastifyInstance) {
    * + 支付密码把账号换绑到当前设备。7 天限一次；换绑后 24 小时暂停提现（钱包侧校验）。
    * 未设支付密码的账号没有第二凭证，仍需走客服人工核验。
    */
-  app.post('/api/auth/device-rebind', async (req, reply) => {
+  app.post(
+    '/api/auth/device-rebind',
+    { config: { rateLimit: { max: 20, timeWindow: '1 minute' } } },
+    async (req, reply) => {
     const body = deviceRebindSchema.parse(req.body);
 
     let tgUser: { id: number } | null = null;

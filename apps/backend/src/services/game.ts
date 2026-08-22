@@ -547,23 +547,53 @@ export async function closeBidding(roundId: string) {
     }
     const settings = parseSettingsSnapshot(round.configSnapshot);
     const packetHeads = await packetReserveParticipantCount(tx, round.roomId);
+    const roomMinCents = BigInt(settings.round.bankerBidMinCents);
     let winningBid: (typeof round.bids)[number] | null = null;
+    let acceptedAmountCents = 0n;
     let reserveCents = 0n;
     for (const bid of round.bids) {
+      // 原价已不超过当前最高有效价时，后面更低的出价不可能反超。
+      if (winningBid && bid.amountCents <= acceptedAmountCents) break;
       let bidder: Awaited<ReturnType<typeof requireGameUser>>;
       try {
         // 出价后到截标前，账号/KYC/房间成员/虚拟玩家能力都可能变化，必须重新验资验权。
         bidder = await requireGameUser(tx, bid.userId, round.roomId, 'bid');
       } catch (error) {
-        if (error instanceof GameError) continue;
+        if (error instanceof GameError) {
+          await event(tx, round.id, 'BANKER_BID_SKIPPED', {
+            userId: bid.userId,
+            amountCents: String(bid.amountCents),
+            reason: error.code,
+          });
+          continue;
+        }
         throw error;
       }
-      const amount = safeNumber(bid.amountCents, 'bid');
-      const required = BigInt(bankerBidReserveCents(amount, settings.fees, packetHeads));
-      if (bidder.wallet.availableCents >= required) {
+      const walletCapCents = BigInt(
+        maxAffordableBankerBidCents(
+          safeNumber(bidder.wallet.availableCents, 'available'),
+          settings.fees,
+          settings.round.bankerBidMaxCents,
+          packetHeads,
+        ),
+      );
+      const accepted =
+        bid.amountCents <= walletCapCents ? bid.amountCents : walletCapCents;
+      if (accepted < roomMinCents) {
+        await event(tx, round.id, 'BANKER_BID_SKIPPED', {
+          userId: bid.userId,
+          amountCents: String(bid.amountCents),
+          reason: 'BANKER_BID_CAP_TOO_LOW',
+          maxCents: String(walletCapCents),
+        });
+        continue;
+      }
+      if (!winningBid || accepted > acceptedAmountCents) {
         winningBid = bid;
-        reserveCents = BigInt(bankerBidFreezeCents(amount, settings.fees));
-        break;
+        acceptedAmountCents = accepted;
+        reserveCents = BigInt(
+          bankerBidFreezeCents(safeNumber(accepted, 'bid'), settings.fees),
+        );
       }
     }
     if (!winningBid) {
@@ -578,6 +608,19 @@ export async function closeBidding(roundId: string) {
       });
       await event(tx, round.id, 'ROUND_CANCELLED', { reason: 'NO_VALID_BANKER_BID' });
       return cancelled;
+    }
+
+    const requestedAmountCents = winningBid.amountCents;
+    if (acceptedAmountCents !== requestedAmountCents) {
+      await tx.bankerBid.update({
+        where: { id: winningBid.id },
+        data: { amountCents: acceptedAmountCents },
+      });
+      await event(tx, round.id, 'BANKER_BID_ADJUSTED_ON_LOCK', {
+        userId: winningBid.userId,
+        requestedCents: String(requestedAmountCents),
+        acceptedCents: String(acceptedAmountCents),
+      });
     }
 
     await freezeBanker(
@@ -597,7 +640,7 @@ export async function closeBidding(roundId: string) {
       where: { id: round.id },
       data: {
         bankerId: winningBid.userId,
-        potCents: winningBid.amountCents,
+        potCents: acceptedAmountCents,
         bankerReservedCents: reserveCents,
         phase: RoundPhase.BETTING,
         betEndsAt,
@@ -606,7 +649,9 @@ export async function closeBidding(roundId: string) {
     });
     await event(tx, round.id, 'BANKER_SELECTED', {
       bankerId: winningBid.userId,
-      potCents: String(winningBid.amountCents),
+      potCents: String(acceptedAmountCents),
+      requestedCents: String(requestedAmountCents),
+      adjusted: acceptedAmountCents !== requestedAmountCents,
       betEndsAt: betEndsAt.toISOString(),
     });
     return updated;

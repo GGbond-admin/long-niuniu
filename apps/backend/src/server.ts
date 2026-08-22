@@ -13,6 +13,7 @@ import { ZodError } from 'zod';
 import { env } from './config.js';
 import { prisma } from './lib/prisma.js';
 import { redis } from './lib/redis.js';
+import { isRateLimitExemptPath, rateLimitKey } from './lib/rateLimitKey.js';
 import { authRoutes } from './routes/auth.js';
 import { onboardingRoutes } from './routes/onboarding.js';
 import { walletRoutes } from './routes/wallet.js';
@@ -97,17 +98,24 @@ export async function buildServer() {
       return callback(new Error('ORIGIN_NOT_ALLOWED'), false);
     },
   });
-  await app.register(rateLimit, {
-    max: 240,
-    timeWindow: '1 minute',
-    allowList: (req) => req.url === '/healthz' || req.url === '/readyz',
-  });
   const uploadRoot = resolve(env.uploadDir);
   await mkdir(uploadRoot, { recursive: true });
   await app.register(multipart, {
     limits: { files: 1, fileSize: 5 * 1024 * 1024, fields: 5 },
   });
   await app.register(jwt, { secret: env.adminJwtSecret });
+  await app.register(rateLimit, {
+    max: 600,
+    timeWindow: '1 minute',
+    // 已登录按用户计，避免同一出口 IP / 反向代理把整桌玩家算成一个人。
+    allowList: (req) => isRateLimitExemptPath(req.url),
+    keyGenerator: (req) =>
+      rateLimitKey({
+        authorization: typeof req.headers.authorization === 'string' ? req.headers.authorization : undefined,
+        ip: req.ip,
+        verify: (token) => app.jwt.verify(token),
+      }),
+  });
   await app.register(websocket, { options: { maxPayload: 16 * 1024 } });
   initRoomHub();
 

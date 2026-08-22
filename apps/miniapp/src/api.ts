@@ -547,7 +547,7 @@ export const api = {
           claimEndsAt?: string;
         } | null;
       }>;
-    }>('/api/game/lobby'),
+    }>('/api/game/lobby', {}, { timeoutMs: 15_000, retries: 1 }),
 
   joinRoom,
   leaveRoom: (roomId: string) =>

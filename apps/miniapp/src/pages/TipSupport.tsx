@@ -7,14 +7,29 @@ import PaymentPinSheet from '../components/PaymentPinSheet';
 import { completeRequest, pendingRequestId } from '../lib/idempotency';
 import { paymentPinErrorMessage } from '../lib/paymentPin';
 
-const PRESETS = ['1', '5', '10', '20', '50'];
+const PRESETS = ['20', '50', '100', '500', '1000', '2000'];
 
 const TIP_ERROR: Record<string, string> = {
   INSUFFICIENT_BALANCE: '余额不足，请先充值',
   KYC_REQUIRED: '请先完成实名认证',
-  INVALID_TIP_AMOUNT: '打赏金额需在 RM1 ~ RM5000 之间',
+  INVALID_TIP_AMOUNT: '打赏金额需在 RM1 ~ RM5,000 之间',
   IDEMPOTENCY_CONFLICT: '本次打赏资料已改变，请返回后重新操作',
+  RATE_LIMITED: '操作过于频繁，请稍后再试',
+  REQUEST_TIMEOUT: '网络超时，请稍后重试',
+  INTERNAL: '服务器繁忙，请稍后重试',
 };
+
+const RAW_ERROR_CODE = /^[A-Z][A-Z0-9_]+$/;
+
+function tipErrorMessage(error: unknown): string {
+  const issue = error as Error & { code?: string };
+  const code = issue.code ?? '';
+  if (code && TIP_ERROR[code]) return TIP_ERROR[code];
+  const message = issue.message?.trim() ?? '';
+  if (message && !RAW_ERROR_CODE.test(message)) return message;
+  if (code && !RAW_ERROR_CODE.test(code)) return code;
+  return '打赏未完成，请稍后重试';
+}
 
 function normalizeMoneyInput(value: string) {
   const cleaned = value.replace(/[^\d.]/g, '').slice(0, 10);
@@ -55,6 +70,12 @@ export default function TipSupport({
     return n.toFixed(2);
   }, [amount]);
 
+  const selectedPreset = useMemo(() => {
+    const n = Number(amount);
+    if (!amount || !Number.isFinite(n)) return '';
+    return PRESETS.find((value) => Number(value) === n) ?? '';
+  }, [amount]);
+
   function validateAmount() {
     if (!/^(?!0+(?:\.0{1,2})?$)\d+(\.\d{1,2})?$/.test(amount)) {
       setError('请输入正确的打赏金额');
@@ -84,7 +105,6 @@ export default function TipSupport({
         (location.state as { backgroundLocation?: unknown } | null)?.backgroundLocation,
       );
       if (openedOverRoom) {
-        // 群聊仍挂载且会收到 tip_thanks；真实回退可移除覆盖层历史，避免 play→play。
         navigate(-1);
       } else {
         navigate(`/game/${roomId}/play`, {
@@ -113,7 +133,7 @@ export default function TipSupport({
         return;
       }
       setPinOpen(false);
-      setError(TIP_ERROR[code] ?? code ?? '转账失败');
+      setError(tipErrorMessage(e));
     } finally {
       if (mountedRef.current) setBusy(false);
     }
@@ -134,6 +154,7 @@ export default function TipSupport({
 
   return (
     <div className="tip-page">
+      <div className="tip-page-glow" aria-hidden />
       <header className="tip-page-nav">
         <button
           type="button"
@@ -148,17 +169,15 @@ export default function TipSupport({
       </header>
 
       <main className="tip-page-body">
-        <section className="tip-page-payee" aria-labelledby="tip-page-title">
+        <section className="tip-page-hero" aria-labelledby="tip-page-title">
           <span className="tip-page-avatar" aria-hidden>
             <img src="/avatars/support-girl.jpg" alt="" />
           </span>
-          <div className="tip-page-payee-copy">
-            <small>转账给</small>
-            <h2 id="tip-page-title">客服小妹</h2>
-          </div>
+          <p className="tip-page-kicker">打赏给</p>
+          <h2 id="tip-page-title">客服小妹</h2>
         </section>
 
-        <section className="tip-page-card">
+        <section className="tip-page-stage">
           <div className="tip-page-amount">
             <span>转账金额</span>
             <label>
@@ -166,7 +185,7 @@ export default function TipSupport({
               <input
                 inputMode="decimal"
                 aria-label="打赏金额"
-                placeholder="0.00"
+                placeholder="0"
                 value={amount}
                 onChange={(e) => {
                   setAmount(normalizeMoneyInput(e.target.value));
@@ -182,32 +201,36 @@ export default function TipSupport({
               <button
                 key={value}
                 type="button"
-                className={amount === value ? 'active' : ''}
+                className={selectedPreset === value ? 'active' : ''}
                 onClick={() => {
                   setAmount(value);
                   setError('');
                 }}
                 disabled={busy}
               >
-                RM {value}
+                {value}
               </button>
             ))}
           </div>
         </section>
 
-        {error && <p className="tip-page-error">{error}</p>}
+        {error ? (
+          <p className="tip-page-error" role="alert">
+            {error}
+          </p>
+        ) : null}
+      </main>
 
+      <footer className="tip-page-dock">
         <button
           type="button"
           className="tip-page-cta"
           disabled={busy || !amount}
           onClick={requestPaymentPin}
         >
-          {busy ? '支付中…' : '确认支付'}
+          {busy ? '支付中…' : amount ? `确认打赏 RM ${displayAmount}` : '输入金额后打赏'}
         </button>
-
-        <p className="tip-page-security-note">支付密码验证后从余额扣除</p>
-      </main>
+      </footer>
 
       <PaymentPinSheet
         open={pinOpen}

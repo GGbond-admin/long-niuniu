@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useRef, useState, type ReactNode } from 'react';
+import { Fragment, memo, useEffect, useRef, useState, type ReactNode } from 'react';
 import { del, downloadAuthorized, hasToken, logout, patch, post, put, request, rm, setAdminToken } from './api';
 import FinanceCenter from './FinanceCenter';
 import GameConfigEditor from './GameConfigEditor';
@@ -178,6 +178,7 @@ function Shell({ admin }: { admin: Admin }) {
   const [supportUnreadTotal, setSupportUnreadTotal] = useState(0);
   const [identityPendingTotal, setIdentityPendingTotal] = useState(0);
   const supportBaseline = useRef<Map<string, number> | null>(null);
+  const supportUnreadRef = useRef(0);
   const current = allowed.includes(page) ? page : allowed[0] ?? 'dashboard';
   const [title, subtitle] = pageTitles[current];
   const canSupport = allowed.includes('support');
@@ -211,25 +212,27 @@ function Shell({ admin }: { admin: Admin }) {
     let cancelled = false;
 
     async function poll() {
+      if (document.hidden) return;
       try {
+        const summary = await request<{ total: number }>('/api/admin/support/unread-total');
+        if (cancelled) return;
+        const total = Number(summary.total ?? 0);
+        const previous = supportUnreadRef.current;
+        supportUnreadRef.current = total;
+        setSupportUnreadTotal((current) => (current === total ? current : total));
+        if (!supportBaseline.current) {
+          supportBaseline.current = new Map();
+          return;
+        }
+        if (total <= previous) return;
         const result = await request<{ items: Row[] }>('/api/admin/support/threads');
         if (cancelled) return;
         const nextMap = new Map<string, number>();
-        let totalUnread = 0;
+        const fresh: SupportToastItem[] = [];
+        const prev = supportBaseline.current;
         for (const thread of result.items) {
           const unread = Number(thread.unread ?? 0);
           nextMap.set(thread.userId, unread);
-          totalUnread += unread;
-        }
-        setSupportUnreadTotal(totalUnread);
-        if (!supportBaseline.current) {
-          supportBaseline.current = nextMap;
-          return;
-        }
-        const prev = supportBaseline.current;
-        const fresh: SupportToastItem[] = [];
-        for (const thread of result.items) {
-          const unread = Number(thread.unread ?? 0);
           const before = prev.get(thread.userId) ?? 0;
           if (unread > before) {
             fresh.push({
@@ -259,10 +262,15 @@ function Shell({ admin }: { admin: Admin }) {
     }
 
     void poll();
-    const timer = window.setInterval(() => void poll(), 6_000);
+    const timer = window.setInterval(() => void poll(), 20_000);
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') void poll();
+    };
+    document.addEventListener('visibilitychange', onVisible);
     return () => {
       cancelled = true;
       window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', onVisible);
     };
   }, [canSupport]);
 
@@ -285,13 +293,20 @@ function Shell({ admin }: { admin: Admin }) {
     }
 
     void poll();
-    const timer = window.setInterval(() => void poll(), 8_000);
+    const timer = window.setInterval(() => {
+      if (!document.hidden) void poll();
+    }, 20_000);
     const onQueueChanged = () => void poll();
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') void poll();
+    };
     window.addEventListener('identity-review-queue-changed', onQueueChanged);
+    document.addEventListener('visibilitychange', onVisible);
     return () => {
       cancelled = true;
       window.clearInterval(timer);
       window.removeEventListener('identity-review-queue-changed', onQueueChanged);
+      document.removeEventListener('visibilitychange', onVisible);
     };
   }, [canReviewIdentity]);
 
@@ -523,7 +538,7 @@ function DashMetric({
   );
 }
 
-function Dashboard({
+const Dashboard = memo(function Dashboard({
   allowed,
   onNavigate,
   onOpenFinance,
@@ -533,6 +548,7 @@ function Dashboard({
   onOpenFinance: (tab: 'deposits' | 'withdrawals') => void;
 }) {
   const [data, setData] = useState<Row | null>(null);
+  const dataRef = useRef<Row | null>(null);
   const [checks, setChecks] = useState<boolean[]>(() => {
     try {
       const raw = localStorage.getItem('admin_dashboard_checks');
@@ -546,11 +562,28 @@ function Dashboard({
   });
 
   useEffect(() => {
-    request<Row>('/api/admin/dashboard').then(setData).catch(() => setData(null));
-    const timer = window.setInterval(() => {
-      request<Row>('/api/admin/dashboard').then(setData).catch(() => undefined);
-    }, 15_000);
-    return () => window.clearInterval(timer);
+    function accept(next: Row) {
+      const encoded = JSON.stringify(next);
+      if (encoded === JSON.stringify(dataRef.current)) return;
+      dataRef.current = next;
+      setData(next);
+    }
+    function load() {
+      if (document.hidden) return;
+      request<Row>('/api/admin/dashboard').then(accept).catch(() => {
+        if (!dataRef.current) setData(null);
+      });
+    }
+    load();
+    const timer = window.setInterval(load, 30_000);
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') load();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
   }, []);
 
   useEffect(() => {
@@ -598,23 +631,27 @@ function Dashboard({
       <section className="dash-summary panel">
         <div className="dash-summary-main">
           <small>今日运营状态</small>
-          <strong>{todoTotal > 0 ? `${todoTotal} 项待处理` : '暂无紧急待办'}</strong>
+          <strong>
+            {!data ? '正在同步今日数据…' : todoTotal > 0 ? `${todoTotal} 项待处理` : '暂无紧急待办'}
+          </strong>
           <p>
-            已结算 {todaySettlements} 局 · 流水 RM {rm(betsCents)} · 抽水 RM {rm(rakeCents)}
+            {!data
+              ? '审核、流水与风险指标加载中'
+              : `已结算 ${todaySettlements} 局 · 流水 RM ${rm(betsCents)} · 抽水 RM ${rm(rakeCents)}`}
           </p>
         </div>
         <div className="dash-summary-side">
           <button type="button" className="dash-pill" onClick={() => go('gameOps')} disabled={!allowed.includes('gameOps')}>
             <span>进行中牌局</span>
-            <b>{activeRounds}</b>
+            <b>{data ? activeRounds : '—'}</b>
           </button>
           <button type="button" className="dash-pill" onClick={() => go('tng')} disabled={!allowed.includes('tng')}>
             <span>TNG 在途</span>
-            <b>RM {rm(transitCents)}</b>
+            <b>{data ? `RM ${rm(transitCents)}` : '—'}</b>
           </button>
           <button type="button" className="dash-pill" onClick={() => go('kyc')} disabled={!allowed.includes('kyc')}>
             <span>待审实名</span>
-            <b className={pendingKyc ? 'warn' : ''}>{pendingKyc}</b>
+            <b className={pendingKyc ? 'warn' : ''}>{data ? pendingKyc : '—'}</b>
           </button>
         </div>
       </section>
@@ -794,7 +831,7 @@ function Dashboard({
       </div>
     </div>
   );
-}
+});
 
 type UserDetailTab = 'overview' | 'profile' | 'kyc' | 'withdrawAccounts' | 'ledger' | 'rounds' | 'invitees' | 'orders';
 

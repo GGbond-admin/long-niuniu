@@ -33,6 +33,10 @@ import {
   TransferIcon,
   TransferSwapIcon,
 } from '../components/MoneyIcons';
+import {
+  fallbackChatStage,
+  roomComposerMuted,
+} from '../lib/roomChatMute';
 import { goToTab } from '../lib/nav';
 import type { Session } from '../sessionStore';
 import { disposeChatInputFocus, openExternalLink } from '../telegram';
@@ -775,13 +779,6 @@ const CHAT_STAGE_COPY: Record<
     detail: '系统正在发布本阶段规则与操作提示',
   },
 };
-
-function fallbackChatStage(phase: string | undefined): MutedChatStage | null {
-  if (phase === 'SENDING_PACKET') return 'DICE';
-  if (phase === 'CLAIMING') return 'CLAIMING';
-  if (phase === 'CLAIM_EXPIRED' || phase === 'SETTLING') return 'SETTLING';
-  return null;
-}
 
 /** 空闲/预览用完整一局演示：系统播报、@庄家、对局红包 vs 玩家拼手气红包 */
 const DEMO_FEED: FeedItem[] = [
@@ -2129,14 +2126,15 @@ export default function GameRoom({
     && !continuationActive;
   const fallbackMutedChatStage = fallbackChatStage(phase);
   const roomGloballyMuted = state?.room.chatMute?.muted === true;
-  const policyChatMuted =
-    state?.chatPolicy?.muted
-    ?? fallbackMutedChatStage !== null;
-  const chatMuted = continuationActive || policyChatMuted;
+  const chatMuted = roomComposerMuted({
+    phase,
+    chatPolicyMuted: state?.chatPolicy?.muted,
+    continuationActive,
+  });
   const mutedChatStage: MutedChatStage | null =
     continuationActive
       ? 'CONTINUATION'
-      : state?.chatPolicy?.stage ?? fallbackMutedChatStage;
+      : fallbackMutedChatStage ?? state?.chatPolicy?.stage ?? null;
   const gameStopped = state?.room.roundStartMode === 'STOPPED';
   const idlePhase = !phase || ['WAITING', 'FINISHED', 'CANCELLED'].includes(phase);
   const selfUid = myUid || session.uid;
@@ -3944,9 +3942,29 @@ export default function GameRoom({
     }
   }
 
+  function stageMuteNotice(): string {
+    if (mutedChatStage === 'CLAIMING') return '抢红包阶段禁止发言，请专注领取';
+    if (mutedChatStage === 'DICE') return '开骰发包阶段禁止普通发言，请等待下一局开始';
+    if (mutedChatStage === 'SETTLING') return '本局结算及成绩单发布期间禁止发言，请稍候';
+    return '当前阶段禁止发言';
+  }
+
+  function allowMutedRepostCommand(content: string): boolean {
+    return (
+      chatMuted
+      && mutedChatStage === 'DICE'
+      && state?.me.isBanker === true
+      && /^\/?重推$/i.test(content.trim())
+    );
+  }
+
   /** 服务端回显/确认后才清空输入；拒绝、断线或超时均返回 false 并保留草稿。 */
   function sendChat(content: string): Promise<boolean> | false {
     if (!content) return false;
+    if (chatMuted && !allowMutedRepostCommand(content)) {
+      setError(stageMuteNotice());
+      return false;
+    }
     const socketOpen = !!(
       socketRef.current && socketRef.current.readyState === WebSocket.OPEN
     );
@@ -4037,6 +4055,10 @@ export default function GameRoom({
   }
 
   function sendSticker(stickerId: string) {
+    if (chatMuted || roomGloballyMuted) {
+      setError(stageMuteNotice());
+      return;
+    }
     if (!ensureSocketReady()) return;
     socketRef.current!.send(
       JSON.stringify({

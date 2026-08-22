@@ -2,34 +2,12 @@ import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { AUTH_READY_EVENT, api, getToken } from '../api';
 import BrandLogo from '../components/BrandLogo';
+import { readLobbyCache, writeLobbyCache, type LobbyData } from '../lib/lobbyCache';
 
-type LobbyData = Awaited<ReturnType<typeof api.lobby>>;
-
-const LOBBY_CACHE_KEY = 'nn_lobby_v1';
 const LOBBY_BANNERS = [
   { id: 'banner-01', src: '/banners/banner-01.jpg', alt: '至尊牛牛 · 互动群对局' },
   { id: 'banner-02', src: '/banners/banner-02.jpg', alt: '至尊牛牛 · 公平结算' },
 ] as const;
-
-function readLobbyCache(): LobbyData | null {
-  try {
-    const raw = sessionStorage.getItem(LOBBY_CACHE_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as LobbyData;
-    if (!parsed || !Array.isArray(parsed.games)) return null;
-    return parsed;
-  } catch {
-    return null;
-  }
-}
-
-function writeLobbyCache(data: LobbyData) {
-  try {
-    sessionStorage.setItem(LOBBY_CACHE_KEY, JSON.stringify(data));
-  } catch {
-    // ignore
-  }
-}
 
 export default function Lobby({ active = true }: { active?: boolean }) {
   const navigate = useNavigate();

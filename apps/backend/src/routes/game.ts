@@ -200,6 +200,18 @@ function emitTransition(
 }
 
 const NEXT_ROUND_RECOVERY_DELAYS_MS = [250, 500, 1_000, 2_000] as const;
+const ADMIN_DASHBOARD_TTL_MS = 8_000;
+let adminDashboardCache: { at: number; value: Record<string, unknown> } | null = null;
+
+function readAdminDashboardCache() {
+  if (!adminDashboardCache) return null;
+  if (Date.now() - adminDashboardCache.at >= ADMIN_DASHBOARD_TTL_MS) return null;
+  return adminDashboardCache.value;
+}
+
+function writeAdminDashboardCache(value: Record<string, unknown>) {
+  adminDashboardCache = { at: Date.now(), value };
+}
 
 function recoverNextRoundThenEmit(
   params: {
@@ -977,6 +989,8 @@ export async function adminGameRoutes(app: FastifyInstance) {
   );
 
   app.get('/api/admin/dashboard', { preHandler: [app.authAdmin] }, async () => {
+    const cached = readAdminDashboardCache();
+    if (cached) return cached;
     const dayStart = new Date(`${malaysiaDay()}T00:00:00+08:00`);
     const [
       pendingKyc,
@@ -1019,7 +1033,7 @@ export async function adminGameRoutes(app: FastifyInstance) {
         where: { status: 'EXPIRED', round: { phase: { in: ['FINISHED', 'CANCELLED'] } } },
       }),
     ]);
-    return {
+    const payload = {
       pendingKyc,
       pendingDeposits,
       pendingWithdrawals,
@@ -1032,6 +1046,8 @@ export async function adminGameRoutes(app: FastifyInstance) {
       todayPushFailures,
       reconcileAnomalies,
     };
+    writeAdminDashboardCache(payload);
+    return payload;
   });
 
   app.get('/api/admin/games/:gameCode/rules', { preHandler: roomObservers }, async (req) => {

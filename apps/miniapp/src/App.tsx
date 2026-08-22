@@ -361,11 +361,24 @@ export default function App() {
         }
         // 登录失败时不能默默沿用本地缓存：token 可能已过期，后续操作会莫名失败。
         // 先验证旧 token，仍有效则继续；无效则清空会话并给出可重试的错误。
-        if (getCachedSession() && getToken()) {
+        // 限流不是会话失效：再打 /me 只会再吃一次 429，并可能把人挡在全屏错误页。
+        const cached = getCachedSession();
+        const cachedToken = getToken();
+        if (code === 'RATE_LIMITED' && cached && cachedToken) {
+          setSession(cached);
+          return;
+        }
+        if (cached && cachedToken) {
           try {
             await api.me();
             return;
-          } catch {
+          } catch (meError) {
+            const meCode = (meError as { code?: string; status?: number }).code;
+            const meStatus = (meError as { status?: number }).status;
+            if (meCode === 'RATE_LIMITED' || meStatus === 429) {
+              setSession(cached);
+              return;
+            }
             setToken(null);
             setCachedSession(null);
             setSession(null);

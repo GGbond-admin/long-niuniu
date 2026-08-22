@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   CONTINUATION_REJECTED_INSUFFICIENT,
   deriveRoomChatPolicy,
+  resolveRoomChatPolicy,
   ROOM_ANNOUNCED_FINISHED,
   type ChatPolicyRoundSnapshot,
 } from './roomChatPolicy.js';
@@ -272,5 +273,75 @@ describe('房间权威聊天策略', () => {
         stopped,
       ),
     ).toEqual({ muted: false, stage: null });
+  });
+
+  it('更高局号的历史取消局会把进行中抢包挤出最近 4 条', () => {
+    const recentWindow = [
+      round(RoundPhase.CANCELLED, { id: 'c-12', seqNo: 12, cancelReason: '人数不足' }),
+      round(RoundPhase.CANCELLED, { id: 'c-11', seqNo: 11, cancelReason: '人数不足' }),
+      round(RoundPhase.CANCELLED, { id: 'c-10', seqNo: 10, cancelReason: '人数不足' }),
+      round(RoundPhase.CANCELLED, { id: 'c-9', seqNo: 9, cancelReason: '人数不足' }),
+    ];
+    const claiming = round(RoundPhase.CLAIMING, { id: 'live-6', seqNo: 6 });
+    expect(deriveRoomChatPolicy(recentWindow, now)).toEqual({
+      muted: false,
+      stage: null,
+    });
+    expect(deriveRoomChatPolicy([claiming, ...recentWindow], now)).toEqual({
+      muted: true,
+      stage: 'CLAIMING',
+    });
+    expect(
+      resolveRoomChatPolicy(deriveRoomChatPolicy(recentWindow, now), claiming.phase),
+    ).toEqual({ muted: true, stage: 'CLAIMING' });
+  });
+
+  it('最近窗口只有 WAITING/取消局时，进行中抢包仍必须禁言', () => {
+    const staleWindow = deriveRoomChatPolicy(
+      [
+        round(RoundPhase.WAITING, { id: 'round-10', seqNo: 10 }),
+        round(RoundPhase.CANCELLED, {
+          id: 'round-9c',
+          seqNo: 9,
+          cancelReason: '人数不足',
+        }),
+        round(RoundPhase.CANCELLED, {
+          id: 'round-9b',
+          seqNo: 9,
+          cancelReason: '人数不足',
+        }),
+        round(RoundPhase.CANCELLED, {
+          id: 'round-9a',
+          seqNo: 9,
+          cancelReason: '人数不足',
+        }),
+      ],
+      now,
+    );
+    expect(staleWindow).toEqual({ muted: false, stage: null });
+    expect(resolveRoomChatPolicy(staleWindow, RoundPhase.CLAIMING)).toEqual({
+      muted: true,
+      stage: 'CLAIMING',
+    });
+    expect(resolveRoomChatPolicy(staleWindow, RoundPhase.SENDING_PACKET)).toEqual({
+      muted: true,
+      stage: 'DICE',
+    });
+    expect(resolveRoomChatPolicy(staleWindow, RoundPhase.SETTLING)).toEqual({
+      muted: true,
+      stage: 'SETTLING',
+    });
+  });
+
+  it('没有进行中硬禁言阶段时，保留续庄/准备下一局策略', () => {
+    const continuation = {
+      muted: true,
+      stage: 'CONTINUATION' as const,
+    };
+    expect(resolveRoomChatPolicy(continuation, RoundPhase.WAITING)).toEqual(
+      continuation,
+    );
+    expect(resolveRoomChatPolicy({ muted: false, stage: null }, RoundPhase.BETTING))
+      .toEqual({ muted: false, stage: null });
   });
 });

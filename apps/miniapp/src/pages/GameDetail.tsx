@@ -1,10 +1,16 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
-import { api } from '../api';
+import { AUTH_READY_EVENT, api, getToken } from '../api';
 import { goBack } from '../lib/nav';
 import BrandLogo from '../components/BrandLogo';
+import {
+  lobbyLoadErrorMessage,
+  readLobbyCache,
+  shouldKeepCachedLobby,
+  writeLobbyCache,
+  type LobbyData,
+} from '../lib/lobbyCache';
 
-type Lobby = Awaited<ReturnType<typeof api.lobby>>;
 type GameRules = Awaited<ReturnType<typeof api.gameRules>>;
 
 const rulesCache = new Map<string, GameRules>();
@@ -38,7 +44,7 @@ export default function GameDetail({ kycStatus }: { kycStatus: string }) {
   const { roomId = '' } = useParams();
   const navigate = useNavigate();
   const location = useLocation();
-  const [lobby, setLobby] = useState<Lobby | null>(null);
+  const [lobby, setLobby] = useState<LobbyData | null>(readLobbyCache);
   const [lobbyError, setLobbyError] = useState('');
   const [lobbyRetryKey, setLobbyRetryKey] = useState(0);
   const [rules, setRules] = useState<GameRules | null>(null);
@@ -50,21 +56,45 @@ export default function GameDetail({ kycStatus }: { kycStatus: string }) {
 
   useEffect(() => {
     let alive = true;
-    api
-      .lobby()
-      .then((result) => {
-        if (!alive) return;
-        setLobby(result);
-        setLobbyError('');
-      })
-      .catch(() => {
-        if (!alive) return;
-        setLobbyError('房间信息加载失败，请检查网络后重试。');
-        // 拿不到 gameCode 时先展示内置兜底规则，避免永久停在加载中
-        setRulesFailed(true);
-      });
+    const load = () => {
+      if (!getToken()) return;
+      const loadLobby = async () => {
+        try {
+          return await api.lobby();
+        } catch (error) {
+          const code = (error as { code?: string }).code;
+          if (code === 'RATE_LIMITED' || code === 'REQUEST_TIMEOUT') {
+            await new Promise<void>((resolve) => setTimeout(resolve, 700));
+            return api.lobby();
+          }
+          throw error;
+        }
+      };
+      void loadLobby()
+        .then((result) => {
+          if (!alive) return;
+          writeLobbyCache(result);
+          setLobby(result);
+          setLobbyError('');
+        })
+        .catch((reason) => {
+          if (!alive) return;
+          const cached = readLobbyCache();
+          if (shouldKeepCachedLobby(cached)) {
+            setLobby(cached);
+            setLobbyError('');
+            return;
+          }
+          setLobbyError(lobbyLoadErrorMessage(reason));
+          // 拿不到 gameCode 时先展示内置兜底规则，避免永久停在加载中
+          setRulesFailed(true);
+        });
+    };
+    load();
+    window.addEventListener(AUTH_READY_EVENT, load);
     return () => {
       alive = false;
+      window.removeEventListener(AUTH_READY_EVENT, load);
     };
   }, [lobbyRetryKey]);
 
