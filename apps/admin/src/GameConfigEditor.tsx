@@ -251,12 +251,24 @@ function HandForm({
         ))}
       </Section>
       <Section title="自爆规则">
+        <Field label="自爆开关" hint="关闭后普通低点也按正常比牌，不再直接判输">
+          <select
+            value={value.bustEnabled === false ? '0' : '1'}
+            onChange={(event) =>
+              onChange({ ...value, bustEnabled: event.target.value === '1' })
+            }
+          >
+            <option value="1">开启</option>
+            <option value="0">关闭</option>
+          </select>
+        </Field>
         <Field label="自爆门槛" hint="点数 ≤ 此值判自爆（0–10）；特殊牌型固定不自爆">
           <input
             type="number"
             min={0}
             max={10}
             step={1}
+            disabled={value.bustEnabled === false}
             value={value.bustThreshold ?? ''}
             onChange={(event) =>
               onChange({ ...value, bustThreshold: Number(event.target.value) })
@@ -847,6 +859,7 @@ function serializeConfig(key: string, draft: Row): Row {
     return {
       multipliers,
       normalMultipliers,
+      bustEnabled: draft.bustEnabled !== false,
       bustThreshold: intOrThrow(String(draft.bustThreshold ?? ''), '自爆门槛'),
     };
   }

@@ -699,6 +699,7 @@ const configSchemas = {
     .object({
       multipliers: z.record(z.number().int().min(1).max(100)).optional(),
       normalMultipliers: z.record(z.number().int().min(1).max(100)).optional(),
+      bustEnabled: z.boolean().optional(),
       bustThreshold: z.number().int().min(0).max(10).optional(),
     })
     .strip(),

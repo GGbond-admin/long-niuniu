@@ -24,6 +24,7 @@ import {
 } from './telegram';
 import { getCachedSession, setCachedSession, type Session } from './sessionStore';
 import Tabs from './pages/Tabs';
+import BrandSplash from './components/BrandSplash';
 import SupportInboxToast from './components/SupportInboxToast';
 
 const BindInviter = lazy(() => import('./pages/BindInviter'));
@@ -85,7 +86,7 @@ function DefaultGameRedirect({
   }, []);
 
   if (failed) return <Navigate to="/" replace />;
-  if (!roomId) return <div className="loading">正在进入游戏…</div>;
+  if (!roomId) return <BrandSplash hint="正在进入游戏…" />;
   const path =
     destination === 'rules'
       ? `/game/${roomId}`
@@ -486,10 +487,10 @@ export default function App() {
       </div>
     );
   }
-  if (!session) return <div className="loading">加载中…</div>;
+  if (!session) return <BrandSplash />;
 
   return (
-    <Suspense fallback={<div className="loading">加载中…</div>}>
+    <Suspense fallback={<BrandSplash />}>
       <Routes location={backgroundLocation ?? location}>
         <Route path="/bind-inviter" element={<BindInviter session={session} onDone={refresh} />} />
         <Route path="/bind-device" element={<BindDevice onDone={refresh} />} />

@@ -11334,3 +11334,51 @@ body.tg-native-back-visible :is(
     transform:none;
   }
 }
+
+.boot-splash {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: var(--accent-text);
+  text-align: center;
+}
+.boot-splash strong {
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  color: var(--text);
+}
+.boot-splash span {
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+.boot-splash-bar {
+  display: block;
+  width: 72px;
+  height: 2px;
+  margin-top: 6px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--accent-soft);
+}
+.boot-splash-bar::after {
+  content: '';
+  display: block;
+  width: 36px;
+  height: 100%;
+  background: var(--accent);
+  animation: boot-splash-slide 1.1s ease-in-out infinite;
+}
+@keyframes boot-splash-slide {
+  0% { transform: translateX(-36px); }
+  100% { transform: translateX(72px); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .boot-splash-bar::after {
+    animation: none;
+    width: 100%;
+  }
+}

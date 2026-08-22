@@ -720,6 +720,7 @@ export const api = {
         hand: {
           multipliers: Record<string, number>;
           normalMultipliers: Record<string, number>;
+          bustEnabled: boolean;
           bustThreshold: number;
         };
         betting: Record<string, number | Array<Record<string, number>>>;
@@ -729,6 +730,7 @@ export const api = {
       hand: {
         multipliers: Record<string, number>;
         normalMultipliers: Record<string, number>;
+        bustEnabled: boolean;
         bustThreshold: number;
       };
       betting: {

@@ -5,7 +5,7 @@ async function main() {
   for (const config of configs) {
     const value = config.value as Record<string, unknown>;
     console.log(
-      `gameCode=${config.gameCode} bustThreshold=${value.bustThreshold} bustExemptSpecialHands=${value.bustExemptSpecialHands} updatedAt=${config.updatedAt.toISOString()}`,
+      `gameCode=${config.gameCode} bustEnabled=${value.bustEnabled} bustThreshold=${value.bustThreshold} updatedAt=${config.updatedAt.toISOString()}`,
     );
   }
 
@@ -20,8 +20,8 @@ async function main() {
       `round #${round.seqNo} (${round.createdAt.toISOString()}) hand=`,
       snapshot?.hand
         ? {
+            bustEnabled: snapshot.hand.bustEnabled,
             bustThreshold: snapshot.hand.bustThreshold,
-            bustExemptSpecialHands: snapshot.hand.bustExemptSpecialHands,
           }
         : 'no snapshot',
     );

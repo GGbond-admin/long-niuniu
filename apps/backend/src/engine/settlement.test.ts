@@ -615,6 +615,19 @@ describe('单局结算（06 文档 §6 / 04 文档 T01–T08）', () => {
     expect(r.pairs[1].isBustBanker).toBe(true);
   });
 
+  it('关闭自爆后低点按正常比牌，不再直接判输', () => {
+    const r = settleRound({
+      bankerUserId: 'banker',
+      bankerClaimCents: toCents('1.10'), // 普通2点
+      potCents: toCents('1000'),
+      players: [{ userId: 'p1', betCents: toCents('10'), claimCents: toCents('1.20') }], // 普通3点
+      handConfig: { ...handConfig, bustEnabled: false },
+    });
+    expect(r.pairs[0].isBustPlayer).toBe(false);
+    expect(r.pairs[0].isBustBanker).toBe(false);
+    expect(r.pairs[0].outcome).toBe('PLAYER_WIN');
+  });
+
   it('庄家费用：庄钱5000 → 上庄费50；服务费38；30人代包费31.2', () => {
     const players = Array.from({ length: 29 }, (_, i) => ({
       userId: `p${i}`,

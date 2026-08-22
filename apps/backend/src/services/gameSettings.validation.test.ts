@@ -83,7 +83,7 @@ describe('游戏配置跨字段校验', () => {
       ['rebate', DEFAULT_REBATE_CONFIG, { selfRate: 0.007 }],
       ['round', DEFAULT_ROUND_CONFIG, { bidDurationSeconds: 30 }],
       ['rewards', DEFAULT_REWARD_RULES, { minBetCents: 500 }],
-      ['hand', DEFAULT_HAND_CONFIG, { bustThreshold: 3 }],
+      ['hand', DEFAULT_HAND_CONFIG, { bustEnabled: true, bustThreshold: 3 }],
       ['messages', DEFAULT_MESSAGE_TEMPLATES, { bidCountdown3: '3' }],
     ] as const;
 
@@ -94,6 +94,15 @@ describe('游戏配置跨字段校验', () => {
       ) as Record<string, unknown>;
       expect(saved.legacyRemovedField, key).toBeUndefined();
     }
+  });
+
+  it('自爆开关可以关闭并写回', () => {
+    const saved = validateGameConfig('hand', { bustEnabled: false }) as {
+      bustEnabled: boolean;
+      bustThreshold: number;
+    };
+    expect(saved.bustEnabled).toBe(false);
+    expect(saved.bustThreshold).toBe(3);
   });
 
   it('梭哈比例按小数写入，未换算的百分数 5 会被拒绝', () => {

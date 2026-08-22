@@ -60,6 +60,8 @@ export interface HandConfig {
   multipliers: Record<HandType, number>;
   /** 普通牌型 0–10 点各自倍数 */
   normalMultipliers: Record<number, number>;
+  /** 自爆总开关。关闭后不再按点数判自爆，只走正常比牌。 */
+  bustEnabled: boolean;
   /** 自爆阈值：点数 <= bustThreshold 判自爆（默认 3）；仅普通牌型参与自爆 */
   bustThreshold: number;
 }
@@ -77,6 +79,7 @@ export const DEFAULT_HAND_CONFIG: HandConfig = {
     [HandType.NORMAL]: 1, // 占位，普通用 normalMultipliers
   },
   normalMultipliers: { 0: 1, 1: 1, 2: 1, 3: 1, 4: 1, 5: 1, 6: 1, 7: 1, 8: 2, 9: 3, 10: 4 },
+  bustEnabled: true,
   bustThreshold: 3,
 };
 
@@ -149,10 +152,12 @@ export function evaluateHand(amountCents: number): HandResult {
 
 /**
  * 是否自爆：仅普通牌型且点数 ≤ 阈值。
+ * 后台可关闭自爆；关闭后一律按正常比牌。
  * 特殊牌型（豹子/满牛/顺子/倒顺/对子/金牛/牛牛）与免死一律不自爆——规则固定写死，
- * 不受任何后台配置影响，防止误配导致特殊牌型被判输。
+ * 不受门槛配置影响，防止误配导致特殊牌型被判输。
  */
 export function isBust(hand: HandResult, config: HandConfig = DEFAULT_HAND_CONFIG): boolean {
+  if (config.bustEnabled === false) return false;
   if (hand.type !== HandType.NORMAL) return false;
   return hand.points <= config.bustThreshold;
 }

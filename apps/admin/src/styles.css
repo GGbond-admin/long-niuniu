@@ -7342,7 +7342,7 @@ textarea::placeholder {
 .ppx-batch-status.voided { color: #7a3141; background: #f6e4e7; }
 .ppx-company-ledger {
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 10px;
   padding: 22px 30px;
   border-bottom: 1px solid var(--ppx-line);
@@ -7351,6 +7351,11 @@ textarea::placeholder {
 .ppx-company-ledger article { min-height: 126px; background: #fff; }
 .ppx-company-ledger article strong { font-size: 17px; }
 .ppx-company-ledger .expense strong { color: var(--ppx-red); }
+.ppx-company-ledger .distributed {
+  border-color: rgba(59, 130, 196, .28);
+  background: #eef5fb;
+}
+.ppx-company-ledger .distributed strong { color: #1d5f9a; }
 .ppx-company-ledger .retained {
   border-color: rgba(184, 146, 61, .24);
   background: #fbf8ef;
@@ -7401,6 +7406,22 @@ textarea::placeholder {
 .ppx-agent-cell small { color: #8a93a1; font-size: 9px; }
 .ppx-report-table tr.ppx-agent-row-expandable { cursor: pointer; }
 .ppx-report-table tr.ppx-agent-row-expandable:hover td { background: #f6f7f9; }
+.ppx-report-table tr.ppx-level-row td { background: #f7f9fc; }
+.ppx-report-table tr.ppx-level-row + tr.ppx-level-row td { border-top-color: #e8edf3; }
+.ppx-level-badge {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
+  color: #3d5a80;
+  border-radius: 9px;
+  background: #dce7f3;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: .02em;
+}
 .ppx-agent-toggle,
 .ppx-agent-toggle-spacer {
   flex: 0 0 18px;

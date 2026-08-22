@@ -396,6 +396,7 @@ export function ruleConfigSummary(settings: GameSettings) {
     hand: {
       multipliers: settings.hand.multipliers,
       normalMultipliers: settings.hand.normalMultipliers,
+      bustEnabled: settings.hand.bustEnabled !== false,
       bustThreshold: settings.hand.bustThreshold,
     },
     betting: settings.betting,

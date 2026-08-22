@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { del, downloadAuthorized, post, request, rm } from '../api';
-import type { BatchAgentSnapshot, BatchDetail } from './types';
+import { groupByParent, visibleRows } from './batchReportTree';
+import type { BatchDetail } from './types';
 
 const STATUS: Record<string, { label: string; tone: string }> = {
   PENDING: { label: '已生成 · 待分配', tone: 'pending' },
@@ -16,43 +17,6 @@ function signedRm(cents: string) {
 
 function errorText(error: unknown) {
   return error instanceof Error ? error.message : '操作失败，请重试';
-}
-
-function groupByParent(items: BatchAgentSnapshot[]) {
-  const ids = new Set(items.map((item) => item.sourceAgentId));
-  const byParent = new Map<string | null, BatchAgentSnapshot[]>();
-  for (const item of items) {
-    const parent =
-      item.parentSourceAgentId && ids.has(item.parentSourceAgentId)
-        ? item.parentSourceAgentId
-        : null;
-    const list = byParent.get(parent) ?? [];
-    list.push(item);
-    byParent.set(parent, list);
-  }
-  return byParent;
-}
-
-function visibleTree(
-  byParent: Map<string | null, BatchAgentSnapshot[]>,
-  expanded: Set<string>,
-) {
-  const result: Array<{
-    item: BatchAgentSnapshot;
-    depth: number;
-    childCount: number;
-  }> = [];
-  const visit = (parentId: string | null, depth: number) => {
-    for (const item of byParent.get(parentId) ?? []) {
-      const childCount = byParent.get(item.sourceAgentId)?.length ?? 0;
-      result.push({ item, depth, childCount });
-      if (childCount > 0 && expanded.has(item.sourceAgentId)) {
-        visit(item.sourceAgentId, depth + 1);
-      }
-    }
-  };
-  visit(null, 0);
-  return result;
 }
 
 export default function BatchReport({
@@ -100,8 +64,8 @@ export default function BatchReport({
     () => groupByParent(pool?.agentSnapshots ?? []),
     [pool?.agentSnapshots],
   );
-  const orderedAgents = useMemo(
-    () => visibleTree(byParent, expanded),
+  const orderedRows = useMemo(
+    () => visibleRows(byParent, expanded),
     [byParent, expanded],
   );
   const rootCount = byParent.get(null)?.length ?? 0;
@@ -255,6 +219,11 @@ export default function BatchReport({
       </header>
 
       <div className="ppx-company-ledger">
+        <article className="distributed">
+          <small>代理分配合计</small>
+          <strong>{signedRm(pool.distributedCents)}</strong>
+          <span>全部代理称桶利润加总</span>
+        </article>
         <article>
           <small>本期公司总流水</small>
           <strong>{signedRm(pool.turnoverCents)}</strong>
@@ -278,7 +247,7 @@ export default function BatchReport({
         <article className="retained-money">
           <small>剩余占成对应利润</small>
           <strong>{signedRm(pool.residualCents)}</strong>
-          <span>代理分配 {signedRm(pool.distributedCents)}</span>
+          <span>最终利润池 − 代理分配</span>
         </article>
       </div>
 
@@ -288,7 +257,7 @@ export default function BatchReport({
           <h3>全部代理称桶利润</h3>
         </div>
         <span>
-          默认只显示顶层 {rootCount} 位 · 点击有下级的代理逐层展开 · 共 {pool.agentSnapshots.length} 位
+          默认只显示第一层 {rootCount} 位 · 合计已含整条线 · 点击展开查看各层下线利润 · 共 {pool.agentSnapshots.length} 位
         </span>
       </div>
 
@@ -306,22 +275,83 @@ export default function BatchReport({
             </tr>
           </thead>
           <tbody>
-            {orderedAgents.map(({ item, depth, childCount }) => {
+            {orderedRows.map((row) => {
+              if (row.kind === 'self') {
+                return (
+                  <tr key={`${row.item.id}-self`} className="ppx-level-row">
+                    <td>
+                      <div className="ppx-agent-cell" style={{ paddingLeft: 22 }}>
+                        <span className="ppx-agent-toggle-spacer" aria-hidden="true" />
+                        <span className="ppx-level-badge">本层</span>
+                        <span>
+                          <strong>自身利润</strong>
+                          <small>{row.item.label} 本人称桶</small>
+                        </span>
+                      </div>
+                    </td>
+                    <td>
+                      <b className="ppx-points">
+                        {row.item.sharePointsSnapshot}/{row.item.bucketBaseSnapshot}
+                      </b>
+                    </td>
+                    <td>
+                      <strong>RM {rm(row.item.selfTurnoverCents)}</strong>
+                      <small>仅自身流水</small>
+                    </td>
+                    <td>
+                      <strong>1 代理</strong>
+                      <small>本人</small>
+                    </td>
+                    <td>RM {rm(row.item.selfAmountCents)}</td>
+                    <td>RM {rm(row.item.overrideAmountCents)}</td>
+                    <td><strong className="ppx-money">RM {rm(row.item.amountCents)}</strong></td>
+                  </tr>
+                );
+              }
+              if (row.kind === 'level') {
+                return (
+                  <tr key={`${row.item.id}-L${row.rollup.level}`} className="ppx-level-row">
+                    <td>
+                      <div className="ppx-agent-cell" style={{ paddingLeft: 22 }}>
+                        <span className="ppx-agent-toggle-spacer" aria-hidden="true" />
+                        <span className="ppx-level-badge">L{row.rollup.level}</span>
+                        <span>
+                          <strong>第{row.rollup.level}层代理</strong>
+                          <small>{row.rollup.count} 位下线合计</small>
+                        </span>
+                      </div>
+                    </td>
+                    <td>—</td>
+                    <td>
+                      <strong>RM {rm(row.rollup.selfTurnoverCents)}</strong>
+                      <small>该层自身流水加总</small>
+                    </td>
+                    <td>
+                      <strong>{row.rollup.count} 代理</strong>
+                      <small>第{row.rollup.level}层</small>
+                    </td>
+                    <td>RM {rm(row.rollup.selfAmountCents)}</td>
+                    <td>RM {rm(row.rollup.overrideAmountCents)}</td>
+                    <td><strong className="ppx-money">RM {rm(row.rollup.amountCents)}</strong></td>
+                  </tr>
+                );
+              }
+              const { item, descendantCount, treeAmountCents } = row;
               const open = expanded.has(item.sourceAgentId);
               return (
                 <tr
                   key={item.id}
-                  className={childCount > 0 ? 'ppx-agent-row-expandable' : undefined}
-                  onClick={childCount > 0 ? () => toggleAgent(item.sourceAgentId) : undefined}
+                  className={descendantCount > 0 ? 'ppx-agent-row-expandable' : undefined}
+                  onClick={descendantCount > 0 ? () => toggleAgent(item.sourceAgentId) : undefined}
                 >
                   <td>
-                    <div className="ppx-agent-cell" style={{ paddingLeft: depth * 22 }}>
-                      {childCount > 0 ? (
+                    <div className="ppx-agent-cell">
+                      {descendantCount > 0 ? (
                         <button
                           type="button"
                           className="ppx-agent-toggle"
                           aria-expanded={open}
-                          aria-label={open ? `收起 ${item.label} 的直属代理` : `展开 ${item.label} 的直属代理`}
+                          aria-label={open ? `收起 ${item.label} 的各层利润` : `展开 ${item.label} 的各层利润`}
                           onClick={(event) => {
                             event.stopPropagation();
                             toggleAgent(item.sourceAgentId);
@@ -341,7 +371,7 @@ export default function BatchReport({
                         <strong>{item.label}</strong>
                         <small>
                           L{item.level} · UID {item.uid}
-                          {childCount > 0 ? ` · ${childCount} 位直属代理` : ''}
+                          {descendantCount > 0 ? ` · ${descendantCount} 位下线` : ''}
                         </small>
                       </span>
                     </div>
@@ -361,13 +391,16 @@ export default function BatchReport({
                   </td>
                   <td>RM {rm(item.selfAmountCents)}</td>
                   <td>RM {rm(item.overrideAmountCents)}</td>
-                  <td><strong className="ppx-money">RM {rm(item.amountCents)}</strong></td>
+                  <td>
+                    <strong className="ppx-money">RM {rm(treeAmountCents)}</strong>
+                    {descendantCount > 0 ? <small>含整条线</small> : null}
+                  </td>
                 </tr>
               );
             })}
           </tbody>
         </table>
-        {orderedAgents.length === 0 && (
+        {orderedRows.length === 0 && (
           <p className="ppx-empty">本期没有代理快照，利润全部由公司留存。</p>
         )}
       </div>

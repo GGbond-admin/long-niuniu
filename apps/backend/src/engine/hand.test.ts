@@ -305,4 +305,10 @@ describe('自爆（06 文档 §2.1）', () => {
     expect(isBust(h)).toBe(false);
     expect(isBust(h, { ...DEFAULT_HAND_CONFIG, bustThreshold: 10 })).toBe(false);
   });
+  it('关闭自爆后普通低点也不再判自爆', () => {
+    const h = evaluateHand(toCents('1.20'));
+    expect(h.type).toBe(HandType.NORMAL);
+    expect(h.points).toBe(3);
+    expect(isBust(h, { ...DEFAULT_HAND_CONFIG, bustEnabled: false })).toBe(false);
+  });
 });
