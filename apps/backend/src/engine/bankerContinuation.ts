@@ -25,6 +25,24 @@ export interface ContinuationDestinationRound {
   phase: RoundPhase;
 }
 
+export const BANKER_REPOST_CANCEL_REASON = '庄家重推';
+
+/**
+ * 取消局不占号复用后，续庄/自动开局必须认上一手有效 FINISHED 局。
+ * 只有「庄家重推」取消要立刻开替代竞标，才把同号取消局当作上一局。
+ */
+export function selectPreviousRoundForWaiting<
+  T extends { phase: RoundPhase; cancelReason?: string | null },
+>(params: {
+  cancelledAttempt: T | null | undefined;
+  lastFinished: T | null | undefined;
+}): T | null {
+  if (params.cancelledAttempt?.cancelReason === BANKER_REPOST_CANCEL_REASON) {
+    return params.cancelledAttempt;
+  }
+  return params.lastFinished ?? null;
+}
+
 /**
  * 续庄选择优先于自动开局；选择窗口超时或续庄资格已经用尽时，
  * 必须转入公开竞标，避免「自动开局」关闭时把进行中的牌局链卡在等待页。

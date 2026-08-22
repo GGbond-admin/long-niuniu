@@ -73,3 +73,21 @@ export function setCachedGameAdminAssignments(
 ) {
   cachedGameAdminAssignments = assignments;
 }
+
+const AGENT_REPORT_SEEN_PREFIX = 'nn_agent_report_seen:';
+
+export function getSeenAgentReportPoolId(agentId: string): string | null {
+  try {
+    return localStorage.getItem(`${AGENT_REPORT_SEEN_PREFIX}${agentId}`);
+  } catch {
+    return null;
+  }
+}
+
+export function markAgentReportSeen(agentId: string, poolId: string) {
+  try {
+    localStorage.setItem(`${AGENT_REPORT_SEEN_PREFIX}${agentId}`, poolId);
+  } catch {
+    // ignore
+  }
+}

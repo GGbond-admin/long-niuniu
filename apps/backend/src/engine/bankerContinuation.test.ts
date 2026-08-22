@@ -2,7 +2,9 @@ import { RoundPhase } from '@prisma/client';
 import { describe, expect, it } from 'vitest';
 import {
   bankerContinuationError,
+  BANKER_REPOST_CANCEL_REASON,
   nextRoundReadyAtMs,
+  selectPreviousRoundForWaiting,
   shouldStartWaitingRound,
   type ContinuationDestinationRound,
   type ContinuationSourceRound,
@@ -175,6 +177,43 @@ describe('续庄结束后的下一局推进', () => {
         continuationError: undefined,
       }),
     ).toBe(false);
+  });
+});
+
+describe('取消局复用序号后的上一局', () => {
+  const cancelled = {
+    phase: RoundPhase.CANCELLED,
+    cancelReason: 'NO_BETS',
+    id: 'round-18-cancelled',
+  };
+  const finished = {
+    phase: RoundPhase.FINISHED,
+    cancelReason: null,
+    id: 'round-17',
+  };
+
+  it('普通取消后回退到上一手有效完成局', () => {
+    expect(
+      selectPreviousRoundForWaiting({
+        cancelledAttempt: cancelled,
+        lastFinished: finished,
+      }),
+    ).toEqual(finished);
+  });
+
+  it('庄家重推取消仍认同号取消局，以便立刻开替代竞标', () => {
+    expect(
+      selectPreviousRoundForWaiting({
+        cancelledAttempt: {
+          ...cancelled,
+          cancelReason: BANKER_REPOST_CANCEL_REASON,
+        },
+        lastFinished: finished,
+      }),
+    ).toEqual({
+      ...cancelled,
+      cancelReason: BANKER_REPOST_CANCEL_REASON,
+    });
   });
 });
 

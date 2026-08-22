@@ -264,6 +264,16 @@ const activePhases = new Set([
   'SETTLING',
 ]);
 
+/** TNG 已发出的取消局仍要留在运营台，供财务登记已领取 / 实际退回。 */
+function needsCancelledPacketReconcile(round: Row | null | undefined): boolean {
+  if (!round || round.phase !== 'CANCELLED' || !round.packet?.sentAt) return false;
+  return String(round.packet.status ?? '') !== 'RECONCILED';
+}
+
+function isListedOpsRound(round: Row): boolean {
+  return round.phase !== 'CANCELLED' || needsCancelledPacketReconcile(round);
+}
+
 function toCents(value: string) {
   const cleaned = value.trim().replace(/,/g, '');
   if (!/^\d+(\.\d{1,2})?$/.test(cleaned)) throw new Error('金额格式无效，请输入如 12.50');
@@ -768,8 +778,9 @@ export default function GameOperationsCenter({ admin }: { admin: Admin }) {
     ]);
     if (generation !== loadGenerationRef.current || selectedRoomIdRef.current !== roomId) return;
 
-    setRounds(roundResponse.items);
-    setRoundsTotal(roundResponse.total ?? roundResponse.items.length);
+    const listedItems = roundResponse.items.filter(isListedOpsRound);
+    setRounds(listedItems);
+    setRoundsTotal(roundResponse.total ?? listedItems.length);
     setRoomHasActiveRound(Boolean(roundResponse.hasActiveRound));
     roundPageRef.current = roundResponse.page ?? pageToLoad;
     setRoundPage(roundPageRef.current);
@@ -782,19 +793,26 @@ export default function GameOperationsCenter({ admin }: { admin: Admin }) {
 
     const desiredRoundId = preferredRoundId || selectedRoundIdRef.current;
     const desiredRound = desiredRoundId
-      ? roundResponse.items.find((round) => round.id === desiredRoundId)
+      ? listedItems.find((round) => round.id === desiredRoundId)
       : undefined;
-    // 用户点选锁定后只刷新该局；未锁定时跟随进行中/等待中的局。
-    let nextRound = desiredRound;
+    // 锁定时停留在点选的局（含待核销取消局）。未锁定时跟随进行中/等待中，
+    // 不要被列表里的待核销取消局拖住。
+    const followableDesired =
+      desiredRound && desiredRound.phase !== 'CANCELLED' ? desiredRound : undefined;
+    let nextRound = roundPinnedRef.current ? desiredRound : undefined;
     if (!roundPinnedRef.current) {
       nextRound =
-        desiredRound
-        ?? roundResponse.items.find((round) => activePhases.has(round.phase) && round.phase !== 'WAITING')
-        ?? roundResponse.items.find((round) => round.phase === 'WAITING')
-        ?? roundResponse.items[0];
-    } else if (!nextRound && desiredRoundId) {
-      // 锁定的局仍在列表外（极少见）时保留当前 detail，避免跳到别局。
-      return;
+        followableDesired
+        ?? listedItems.find((round) => activePhases.has(round.phase) && round.phase !== 'WAITING')
+        ?? listedItems.find((round) => round.phase === 'WAITING')
+        ?? listedItems[0];
+    } else if (!nextRound) {
+      roundPinnedRef.current = false;
+      setRoundPinned(false);
+      nextRound =
+        listedItems.find((round) => activePhases.has(round.phase) && round.phase !== 'WAITING')
+        ?? listedItems.find((round) => round.phase === 'WAITING')
+        ?? listedItems[0];
     }
     if (!nextRound) {
       selectedRoundIdRef.current = '';
@@ -825,6 +843,12 @@ export default function GameOperationsCenter({ admin }: { admin: Admin }) {
       || selectedRoomIdRef.current !== roomId
       || selectedRoundIdRef.current !== nextRound.id
     ) {
+      return;
+    }
+    if (nextDetail.phase === 'CANCELLED' && !needsCancelledPacketReconcile(nextDetail)) {
+      selectedRoundIdRef.current = '';
+      setSelectedRoundId('');
+      setDetail(null);
       return;
     }
     setDetail(nextDetail);
@@ -1396,6 +1420,12 @@ export default function GameOperationsCenter({ admin }: { admin: Admin }) {
       ) {
         return;
       }
+      if (next.phase === 'CANCELLED' && !needsCancelledPacketReconcile(next)) {
+        roundPinnedRef.current = false;
+        setRoundPinned(false);
+        void loadContext(roomId);
+        return;
+      }
       setDetail(next);
       mergeClaimDrafts(next);
     } catch (cause) {
@@ -1507,7 +1537,11 @@ export default function GameOperationsCenter({ admin }: { admin: Admin }) {
       if (response.warnings?.length) {
         setError(`主操作已完成，但后续任务异常：${response.warnings.join('、')}。系统将自动补偿，请值班人员复核。`);
       }
-      if (action === 'cancel') setCancelReason('');
+      if (action === 'cancel') {
+        setCancelReason('');
+        roundPinnedRef.current = true;
+        setRoundPinned(true);
+      }
     });
   }
 
@@ -1666,7 +1700,7 @@ export default function GameOperationsCenter({ admin }: { admin: Admin }) {
                 <span>{room.game?.interactionGroupTitle ?? '至尊牛牛互动群'}</span>
                 <footer>
                   <em className={room.status.toLowerCase()}>{room.status === 'ACTIVE' ? '入口开启' : '入口暂停'}</em>
-                  <i>{room._count?.members ?? 0} 名成员 · {room._count?.rounds ?? 0} 局</i>
+                  <i>{room._count?.members ?? 0} 名成员 · {room._count?.rounds ?? 0} 有效局</i>
                 </footer>
               </button>
             ))}
@@ -2063,7 +2097,7 @@ export default function GameOperationsCenter({ admin }: { admin: Admin }) {
           <div className="ops-round-list">
             <div className="ops-section-head compact">
               <div>
-                <small>全部牌局</small>
+                <small>有效局</small>
                 <strong>
                   {roundsTotal} 局 · 第 {roundPage}/{roundsTotalPages} 页
                 </strong>

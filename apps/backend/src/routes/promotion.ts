@@ -3,14 +3,20 @@ import { z } from 'zod';
 import { prisma } from '../lib/prisma.js';
 import { DEFAULT_REBATE_CONFIG } from '../engine/rebate.js';
 import { getGameConfig } from '../services/gameConfig.js';
-import { estimatedCommission } from '../services/rebates.js';
+import {
+  estimatedCommissionInRange,
+  resolvePromotionPeriod,
+} from '../services/rebates.js';
 import {
   SUPPORTED_GAME_CODES,
   SUPREME_NIUNIU_GAME_CODE,
 } from '../services/gameCatalog.js';
 
+const dayKey = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
 const dateSchema = z.object({
-  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  date: dayKey.optional(),
+  from: dayKey.optional(),
+  to: dayKey.optional(),
 });
 
 function todayKey(): string {
@@ -19,10 +25,24 @@ function todayKey(): string {
 
 export async function promotionRoutes(app: FastifyInstance) {
   /** 「我的推广」页数据（P-PRM-01~05） */
-  app.get('/api/promotion', { preHandler: [app.authUser] }, async (req) => {
+  app.get('/api/promotion', { preHandler: [app.authUser] }, async (req, reply) => {
     const userId = (req.user as { sub: string }).sub;
-    const { date } = dateSchema.parse(req.query);
-    const day = date ?? todayKey();
+    const query = dateSchema.parse(req.query);
+    let from: string;
+    let to: string;
+    try {
+      ({ from, to } = resolvePromotionPeriod(query));
+    } catch (error) {
+      const code = error instanceof Error ? error.message : 'INVALID_PROMOTION_DATE';
+      return reply.code(400).send({
+        error: code,
+        message:
+          code === 'PROMOTION_RANGE_TOO_LONG'
+            ? '查询区间不能超过 92 天'
+            : '日期格式不正确',
+      });
+    }
+    const dateFilter = from === to ? from : { gte: from, lte: to };
 
     const rebateConfigs = new Map(
       await Promise.all(
@@ -42,8 +62,8 @@ export async function promotionRoutes(app: FastifyInstance) {
     const monthStart = new Date(`${currentYear}-${currentMonth}-01T00:00:00+08:00`);
 
     const [turnovers, settlements, invitedTotal, invitedThisMonth, downlines] = await Promise.all([
-      prisma.turnoverDaily.findMany({ where: { userId, date: day } }),
-      prisma.rebateSettlement.findMany({ where: { userId, date: day } }),
+      prisma.turnoverDaily.findMany({ where: { userId, date: dateFilter } }),
+      prisma.rebateSettlement.findMany({ where: { userId, date: dateFilter } }),
       prisma.user.count({ where: { inviterId: userId } }),
       prisma.user.count({
         where: {
@@ -59,7 +79,7 @@ export async function promotionRoutes(app: FastifyInstance) {
       }),
     ]);
     const contributionRows = await prisma.turnoverDaily.findMany({
-      where: { userId: { in: downlines.map((downline) => downline.id) }, date: day },
+      where: { userId: { in: downlines.map((downline) => downline.id) }, date: dateFilter },
       select: { userId: true, selfCents: true },
     });
     const contributions = new Map(
@@ -70,9 +90,12 @@ export async function promotionRoutes(app: FastifyInstance) {
         return items;
       }, []),
     );
-    const commission = await estimatedCommission(userId, day);
-    const settlementByGame = new Map(
-      settlements.map((settlement) => [settlement.gameCode, settlement]),
+    const commission = await estimatedCommissionInRange(userId, from, to);
+    const settlementByKey = new Map(
+      settlements.map((settlement) => [
+        `${settlement.date}:${settlement.gameCode}`,
+        settlement,
+      ]),
     );
     const totalTurnover = turnovers.reduce(
       (total, row) => ({
@@ -84,7 +107,27 @@ export async function promotionRoutes(app: FastifyInstance) {
     );
     const fullySettled =
       turnovers.length > 0 &&
-      turnovers.every((row) => settlementByGame.has(row.gameCode));
+      turnovers.every((row) => settlementByKey.has(`${row.date}:${row.gameCode}`));
+    const gameTotals = new Map<
+      string,
+      { selfCents: bigint; l1Cents: bigint; l2Cents: bigint; commissionCents: bigint; settled: boolean }
+    >();
+    for (const turnover of turnovers) {
+      const current = gameTotals.get(turnover.gameCode) ?? {
+        selfCents: 0n,
+        l1Cents: 0n,
+        l2Cents: 0n,
+        commissionCents: 0n,
+        settled: true,
+      };
+      const settlement = settlementByKey.get(`${turnover.date}:${turnover.gameCode}`);
+      current.selfCents += turnover.selfCents;
+      current.l1Cents += turnover.l1Cents;
+      current.l2Cents += turnover.l2Cents;
+      current.commissionCents += settlement?.commissionCents ?? 0n;
+      current.settled = current.settled && Boolean(settlement);
+      gameTotals.set(turnover.gameCode, current);
+    }
 
     return {
       rates: {
@@ -92,7 +135,9 @@ export async function promotionRoutes(app: FastifyInstance) {
         l1: rebateConfig.l1Rate,
         l2: rebateConfig.l2Rate,
       },
-      date: day,
+      date: from === to ? from : `${from}/${to}`,
+      from,
+      to,
       commissionCents: String(commission),
       commissionStatus: fullySettled ? 'PAID' : 'ESTIMATED',
       turnover: {
@@ -100,27 +145,23 @@ export async function promotionRoutes(app: FastifyInstance) {
         l1Cents: String(totalTurnover.l1Cents),
         l2Cents: String(totalTurnover.l2Cents),
       },
-      gameBreakdown: turnovers.map((turnover) => {
+      gameBreakdown: [...gameTotals.entries()].map(([gameCode, row]) => {
         const config =
           rebateConfigs.get(
-            turnover.gameCode as (typeof SUPPORTED_GAME_CODES)[number],
+            gameCode as (typeof SUPPORTED_GAME_CODES)[number],
           ) ?? DEFAULT_REBATE_CONFIG;
         return {
-          gameCode: turnover.gameCode,
+          gameCode,
           rates: {
             self: config.selfRate,
             l1: config.l1Rate,
             l2: config.l2Rate,
           },
-          selfCents: String(turnover.selfCents),
-          l1Cents: String(turnover.l1Cents),
-          l2Cents: String(turnover.l2Cents),
-          commissionCents: String(
-            settlementByGame.get(turnover.gameCode)?.commissionCents ?? 0n,
-          ),
-          status: settlementByGame.has(turnover.gameCode)
-            ? 'PAID'
-            : 'ESTIMATED',
+          selfCents: String(row.selfCents),
+          l1Cents: String(row.l1Cents),
+          l2Cents: String(row.l2Cents),
+          commissionCents: String(row.commissionCents),
+          status: row.settled ? 'PAID' : 'ESTIMATED',
         };
       }),
       invitedTotal,

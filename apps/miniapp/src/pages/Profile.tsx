@@ -1,24 +1,30 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../api';
 import {
   getCachedGameAdminAssignments,
+  getSeenAgentReportPoolId,
   setCachedGameAdminAssignments,
 } from '../sessionStore';
 import type { Session } from '../App';
 import {
   IconChevronRight,
   IconList,
+  IconPieChart,
+  IconQrCode,
+  IconRank,
   IconSettings,
   IconShare,
   IconTrend,
+  IconUsers,
 } from '../components/Icons';
 import {
   AVATAR_CATEGORIES,
   DEFAULT_AVATAR_URL,
   PRESET_AVATARS,
   avatarByUrl,
+  isCustomAvatarUrl,
   type AvatarCategory,
 } from '../lib/avatars';
 
@@ -44,8 +50,10 @@ export default function Profile({
   const [pickerOpen, setPickerOpen] = useState(false);
   const [avatarCategory, setAvatarCategory] = useState<AvatarCategory | 'all'>('all');
   const [selectedUrl, setSelectedUrl] = useState(session.avatarUrl || DEFAULT_AVATAR_URL);
+  const [pendingFile, setPendingFile] = useState<File | null>(null);
   const [saving, setSaving] = useState(false);
   const [avatarError, setAvatarError] = useState('');
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [bankText, setBankText] = useState('未添加');
   const [agent, setAgent] = useState<Awaited<ReturnType<typeof api.agentMe>>['agent']>(null);
   const [gameAdminAssignments, setGameAdminAssignments] = useState(
@@ -75,7 +83,13 @@ export default function Profile({
 
   useEffect(() => {
     setSelectedUrl(session.avatarUrl || DEFAULT_AVATAR_URL);
+    setPendingFile(null);
   }, [session.avatarUrl]);
+
+  useEffect(() => {
+    if (!selectedUrl.startsWith('blob:')) return;
+    return () => URL.revokeObjectURL(selectedUrl);
+  }, [selectedUrl]);
 
   useEffect(() => {
     if (!active) return;
@@ -106,7 +120,10 @@ export default function Profile({
         : PRESET_AVATARS.filter((item) => item.category === avatarCategory),
     [avatarCategory],
   );
-  const selectedAvatar = avatarByUrl(selectedUrl);
+  const selectedLabel =
+    pendingFile || isCustomAvatarUrl(selectedUrl) || selectedUrl.startsWith('blob:')
+      ? '自定义头像'
+      : (avatarByUrl(selectedUrl)?.label ?? '3D 形象');
   const joinedDays = details?.stats?.joinedDays ?? 1;
   const gamesPlayed = details?.stats?.gamesPlayed ?? 0;
   const displayAvatar = session.avatarUrl || DEFAULT_AVATAR_URL;
@@ -121,18 +138,44 @@ export default function Profile({
     }
   }
 
+  function closePicker() {
+    setPickerOpen(false);
+    setPendingFile(null);
+    setAvatarError('');
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  }
+
+  function pickLocalFile(file: File | undefined) {
+    if (!file) return;
+    if (!/^image\/(jpeg|png|webp)$/i.test(file.type) && !/\.(jpe?g|png|webp)$/i.test(file.name)) {
+      setAvatarError('仅支持 JPG、PNG 或 WEBP 图片');
+      return;
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      setAvatarError('图片不能超过 5MB');
+      return;
+    }
+    setAvatarError('');
+    setPendingFile(file);
+    setSelectedUrl(URL.createObjectURL(file));
+  }
+
   async function saveAvatar() {
-    const nextUrl = selectedUrl || DEFAULT_AVATAR_URL;
-    if (nextUrl === (session.avatarUrl || DEFAULT_AVATAR_URL) && session.avatarUrl) {
-      setPickerOpen(false);
+    if (!pendingFile && selectedUrl === (session.avatarUrl || DEFAULT_AVATAR_URL) && session.avatarUrl) {
+      closePicker();
       return;
     }
     setSaving(true);
     setAvatarError('');
     try {
+      let nextUrl = selectedUrl || DEFAULT_AVATAR_URL;
+      if (pendingFile) {
+        const uploaded = await api.uploadAvatar(pendingFile);
+        nextUrl = uploaded.url;
+      }
       const result = await api.setAvatar(nextUrl);
       onAvatarChange?.(result.user.avatarUrl ?? nextUrl);
-      setPickerOpen(false);
+      closePicker();
     } catch (reason) {
       setAvatarError((reason as Error).message || '更换失败');
     } finally {
@@ -161,6 +204,7 @@ export default function Profile({
               setSelectedUrl(session.avatarUrl || DEFAULT_AVATAR_URL);
               setAvatarCategory('all');
               setAvatarError('');
+              setPendingFile(null);
               setPickerOpen(true);
             }}
             aria-label="更换头像"
@@ -276,25 +320,36 @@ export default function Profile({
       {agent && (
         <section className="profile-section ag-exclusive">
           <div className="ag-exclusive-head">
-            <strong>👑 代理专属</strong>
+            <strong>代理专属</strong>
             <small>仅代理或以上级别可见 · 占成 {agent.sharePoints}/{agent.bucketBase}</small>
           </div>
           <div className="ag-exclusive-grid">
-            <button type="button" onClick={() => navigate('/agent/report')}>
-              <i className="ag-badge-new">NEW</i>
-              <span className="ag-exclusive-icon">📊</span>
+            <button type="button" onClick={() => navigate('/agent/report?tab=report')}>
+              {agent.latestReport
+                && getSeenAgentReportPoolId(agent.id) !== agent.latestReport.poolId ? (
+                <i className="ag-badge-new">NEW</i>
+              ) : null}
+              <span className="ag-exclusive-icon">
+                <IconRank size={17} />
+              </span>
               <strong>称桶报表</strong>
             </button>
             <button type="button" onClick={() => navigate('/agent/sharing')}>
-              <span className="ag-exclusive-icon">🧮</span>
+              <span className="ag-exclusive-icon">
+                <IconPieChart size={17} />
+              </span>
               <strong>分成管理</strong>
             </button>
             <button type="button" onClick={() => navigate('/agent/players')}>
-              <span className="ag-exclusive-icon">👥</span>
+              <span className="ag-exclusive-icon">
+                <IconUsers size={17} />
+              </span>
               <strong>玩家列表</strong>
             </button>
             <button type="button" onClick={() => navigate('/invite')}>
-              <span className="ag-exclusive-icon">🔗</span>
+              <span className="ag-exclusive-icon">
+                <IconQrCode size={17} />
+              </span>
               <strong>推荐二维码</strong>
             </button>
           </div>
@@ -306,7 +361,10 @@ export default function Profile({
             <span>
               <strong>专属代理中心</strong>
               <small>
-                名下玩家 {agent.playerCount} · 下级代理 {agent.subagentCount}，查看团队数据与收益
+                {agent.latestReport
+                  ? `${agent.latestReport.room?.title ?? '称桶报表'} · ${agent.latestReport.poolCode ?? '最新批次'}`
+                  : `名下玩家 ${agent.playerCount} · 下级代理 ${agent.subagentCount}`}
+                ，查看团队数据与收益
               </small>
             </span>
             <em>立即查看</em>
@@ -346,7 +404,7 @@ export default function Profile({
             <button
               type="button"
               className="avatar-sheet-backdrop"
-              onClick={() => setPickerOpen(false)}
+              onClick={closePicker}
             />
             <div className="avatar-sheet-panel">
               <div className="avatar-sheet-head">
@@ -354,7 +412,7 @@ export default function Profile({
                 <button
                   type="button"
                   className="avatar-sheet-close"
-                  onClick={() => setPickerOpen(false)}
+                  onClick={closePicker}
                 >
                   ✕
                 </button>
@@ -364,7 +422,7 @@ export default function Profile({
                 <img src={selectedUrl || DEFAULT_AVATAR_URL} alt="" />
                 <div>
                   <small>当前选择</small>
-                  <strong>{selectedAvatar?.label ?? '3D 形象'}</strong>
+                  <strong>{selectedLabel}</strong>
                 </div>
               </div>
 
@@ -382,18 +440,46 @@ export default function Profile({
               </div>
 
               <div className="avatar-grid">
+                <button
+                  type="button"
+                  className={`avatar-option avatar-upload ${pendingFile ? 'selected' : ''}`}
+                  onClick={() => fileInputRef.current?.click()}
+                  aria-label="上传自己的头像"
+                >
+                  {pendingFile ? (
+                    <img src={selectedUrl} alt="" />
+                  ) : (
+                    <span>
+                      <em>+</em>
+                      上传
+                    </span>
+                  )}
+                </button>
                 {filteredAvatars.map((item) => (
                   <button
                     key={item.id}
                     type="button"
-                    className={`avatar-option ${selectedUrl === item.url ? 'selected' : ''}`}
-                    onClick={() => setSelectedUrl(item.url)}
+                    className={`avatar-option ${!pendingFile && selectedUrl === item.url ? 'selected' : ''}`}
+                    onClick={() => {
+                      setPendingFile(null);
+                      setSelectedUrl(item.url);
+                    }}
                     aria-label={item.label}
                   >
                     <img src={item.url} alt="" />
                   </button>
                 ))}
               </div>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/jpeg,image/png,image/webp"
+                hidden
+                onChange={(event) => {
+                  pickLocalFile(event.target.files?.[0]);
+                  event.target.value = '';
+                }}
+              />
 
               <div className="avatar-sheet-footer">
                 {avatarError && <div className="inline-alert error">{avatarError}</div>}

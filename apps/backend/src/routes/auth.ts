@@ -7,6 +7,13 @@ import { env } from '../config.js';
 import { decryptSecret, safeDecryptSecret, safeMaskSecret } from '../lib/crypto.js';
 import { isPresetAvatarUrl, PRESET_AVATAR_URLS } from '../data/presetAvatars.js';
 import {
+  isPublicAvatarUrl,
+  parsePublicAvatarFilename,
+  resolvePublicAvatarFile,
+  resolvePublicAvatarOwnerFile,
+} from '../lib/publicAvatars.js';
+import { readFile, stat } from 'node:fs/promises';
+import {
   broadcastUserProfileChanged,
   invalidateUserConnections,
 } from '../services/roomHub.js';
@@ -312,20 +319,53 @@ export async function authRoutes(app: FastifyInstance) {
     })),
   }));
 
-  /** 更换为系统内置头像（禁止任意外链） */
+  /** 更换头像：系统内置库，或玩家自己上传的公开头像 */
   app.post('/api/me/avatar', { preHandler: [app.authUser] }, async (req, reply) => {
     const userId = (req.user as { sub: string }).sub;
     const body = z
       .object({
-        avatarUrl: z.string().min(1).max(120),
+        avatarUrl: z.string().min(1).max(200),
       })
       .parse(req.body);
-    if (!isPresetAvatarUrl(body.avatarUrl)) {
-      return reply.code(400).send({ error: 'INVALID_AVATAR' });
+    const nextUrl = body.avatarUrl.trim();
+    if (isPublicAvatarUrl(nextUrl)) {
+      const filename = parsePublicAvatarFilename(nextUrl);
+      const path = filename ? resolvePublicAvatarFile(env.uploadDir, filename) : null;
+      try {
+        if (!path || !(await stat(path)).isFile()) throw new Error('MISSING');
+      } catch {
+        return reply.code(400).send({
+          error: 'INVALID_AVATAR',
+          message: '请先上传自定义头像，或改选系统头像',
+        });
+      }
+      const current = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { avatarUrl: true },
+      });
+      if (current?.avatarUrl !== nextUrl) {
+        const ownerPath = filename
+          ? resolvePublicAvatarOwnerFile(env.uploadDir, filename)
+          : null;
+        const owner = ownerPath
+          ? (await readFile(ownerPath, 'utf8').catch(() => '')).trim()
+          : '';
+        if (owner !== userId) {
+          return reply.code(400).send({
+            error: 'INVALID_AVATAR',
+            message: '只能使用自己刚上传的头像',
+          });
+        }
+      }
+    } else if (!isPresetAvatarUrl(nextUrl)) {
+      return reply.code(400).send({
+        error: 'INVALID_AVATAR',
+        message: '请选择系统头像或上传自己的照片',
+      });
     }
     const user = await prisma.user.update({
       where: { id: userId },
-      data: { avatarUrl: body.avatarUrl },
+      data: { avatarUrl: nextUrl },
       select: { id: true, uid: true, nickname: true, avatarUrl: true },
     });
     void broadcastUserProfileChanged(user).catch(() => undefined);

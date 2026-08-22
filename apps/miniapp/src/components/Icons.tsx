@@ -265,3 +265,41 @@ export function IconIdCard({ size = 18, className }: IconProps) {
     </>
   ));
 }
+
+export function IconUsers({ size = 18, className }: IconProps) {
+  return base(size, className, (
+    <>
+      <circle cx="9" cy="8.5" r="3" />
+      <path d="M4.5 19c1.2-2.6 3.2-4 4.5-4s3.3 1.4 4.5 4" />
+      <circle cx="17" cy="9.5" r="2.5" />
+      <path d="M14 19c.7-1.8 2.1-3 3.5-3" />
+    </>
+  ));
+}
+
+export function IconPieChart({ size = 18, className }: IconProps) {
+  return base(size, className, (
+    <>
+      <path d="M12 3v9h9" />
+      <circle cx="12" cy="12" r="9" />
+    </>
+  ));
+}
+
+export function IconQrCode({ size = 18, className }: IconProps) {
+  return base(size, className, (
+    <>
+      <rect x="4" y="4" width="7" height="7" rx="1.2" />
+      <rect x="6.2" y="6.2" width="2.6" height="2.6" fill="currentColor" stroke="none" />
+      <rect x="13" y="4" width="7" height="7" rx="1.2" />
+      <rect x="15.2" y="6.2" width="2.6" height="2.6" fill="currentColor" stroke="none" />
+      <rect x="4" y="13" width="7" height="7" rx="1.2" />
+      <rect x="6.2" y="15.2" width="2.6" height="2.6" fill="currentColor" stroke="none" />
+      <path d="M13 13h2.2v2.2" />
+      <path d="M17 13v2.2" />
+      <path d="M13 17h2.2" />
+      <path d="M17 17h2.2" />
+      <path d="M20 13v4.2" />
+    </>
+  ));
+}

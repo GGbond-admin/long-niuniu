@@ -81,13 +81,19 @@ import {
   type MyHistoryItem,
 } from '../services/myHistory.js';
 
-const amountSchema = z.object({
+const bidAmountSchema = z.object({
   amount: z
     .string()
     .max(32, '金额过大')
     .regex(/^\d+$/, '竞标金额必须是整数'),
 });
-const tipSchema = amountSchema.extend({
+const betAmountSchema = z.object({
+  amount: z
+    .string()
+    .max(32, '金额过大')
+    .regex(/^\d+(\.\d{1,2})?$/, '金额格式不正确'),
+});
+const tipSchema = betAmountSchema.extend({
   requestId: z.string().uuid(),
   paymentPin: z.string().regex(/^\d{6}$/),
 });
@@ -720,7 +726,7 @@ export async function gameRoomRoutes(app: FastifyInstance) {
     const { id } = req.params as { id: string };
     const userId = (req.user as { sub: string }).sub;
     await requireRoomInputOpen(id);
-    const { amount } = amountSchema.parse(req.body);
+    const { amount } = bidAmountSchema.parse(req.body);
     const round = await currentRoundForRoom(id);
     if (!round || round.phase !== RoundPhase.BANKER_BID) throw new GameError('INVALID_PHASE');
     const amountCents = parseAmountCents(amount);
@@ -744,7 +750,7 @@ export async function gameRoomRoutes(app: FastifyInstance) {
     const { id } = req.params as { id: string };
     const userId = (req.user as { sub: string }).sub;
     await requireRoomInputOpen(id);
-    const body = amountSchema.extend({ allIn: z.boolean().default(false) }).parse(req.body);
+    const body = betAmountSchema.extend({ allIn: z.boolean().default(false) }).parse(req.body);
     const round = await currentRoundForRoom(id);
     if (!round || round.phase !== RoundPhase.BETTING) throw new GameError('INVALID_PHASE');
     const acceptance = await placeBet(
@@ -951,16 +957,15 @@ export async function gameRoomRoutes(app: FastifyInstance) {
     ]);
     if (!user) throw new GameError('USER_NOT_ACTIVE');
     const amount = String(amountCents);
-    const message = result.duplicate ? '打赏已确认，本次不会重复扣款。' : pickSupportThanksMessage();
     const nickname = user.nickname ?? user.uid;
     if (!result.duplicate) {
+      const thanks = pickSupportThanksMessage();
       appendChat(id, {
         type: 'USER_TIP',
         content: JSON.stringify({
           amountCents: amount,
           target: 'support',
           label: '客服小妹',
-          message,
         }),
         from: {
           uid: user.uid,
@@ -972,13 +977,12 @@ export async function gameRoomRoutes(app: FastifyInstance) {
         roomId: id,
         requestId: body.requestId,
         tipperUserId: userId,
-        message,
+        message: thanks,
       }).catch(() => false);
       await broadcastToRoomCluster(id, {
         type: 'tip_thanks',
         nickname,
         amountCents: amount,
-        message,
         avatarUrl: user.avatarUrl ?? null,
       });
     }
@@ -987,7 +991,7 @@ export async function gameRoomRoutes(app: FastifyInstance) {
       duplicate: result.duplicate,
       nickname,
       amountCents: amount,
-      message,
+      message: result.duplicate ? '打赏已确认，本次不会重复扣款。' : '打赏成功',
       avatarUrl: user.avatarUrl ?? null,
     };
   });

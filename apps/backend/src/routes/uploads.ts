@@ -1,9 +1,9 @@
 import { createReadStream, createWriteStream } from 'node:fs';
-import { mkdir, open, stat, unlink } from 'node:fs/promises';
+import { mkdir, open, stat, unlink, writeFile } from 'node:fs/promises';
 import { extname, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { pipeline } from 'node:stream/promises';
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { env } from '../config.js';
 import {
@@ -11,6 +11,7 @@ import {
   PUBLIC_AVATAR_MIME,
   publicAvatarUrl,
   resolvePublicAvatarFile,
+  resolvePublicAvatarOwnerFile,
 } from '../lib/publicAvatars.js';
 
 const ALLOWED_TYPES: Record<string, string> = {
@@ -82,43 +83,70 @@ export async function uploadRoutes(app: FastifyInstance) {
     },
   );
 
+  async function handlePublicAvatarUpload(req: FastifyRequest, reply: FastifyReply) {
+    const file = await req.file();
+    if (!file) return reply.code(400).send({ error: 'FILE_REQUIRED', message: '请选择要上传的图片' });
+    const extension = PUBLIC_AVATAR_MIME[file.mimetype];
+    if (!extension) {
+      file.file.resume();
+      return reply.code(400).send({
+        error: 'UNSUPPORTED_FILE_TYPE',
+        message: '仅支持 JPG、PNG 或 WEBP 图片',
+      });
+    }
+    const filename = `${randomUUID()}${extension}`;
+    const destination = resolvePublicAvatarFile(env.uploadDir, filename);
+    if (!destination) {
+      file.file.resume();
+      return reply.code(400).send({ error: 'INVALID_AVATAR_FILENAME', message: '头像文件名无效' });
+    }
+    await mkdir(resolve(env.uploadDir, 'avatars'), { recursive: true });
+    try {
+      await pipeline(file.file, createWriteStream(destination, { flags: 'wx' }));
+      if (file.file.truncated) {
+        await unlink(destination).catch(() => undefined);
+        return reply.code(413).send({ error: 'FILE_TOO_LARGE', message: '图片不能超过 5MB' });
+      }
+      if (!(await matchesDeclaredType(destination, file.mimetype))) {
+        await unlink(destination).catch(() => undefined);
+        return reply.code(400).send({
+          error: 'FILE_CONTENT_MISMATCH',
+          message: '图片文件已损坏或格式不符',
+        });
+      }
+    } catch (error) {
+      await unlink(destination).catch(() => undefined);
+      throw error;
+    }
+    const ownerId = (req.user as { sub?: string } | undefined)?.sub;
+    const ownerPath = ownerId ? resolvePublicAvatarOwnerFile(env.uploadDir, filename) : null;
+    if (ownerPath) {
+      try {
+        await writeFile(ownerPath, ownerId, { encoding: 'utf8', flag: 'wx' });
+      } catch (error) {
+        await unlink(destination).catch(() => undefined);
+        throw error;
+      }
+    }
+    return { url: publicAvatarUrl(filename) };
+  }
+
+  app.post(
+    '/api/me/avatar/upload',
+    {
+      preHandler: [app.authUser],
+      config: { rateLimit: { max: 12, timeWindow: '1 hour' } },
+    },
+    async (req, reply) => handlePublicAvatarUpload(req, reply),
+  );
+
   app.post(
     '/api/admin/uploads/avatar',
     {
       preHandler: [app.authAdmin, app.requireAdminRoles('SUPER')],
       config: { rateLimit: { max: 20, timeWindow: '1 hour' } },
     },
-    async (req, reply) => {
-      const file = await req.file();
-      if (!file) return reply.code(400).send({ error: 'FILE_REQUIRED' });
-      const extension = PUBLIC_AVATAR_MIME[file.mimetype];
-      if (!extension) {
-        file.file.resume();
-        return reply.code(400).send({ error: 'UNSUPPORTED_FILE_TYPE' });
-      }
-      const filename = `${randomUUID()}${extension}`;
-      const destination = resolvePublicAvatarFile(env.uploadDir, filename);
-      if (!destination) {
-        file.file.resume();
-        return reply.code(400).send({ error: 'INVALID_AVATAR_FILENAME' });
-      }
-      await mkdir(resolve(env.uploadDir, 'avatars'), { recursive: true });
-      try {
-        await pipeline(file.file, createWriteStream(destination, { flags: 'wx' }));
-        if (file.file.truncated) {
-          await unlink(destination).catch(() => undefined);
-          return reply.code(413).send({ error: 'FILE_TOO_LARGE' });
-        }
-        if (!(await matchesDeclaredType(destination, file.mimetype))) {
-          await unlink(destination).catch(() => undefined);
-          return reply.code(400).send({ error: 'FILE_CONTENT_MISMATCH' });
-        }
-      } catch (error) {
-        await unlink(destination).catch(() => undefined);
-        throw error;
-      }
-      return { url: publicAvatarUrl(filename) };
-    },
+    async (req, reply) => handlePublicAvatarUpload(req, reply),
   );
 
   app.get('/api/public/avatars/:filename', async (req, reply) => {

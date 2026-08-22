@@ -93,7 +93,6 @@ export default function TipSupport({
             tipNotice: {
               nickname: receipt.nickname,
               amountCents: receipt.amountCents,
-              message: receipt.message,
               avatarUrl: receipt.avatarUrl,
             },
           },

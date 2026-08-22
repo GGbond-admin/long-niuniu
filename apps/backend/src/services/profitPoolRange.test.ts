@@ -271,11 +271,54 @@ describe('round-range validation against persisted rounds', () => {
     ).rejects.toThrow('INVALID_AGENT_HIERARCHY');
   });
 
-  it('rejects a range with missing sequence numbers', async () => {
+  it('settles finished rounds when cancelled or missing sequence numbers sit in the range', async () => {
+    const result = await computeProfitPoolRange(
+      { roomId: 'room-1', startSeqNo: 1, endSeqNo: 4, expenseBps: 0 },
+      dbWith({
+        rounds: [
+          round(1),
+          round(2, { phase: 'CANCELLED', bankerId: null, configSnapshot: null }),
+          round(4, { phase: 'WAITING', bankerId: null, configSnapshot: null, finishedAt: null }),
+        ],
+      }) as never,
+    );
+
+    expect(result.startSeqNo).toBe(1);
+    expect(result.endSeqNo).toBe(1);
+    expect(result.roundCount).toBe(1);
+    expect(result.finishedRoundCount).toBe(1);
+    expect(result.cancelledRoundCount).toBe(1);
+    expect(result.rounds.map((item) => item.seqNo)).toEqual([1]);
+  });
+
+  it('prefers a reopened finished round over a cancelled round with the same sequence number', async () => {
+    const result = await computeProfitPoolRange(
+      { roomId: 'room-1', startSeqNo: 18, endSeqNo: 18, expenseBps: 0 },
+      dbWith({
+        rounds: [
+          round(18, {
+            id: 'cancelled-18',
+            phase: 'CANCELLED',
+            bankerId: null,
+            configSnapshot: null,
+          }),
+          round(18, { id: 'finished-18', finishedAt: new Date('2026-08-19T00:00:18Z') }),
+        ],
+      }) as never,
+    );
+
+    expect(result.rounds).toEqual([
+      expect.objectContaining({ id: 'finished-18', seqNo: 18, phase: 'FINISHED' }),
+    ]);
+  });
+
+  it('rejects a range that has no finished rounds', async () => {
     await expect(
       computeProfitPoolRange(
         { roomId: 'room-1', startSeqNo: 1, endSeqNo: 2, expenseBps: 0 },
-        dbWith({ rounds: [round(1)] }) as never,
+        dbWith({
+          rounds: [round(1, { phase: 'CANCELLED', bankerId: null, configSnapshot: null })],
+        }) as never,
       ),
     ).rejects.toThrow('ROUND_RANGE_INCOMPLETE');
   });

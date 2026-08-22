@@ -163,8 +163,11 @@ export function deriveRoomChatPolicy(
   }
   if (current.phase === RoundPhase.WAITING) {
     const previous = recentRounds.find(
-      (round) => round.seqNo === current.seqNo - 1,
-    );
+      (round) =>
+        round.id !== current.id
+        && round.seqNo === current.seqNo
+        && round.phase === RoundPhase.CANCELLED,
+    ) ?? recentRounds.find((round) => round.seqNo === current.seqNo - 1);
     if (previous?.phase === RoundPhase.FINISHED) {
       return finishedRoundPolicy(previous, now, roundStartMode);
     }
@@ -227,8 +230,8 @@ export async function getRoomChatPolicy(
     }),
     prisma.round.findMany({
       where: { roomId },
-      orderBy: { seqNo: 'desc' },
-      take: 2,
+      orderBy: [{ seqNo: 'desc' }, { createdAt: 'desc' }],
+      take: 4,
       select: {
         id: true,
         seqNo: true,

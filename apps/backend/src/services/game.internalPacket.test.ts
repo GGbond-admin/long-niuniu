@@ -269,16 +269,15 @@ describe('内部红包发包与抢包', () => {
     ).rejects.toMatchObject({ code: 'PACKET_ESCROW_UNAVAILABLE' });
   });
 
-  it('全群禁言时拒绝内部抢包且不触碰红包备付金', async () => {
+  it('全群禁言时已下注闲家仍可领取内部红包', async () => {
     memory.diceReady = true;
     await publishInternalPacket({ roundId: 'round-1' });
     memory.roomChatMutedAt = new Date('2026-08-15T12:00:05.000Z');
 
-    await expect(
-      claimInternalPacket('packet-1', 'player-1'),
-    ).rejects.toMatchObject({ code: 'ROOM_GLOBAL_MUTED' });
-    expect(memory.claims).toHaveLength(0);
-    expect(memory.transfers).toHaveLength(0);
+    const claimed = await claimInternalPacket('packet-1', 'player-1');
+    expect(claimed.claim.userId).toBe('player-1');
+    expect(memory.claims).toHaveLength(1);
+    expect(memory.transfers.some((item) => item.refType === 'packet_internal_claim')).toBe(true);
   });
 
   it('成绩单的庄家期初余额加回已经提前收取的代包费', () => {

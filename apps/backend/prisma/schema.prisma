@@ -510,7 +510,7 @@ enum RoomStartMode {
 model Round {
   id                  String     @id @default(cuid())
   roomId              String     @map("room_id")
-  seqNo               Int        @map("seq_no") // 房间内局号
+  seqNo               Int        @map("seq_no") // 房间内有效局号；取消局不占号，下一局复用
   phase               RoundPhase @default(WAITING)
   bankerId            String?    @map("banker_id")
   potCents            BigInt     @default(0) @map("pot_cents") // 庄池
@@ -538,7 +538,7 @@ model Round {
   events         RoundEvent[]
   profitPoolLock ProfitPoolRoundLock?
 
-  @@unique([roomId, seqNo])
+  @@index([roomId, seqNo])
   @@index([roomId, phase, seqNo])
   @@index([roomId, bankerId, phase, seqNo])
   @@index([phase])
@@ -631,6 +631,12 @@ model Packet {
   correlation      String?   @unique // 派单短码：手机端写入红包祝福语并原样回传，用于关联本局
   ingestDeviceId   String?   @map("ingest_device_id") // 当前持有派单租约的采集设备
   ingestLeaseUntil DateTime? @map("ingest_lease_until") // 租约到期前不再派给其它设备
+
+  // ── 独立红包调度服务器（游戏后端作为调用方）──
+  schedulerPacketId   String?  @unique @map("scheduler_packet_id") // pkt_ + 32 hex，调度器幂等键
+  schedulerAfterSeq   Int      @default(0) @map("scheduler_after_seq") // 已消费的领取 sequence
+  schedulerClaimsFinal Boolean @default(false) @map("scheduler_claims_final")
+  schedulerLastError  String?  @map("scheduler_last_error")
 
   round      Round           @relation(fields: [roundId], references: [id])
   claims     Claim[]
@@ -1042,7 +1048,8 @@ model AgentProfitShare {
   @@map("agent_profit_shares")
 }
 
-/// 新版称桶利润池：以单一房间内的连续局号闭区间为正式结算单位。
+/// 新版称桶利润池：按房间局号闭区间生成；只锁已完成有效局。
+/// 取消局不占号，roundCount = 已完成有效局数，不必等于区间长度。
 /// 旧 ProfitPoolDaily/AgentProfitShare 仅保留为历史，不再产生新记录。
 model ProfitPoolBatch {
   id       String @id @default(cuid())
@@ -1078,6 +1085,8 @@ model ProfitPoolBatch {
   generatedAt   DateTime              @default(now()) @map("generated_at")
   distributedBy String?               @map("distributed_by")
   distributedAt DateTime?             @map("distributed_at")
+  discardedBy   String?               @map("discarded_by")
+  discardedAt   DateTime?             @map("discarded_at")
 
   roundLocks      ProfitPoolRoundLock[]
   agentSnapshots  ProfitPoolAgentSnapshot[]
@@ -1093,6 +1102,7 @@ enum ProfitPoolBatchStatus {
   PENDING
   DISTRIBUTED
   NO_DISTRIBUTION
+  VOIDED
 }
 
 /// 每个真实 Round 只能出现一次；该唯一约束是并发生成时的最终防重边界。
@@ -1184,7 +1194,7 @@ model ProfitPoolCutover {
   @@map("profit_pool_cutovers")
 }
 
-/// 业务编号原子序列，key 形如 PROFIT_POOL:20260819。
+/// 业务编号原子序列，key 形如 PROFIT_POOL:ZZNN:20260819（按游戏前缀 + 马来日）。
 model ProfitPoolSequence {
   key       String   @id
   value     Int      @default(0)

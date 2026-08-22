@@ -1,6 +1,7 @@
 import { prisma } from '../lib/prisma.js';
 import { getProfitPoolConfig, ProfitPoolError } from './profitPool.js';
 import { computeHierarchyMetrics } from './profitPoolRange.js';
+import { malaysiaDay } from './rebates.js';
 
 export const AGENT_ONLINE_WINDOW_MS = 90_000;
 
@@ -71,6 +72,29 @@ function contributionByChild(value: unknown): Map<string, bigint> {
       result.set(row.agentId, 0n);
     }
   }
+  return result;
+}
+
+/** 只取某代理名下整棵下级树，不含本人、不含其他线。 */
+export function collectDownlineSnapshots<
+  T extends { sourceAgentId: string; parentSourceAgentId: string | null },
+>(rows: T[], rootAgentId: string): T[] {
+  const byParent = new Map<string, T[]>();
+  for (const row of rows) {
+    if (row.sourceAgentId === rootAgentId) continue;
+    const parent = row.parentSourceAgentId ?? '';
+    const list = byParent.get(parent) ?? [];
+    list.push(row);
+    byParent.set(parent, list);
+  }
+  const result: T[] = [];
+  const visit = (parentId: string) => {
+    for (const child of byParent.get(parentId) ?? []) {
+      result.push(child);
+      visit(child.sourceAgentId);
+    }
+  };
+  visit(rootAgentId);
   return result;
 }
 
@@ -185,6 +209,7 @@ async function buildAdminAgentNetwork(poolId?: string) {
         orderBy: { createdAt: 'asc' },
       }),
       prisma.profitPoolBatch.findFirst({
+        where: { status: { not: 'VOIDED' } },
         orderBy: { generatedAt: 'desc' },
         include: {
           agentSnapshots: true,
@@ -382,7 +407,7 @@ export async function getAdminAgentDashboard(agentId: string, poolId?: string) {
   if (!agent) throw new ProfitPoolError('AGENT_NOT_FOUND');
   const [periods, players] = await Promise.all([
     prisma.profitPoolAgentSnapshot.findMany({
-      where: { sourceAgentId: agentId },
+      where: { sourceAgentId: agentId, pool: { status: { not: 'VOIDED' } } },
       include: {
         pool: {
           include: { room: { select: { id: true, title: true, gameCode: true } } },
@@ -482,7 +507,7 @@ export async function listAdminAgentDashboardPeriods(
   });
   if (!agent) throw new ProfitPoolError('AGENT_NOT_FOUND');
   const rows = await prisma.profitPoolAgentSnapshot.findMany({
-    where: { sourceAgentId: agentId },
+    where: { sourceAgentId: agentId, pool: { status: { not: 'VOIDED' } } },
     include: {
       pool: {
         include: { room: { select: { id: true, title: true, gameCode: true } } },
@@ -596,6 +621,26 @@ export async function listAdminAgentDashboardPlayers(
   };
 }
 
+function serializeAgentPlayer(player: {
+  userId: string;
+  uid: string;
+  nickname: string | null;
+  avatarUrl: string | null;
+  turnoverCents: bigint;
+  profitCents: bigint;
+  isAgentSelf?: boolean;
+}) {
+  return {
+    userId: player.userId,
+    uidMasked: maskUid(player.uid),
+    nickname: player.nickname,
+    avatarUrl: player.avatarUrl,
+    turnoverCents: String(player.turnoverCents),
+    profitCents: String(player.profitCents),
+    isSelf: Boolean(player.isAgentSelf),
+  };
+}
+
 export async function getAgentSelfDashboard(userId: string, requestedPoolId?: string) {
   const agent = await prisma.agent.findUnique({
     where: { userId },
@@ -614,7 +659,7 @@ export async function getAgentSelfDashboard(userId: string, requestedPoolId?: st
     liveNetwork,
   ] = await Promise.all([
     prisma.profitPoolAgentSnapshot.findMany({
-      where: { sourceAgentId: agent.id },
+      where: { sourceAgentId: agent.id, pool: { status: { not: 'VOIDED' } } },
       include: {
         pool: {
           include: { room: { select: { id: true, title: true, gameCode: true } } },
@@ -628,7 +673,11 @@ export async function getAgentSelfDashboard(userId: string, requestedPoolId?: st
         sourceAgentId: agent.id,
         pool: { status: 'DISTRIBUTED' },
       },
-      _sum: { amountCents: true },
+      _sum: {
+        amountCents: true,
+        selfAmountCents: true,
+        overrideAmountCents: true,
+      },
     }),
     prisma.agentProfitShare.aggregate({
       where: {
@@ -667,46 +716,93 @@ export async function getAgentSelfDashboard(userId: string, requestedPoolId?: st
     selected && !visiblePeriods.some((period) => period.poolId === selected.poolId)
       ? [...visiblePeriods, selected]
       : visiblePeriods;
+  const lifetimeLegacy = legacyLifetimeAggregate._sum.amountCents ?? 0n;
   const lifetime =
-    (lifetimeAggregate._sum.amountCents ?? 0n)
-    + (legacyLifetimeAggregate._sum.amountCents ?? 0n);
+    (lifetimeAggregate._sum.amountCents ?? 0n) + lifetimeLegacy;
   const liveNode = liveNetwork.nodes.find((node) => node.id === agent.id);
+  const profile = {
+    id: agent.id,
+    label: agent.label,
+    uidMasked: maskUid(agent.user.uid),
+    nickname: agent.user.nickname,
+    avatarUrl: agent.user.avatarUrl,
+    sharePoints: agent.sharePoints,
+    bucketBase: liveNode?.bucketBase ?? selected?.bucketBaseSnapshot ?? 130,
+    directAgentCount: agent._count.children,
+    teamAgentCount: liveNode?.teamAgentCount ?? agent._count.children,
+    directPlayerCount: agent._count.players,
+    teamPlayerCount: liveNode?.teamPlayerCount ?? agent._count.players,
+    online: liveNode?.online ?? false,
+    onlineTeamCount: liveNode?.onlineTeamCount ?? 0,
+    lifetimeProfitCents: String(lifetime),
+    lifetimeSelfAmountCents: String(lifetimeAggregate._sum.selfAmountCents ?? 0n),
+    lifetimeOverrideAmountCents: String(
+      lifetimeAggregate._sum.overrideAmountCents ?? 0n,
+    ),
+    lifetimeLegacyCents: String(lifetimeLegacy),
+    today: malaysiaDay(),
+  };
 
   if (!selected) {
     return {
-      profile: {
-        id: agent.id,
-        label: agent.label,
-        uidMasked: maskUid(agent.user.uid),
-        nickname: agent.user.nickname,
-        avatarUrl: agent.user.avatarUrl,
-        sharePoints: agent.sharePoints,
-        directAgentCount: agent._count.children,
-        teamAgentCount: liveNode?.teamAgentCount ?? agent._count.children,
-        directPlayerCount: agent._count.players,
-        teamPlayerCount: liveNode?.teamPlayerCount ?? agent._count.players,
-        online: liveNode?.online ?? false,
-        onlineTeamCount: liveNode?.onlineTeamCount ?? 0,
-        lifetimeProfitCents: String(lifetime),
-      },
+      profile,
       periods: [],
       periodsNextCursor: null,
       selected: null,
     };
   }
 
-  const [children, players] = await Promise.all([
+  const [poolSnapshots, players, directTurnover] = await Promise.all([
     prisma.profitPoolAgentSnapshot.findMany({
-      where: { poolId: selected.poolId, parentSourceAgentId: agent.id },
-      orderBy: { amountCents: 'desc' },
+      where: { poolId: selected.poolId },
+      orderBy: [{ amountCents: 'desc' }, { sourceAgentId: 'asc' }],
     }),
     prisma.profitPoolPlayerSnapshot.findMany({
-      where: { poolId: selected.poolId, sourceAgentId: agent.id, isAgentSelf: false },
-      orderBy: [{ turnoverCents: 'desc' }, { userId: 'asc' }],
+      where: { poolId: selected.poolId, sourceAgentId: agent.id },
+      orderBy: [{ isAgentSelf: 'desc' }, { turnoverCents: 'desc' }, { userId: 'asc' }],
       take: 51,
+    }),
+    prisma.profitPoolPlayerSnapshot.aggregate({
+      where: { poolId: selected.poolId, sourceAgentId: agent.id },
+      _sum: { turnoverCents: true },
     }),
   ]);
   const childContributions = contributionByChild(selected.breakdown);
+  const snapshotsById = new Map(
+    poolSnapshots.map((row) => [row.sourceAgentId, row]),
+  );
+  const downlineSnapshots = collectDownlineSnapshots(poolSnapshots, agent.id);
+  const serializeDownline = (child: (typeof downlineSnapshots)[number]) => {
+    const parent = child.parentSourceAgentId
+      ? snapshotsById.get(child.parentSourceAgentId)
+      : undefined;
+    return {
+      agentId: child.sourceAgentId,
+      parentAgentId: child.parentSourceAgentId,
+      label: child.label,
+      uidMasked: maskUid(child.uid),
+      sharePoints: child.sharePointsSnapshot,
+      diffPoints: Math.max(
+        0,
+        (parent?.sharePointsSnapshot ?? selected.sharePointsSnapshot) -
+          child.sharePointsSnapshot,
+      ),
+      directAgentCount: child.directAgentCount,
+      teamAgentCount: child.teamAgentCount,
+      directPlayerCount: child.directPlayerCount,
+      teamPlayerCount: child.teamPlayerCount,
+      selfTurnoverCents: String(child.selfTurnoverCents),
+      teamTurnoverCents: String(child.teamTurnoverCents),
+      selfAmountCents: String(child.selfAmountCents),
+      overrideAmountCents: String(child.overrideAmountCents),
+      amountCents: String(child.amountCents),
+      contributionAmountCents: String(
+        childContributions.get(child.sourceAgentId) ?? 0n,
+      ),
+    };
+  };
+  const downline = downlineSnapshots.map(serializeDownline);
+  const children = downline.filter((row) => row.parentAgentId === agent.id);
   const visiblePlayers = players.slice(0, 50);
   const playersNextCursor =
     players.length > visiblePlayers.length
@@ -714,21 +810,7 @@ export async function getAgentSelfDashboard(userId: string, requestedPoolId?: st
       : null;
 
   return {
-    profile: {
-      id: agent.id,
-      label: agent.label,
-      uidMasked: maskUid(agent.user.uid),
-      nickname: agent.user.nickname,
-      avatarUrl: agent.user.avatarUrl,
-      sharePoints: agent.sharePoints,
-      directAgentCount: agent._count.children,
-      teamAgentCount: liveNode?.teamAgentCount ?? agent._count.children,
-      directPlayerCount: agent._count.players,
-      teamPlayerCount: liveNode?.teamPlayerCount ?? agent._count.players,
-      online: liveNode?.online ?? false,
-      onlineTeamCount: liveNode?.onlineTeamCount ?? 0,
-      lifetimeProfitCents: String(lifetime),
-    },
+    profile,
     periods: displayPeriods.map((period) => ({
       poolId: period.poolId,
       poolCode: period.pool.poolCode,
@@ -737,6 +819,7 @@ export async function getAgentSelfDashboard(userId: string, requestedPoolId?: st
       endSeqNo: period.pool.endSeqNo,
       status: period.pool.status,
       generatedAt: period.pool.generatedAt,
+      generatedDate: malaysiaDay(period.pool.generatedAt),
       amountCents: String(period.amountCents),
     })),
     periodsNextCursor,
@@ -749,6 +832,10 @@ export async function getAgentSelfDashboard(userId: string, requestedPoolId?: st
         endSeqNo: selected.pool.endSeqNo,
         status: selected.pool.status,
         generatedAt: selected.pool.generatedAt,
+        generatedDate: malaysiaDay(selected.pool.generatedAt),
+        turnoverCents: String(selected.pool.turnoverCents ?? 0n),
+        expenseCents: String(selected.pool.expenseCents ?? 0n),
+        netPoolCents: String(selected.pool.netPoolCents ?? 0n),
       },
       mine: {
         sharePoints: selected.sharePointsSnapshot,
@@ -759,6 +846,7 @@ export async function getAgentSelfDashboard(userId: string, requestedPoolId?: st
         teamPlayerCount: selected.teamPlayerCount,
         selfTurnoverCents: String(selected.selfTurnoverCents),
         teamTurnoverCents: String(selected.teamTurnoverCents),
+        directTurnoverCents: String(directTurnover._sum.turnoverCents ?? 0n),
         contributionBp: selected.contributionBp,
         selfAmountCents: String(selected.selfAmountCents),
         overrideAmountCents: String(selected.overrideAmountCents),
@@ -766,29 +854,21 @@ export async function getAgentSelfDashboard(userId: string, requestedPoolId?: st
         lifetimeProfitCents: String(lifetime),
       },
       subagents: children.map((child) => ({
-        agentId: child.sourceAgentId,
+        agentId: child.agentId,
         label: child.label,
-        uidMasked: maskUid(child.uid),
-        sharePoints: child.sharePointsSnapshot,
-        diffPoints: Math.max(0, selected.sharePointsSnapshot - child.sharePointsSnapshot),
+        uidMasked: child.uidMasked,
+        sharePoints: child.sharePoints,
+        diffPoints: child.diffPoints,
         directAgentCount: child.directAgentCount,
         teamAgentCount: child.teamAgentCount,
         directPlayerCount: child.directPlayerCount,
         teamPlayerCount: child.teamPlayerCount,
-        teamTurnoverCents: String(child.teamTurnoverCents),
-        ownAmountCents: String(child.amountCents),
-        contributionAmountCents: String(
-          childContributions.get(child.sourceAgentId) ?? 0n,
-        ),
+        teamTurnoverCents: child.teamTurnoverCents,
+        ownAmountCents: child.amountCents,
+        contributionAmountCents: child.contributionAmountCents,
       })),
-      players: visiblePlayers.map((player) => ({
-        userId: player.userId,
-        uidMasked: maskUid(player.uid),
-        nickname: player.nickname,
-        avatarUrl: player.avatarUrl,
-        turnoverCents: String(player.turnoverCents),
-        profitCents: String(player.profitCents),
-      })),
+      downline,
+      players: visiblePlayers.map((player) => serializeAgentPlayer(player)),
       playersNextCursor,
     },
   };
@@ -805,7 +885,7 @@ export async function listAgentDashboardPeriods(
   });
   if (!agent || agent.status !== 'ACTIVE') throw new ProfitPoolError('AGENT_NOT_FOUND');
   const rows = await prisma.profitPoolAgentSnapshot.findMany({
-    where: { sourceAgentId: agent.id },
+    where: { sourceAgentId: agent.id, pool: { status: { not: 'VOIDED' } } },
     include: {
       pool: {
         include: { room: { select: { id: true, title: true, gameCode: true } } },
@@ -836,6 +916,7 @@ export async function listAgentDashboardPeriods(
       endSeqNo: period.pool.endSeqNo,
       status: period.pool.status,
       generatedAt: period.pool.generatedAt,
+      generatedDate: malaysiaDay(period.pool.generatedAt),
       amountCents: String(period.amountCents),
     })),
     nextCursor: hasMore ? items.at(-1)?.poolId ?? null : null,
@@ -864,8 +945,12 @@ export async function listAgentDashboardPlayers(
   });
   if (!ownSnapshot) throw new ProfitPoolError('POOL_NOT_GENERATED');
   const rows = await prisma.profitPoolPlayerSnapshot.findMany({
-    where: { poolId, sourceAgentId: agent.id, isAgentSelf: false },
-    orderBy: [{ turnoverCents: 'desc' }, { userId: 'asc' }],
+    where: {
+      poolId,
+      sourceAgentId: agent.id,
+      ...(cursor ? { isAgentSelf: false } : {}),
+    },
+    orderBy: [{ isAgentSelf: 'desc' }, { turnoverCents: 'desc' }, { userId: 'asc' }],
     take: limit + 1,
     ...(cursor
       ? {
@@ -882,14 +967,7 @@ export async function listAgentDashboardPlayers(
   const hasMore = rows.length > limit;
   const items = hasMore ? rows.slice(0, limit) : rows;
   return {
-    items: items.map((player) => ({
-      userId: player.userId,
-      uidMasked: maskUid(player.uid),
-      nickname: player.nickname,
-      avatarUrl: player.avatarUrl,
-      turnoverCents: String(player.turnoverCents),
-      profitCents: String(player.profitCents),
-    })),
+    items: items.map((player) => serializeAgentPlayer(player)),
     nextCursor: hasMore ? items.at(-1)?.userId ?? null : null,
   };
 }

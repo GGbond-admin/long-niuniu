@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
-import { request, rm } from '../api';
+import { del, post, request, rm } from '../api';
 import type { BatchStatus, BatchSummary, ProfitPoolRoom } from './types';
 
 const STATUS: Record<BatchStatus, { label: string; tone: string }> = {
   PENDING: { label: '待分配', tone: 'pending' },
   DISTRIBUTED: { label: '已分配', tone: 'done' },
   NO_DISTRIBUTION: { label: '无需分配', tone: 'none' },
+  VOIDED: { label: '已撤回', tone: 'voided' },
 };
 
 function errorText(error: unknown) {
@@ -27,11 +28,13 @@ export default function BatchHistory({
   refreshKey,
   onSelect,
   onError,
+  onChanged,
   compact = false,
 }: {
   refreshKey: number;
   onSelect: (poolId: string) => void;
   onError: (message: string) => void;
+  onChanged?: () => void;
   compact?: boolean;
 }) {
   const [items, setItems] = useState<BatchSummary[]>([]);
@@ -45,6 +48,9 @@ export default function BatchHistory({
   const [legacyItems, setLegacyItems] = useState<LegacyPoolSummary[]>([]);
   const [legacyCursor, setLegacyCursor] = useState<string | null>(null);
   const [loadingLegacyMore, setLoadingLegacyMore] = useState(false);
+  const [voiding, setVoiding] = useState<BatchSummary | null>(null);
+  const [deleting, setDeleting] = useState<BatchSummary | null>(null);
+  const [busy, setBusy] = useState(false);
   const queryVersion = useRef(0);
 
   useEffect(() => {
@@ -167,6 +173,38 @@ export default function BatchHistory({
     }
   }
 
+  async function discard(item: BatchSummary) {
+    setBusy(true);
+    onError('');
+    try {
+      await post(`/api/admin/profit-pool/batches/${item.id}/discard`, {});
+      setVoiding(null);
+      setItems((current) =>
+        current.map((row) => (row.id === item.id ? { ...row, status: 'VOIDED' } : row)),
+      );
+      onChanged?.();
+    } catch (error) {
+      onError(errorText(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function remove(item: BatchSummary) {
+    setBusy(true);
+    onError('');
+    try {
+      await del(`/api/admin/profit-pool/batches/${item.id}`);
+      setDeleting(null);
+      setItems((current) => current.filter((row) => row.id !== item.id));
+      onChanged?.();
+    } catch (error) {
+      onError(errorText(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <section className={`ppx-history ${compact ? 'compact' : ''}`}>
       <header className="ppx-history-head">
@@ -209,6 +247,7 @@ export default function BatchHistory({
               <option value="PENDING">待分配</option>
               <option value="DISTRIBUTED">已分配</option>
               <option value="NO_DISTRIBUTION">无需分配</option>
+              <option value="VOIDED">已撤回</option>
             </select>
           </div>
         )}
@@ -225,7 +264,7 @@ export default function BatchHistory({
               <th>代理分配</th>
               <th>状态</th>
               <th>生成时间</th>
-              <th />
+              <th>操作</th>
             </tr>
           </thead>
           <tbody>
@@ -241,7 +280,7 @@ export default function BatchHistory({
                     >
                       {item.poolCode}
                     </button>
-                    <small>{item.room.title}</small>
+                    <small>游戏 · {item.room.title}</small>
                   </td>
                   <td>
                     <strong>{item.startSeqNo} – {item.endSeqNo}</strong>
@@ -261,16 +300,35 @@ export default function BatchHistory({
                     })}
                   </td>
                   <td>
-                    <button
-                      type="button"
-                      className="ppx-row-action"
-                      onClick={() => onSelect(item.id)}
-                    >
-                      查看报表
-                      <svg viewBox="0 0 24 24" aria-hidden="true">
-                        <path d="m9 5 7 7-7 7" />
-                      </svg>
-                    </button>
+                    <div className="ppx-row-actions">
+                      <button
+                        type="button"
+                        className="ppx-row-action"
+                        onClick={() => onSelect(item.id)}
+                      >
+                        查看报表
+                      </button>
+                      {item.status !== 'VOIDED' && (
+                        <button
+                          type="button"
+                          className="ppx-row-void"
+                          disabled={busy}
+                          onClick={() => setVoiding(item)}
+                        >
+                          {item.status === 'DISTRIBUTED' ? '强制撤回' : '撤回'}
+                        </button>
+                      )}
+                      {item.status === 'VOIDED' && (
+                        <button
+                          type="button"
+                          className="ppx-row-void"
+                          disabled={busy}
+                          onClick={() => setDeleting(item)}
+                        >
+                          删除
+                        </button>
+                      )}
+                    </div>
                   </td>
                 </tr>
               );
@@ -365,6 +423,88 @@ export default function BatchHistory({
             )}
           </div>
         </section>
+      )}
+
+      {voiding && (
+        <div className="ppx-modal-backdrop" role="presentation">
+          <div
+            className="ppx-confirm-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="ppx-history-void-title"
+          >
+            <span className="ppx-modal-icon">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M12 3 2.8 20h18.4L12 3Z" />
+                <path d="M12 9v5M12 17.5v.1" />
+              </svg>
+            </span>
+            <small>{voiding.status === 'DISTRIBUTED' ? 'FORCE CLAWBACK' : 'RELEASE ROUND LOCKS'}</small>
+            <h3 id="ppx-history-void-title">
+              {voiding.status === 'DISTRIBUTED'
+                ? `强制撤回 ${voiding.poolCode}？`
+                : `撤回 ${voiding.poolCode}？`}
+            </h3>
+            <p>
+              {voiding.status === 'DISTRIBUTED'
+                ? `将从代理可用余额扣回已发放的 RM ${rm(voiding.distributedCents)}，并释放第 ${voiding.startSeqNo}–${voiding.endSeqNo} 局。若有代理余额不足，整笔撤回会失败、不会部分扣款。`
+                : `将释放第 ${voiding.startSeqNo}–${voiding.endSeqNo} 局的局锁，之后可以重新生成。资金尚未入账，代理余额不会变动。`}
+            </p>
+            <div>
+              <button type="button" disabled={busy} onClick={() => setVoiding(null)}>
+                取消
+              </button>
+              <button
+                type="button"
+                className="primary danger-confirm"
+                disabled={busy}
+                onClick={() => void discard(voiding)}
+              >
+                {busy
+                  ? '正在撤回…'
+                  : voiding.status === 'DISTRIBUTED'
+                    ? '确认强制撤回并扣回资金'
+                    : '确认撤回'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {deleting && (
+        <div className="ppx-modal-backdrop" role="presentation">
+          <div
+            className="ppx-confirm-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="ppx-history-delete-title"
+          >
+            <span className="ppx-modal-icon">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M12 3 2.8 20h18.4L12 3Z" />
+                <path d="M12 9v5M12 17.5v.1" />
+              </svg>
+            </span>
+            <small>PERMANENT DELETE</small>
+            <h3 id="ppx-history-delete-title">删除 {deleting.poolCode}？</h3>
+            <p>
+              将永久删除该已撤回利润池的报表快照，历史列表不再显示。局锁已在撤回时释放，代理余额不会再变动。此操作不可恢复。
+            </p>
+            <div>
+              <button type="button" disabled={busy} onClick={() => setDeleting(null)}>
+                取消
+              </button>
+              <button
+                type="button"
+                className="primary danger-confirm"
+                disabled={busy}
+                onClick={() => void remove(deleting)}
+              >
+                {busy ? '正在删除…' : '确认删除'}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </section>
   );

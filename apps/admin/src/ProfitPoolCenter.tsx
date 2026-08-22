@@ -145,7 +145,7 @@ export default function ProfitPoolCenter() {
                   defaultExpenseRatio={Number(config?.expenseRatio ?? 0.025)}
                   onGenerated={(poolId, poolCode) => {
                     setSelectedBatchId(poolId);
-                    void changed(`${poolCode} 已生成并永久锁定局数`);
+                    void changed(`${poolCode} 已生成。未发放前仍可撤回重做`);
                   }}
                   onError={setError}
                 />
@@ -154,6 +154,7 @@ export default function ProfitPoolCenter() {
                   refreshKey={refreshKey}
                   onSelect={setSelectedBatchId}
                   onError={setError}
+                  onChanged={() => void changed('利润池已撤回，局锁已释放')}
                 />
               </>
             )}
@@ -184,6 +185,7 @@ export default function ProfitPoolCenter() {
               refreshKey={refreshKey}
               onSelect={setSelectedBatchId}
               onError={setError}
+              onChanged={() => void changed('利润池已撤回，局锁已释放')}
             />
           ))}
 

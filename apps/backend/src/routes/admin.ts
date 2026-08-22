@@ -284,6 +284,22 @@ export async function adminRoutes(app: FastifyInstance) {
 
   // ── 实名审核 ──
   app.get(
+    '/api/admin/identity-review/summary',
+    { preHandler: [app.authAdmin] },
+    async () => {
+      const [pendingKyc, pendingWithdrawAccounts] = await Promise.all([
+        prisma.kyc.count({ where: { status: 'PENDING' } }),
+        prisma.withdrawAccount.count({ where: { status: 'PENDING', source: 'user' } }),
+      ]);
+      return {
+        pendingKyc,
+        pendingWithdrawAccounts,
+        pendingTotal: pendingKyc + pendingWithdrawAccounts,
+      };
+    },
+  );
+
+  app.get(
     '/api/admin/kyc',
     { preHandler: [app.authAdmin, app.requireAdminRoles('SUPER', 'OPERATOR', 'REVIEWER')] },
     async (req) => {

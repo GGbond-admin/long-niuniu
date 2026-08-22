@@ -80,6 +80,10 @@ export function isPresetAvatarUrl(url: string | null | undefined): boolean {
   return !!url && ALLOWED.has(url);
 }
 
+export function isCustomAvatarUrl(url: string | null | undefined): boolean {
+  return !!url && /^\/api\/public\/avatars\/[0-9a-f-]{36}\.(?:jpg|png|webp)$/.test(url);
+}
+
 export function avatarByUrl(url: string | null | undefined) {
   return PRESET_AVATARS.find((item) => item.url === url) ?? null;
 }

@@ -5,6 +5,7 @@
  * 新增目录项前必须先接入对应规则引擎、配置命名空间和结算实现。
  */
 import { prisma } from '../lib/prisma.js';
+import { VALID_ROUND_PHASE_WHERE } from './adminRounds.js';
 import { ensureWaitingRound } from './game.js';
 
 export const SUPREME_NIUNIU_GAME_CODE = 'SUPREME_NIUNIU';
@@ -16,6 +17,7 @@ export const GAME_CATALOG = {
     interactionGroupTitle: '至尊牛牛互动群',
     engine: 'NIUNIU',
     rulesNamespace: 'supreme-niuniu',
+    poolCodePrefix: 'ZZNN',
   },
 } as const;
 
@@ -29,6 +31,11 @@ export function isSupportedGameCode(code: string): code is SupportedGameCode {
 
 export function gameDefinition(code: string) {
   return isSupportedGameCode(code) ? GAME_CATALOG[code] : null;
+}
+
+/** 利润池批号前缀，与后台房间/游戏一一对应；未入库游戏回退 TB。 */
+export function profitPoolCodePrefix(gameCode: string): string {
+  return gameDefinition(gameCode)?.poolCodePrefix ?? 'TB';
 }
 
 /** 为目录中的每款游戏确保唯一互动群存在；不会为同一游戏复制第二张牌桌。 */
@@ -66,7 +73,12 @@ export async function listCatalogGames() {
   const rooms = await prisma.room.findMany({
     where: { gameCode: { in: SUPPORTED_GAME_CODES } },
     include: {
-      _count: { select: { members: { where: { status: 'ACTIVE' } }, rounds: true } },
+      _count: {
+        select: {
+          members: { where: { status: 'ACTIVE' } },
+          rounds: { where: { phase: VALID_ROUND_PHASE_WHERE } },
+        },
+      },
     },
     orderBy: { createdAt: 'asc' },
   });

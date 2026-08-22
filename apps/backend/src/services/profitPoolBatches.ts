@@ -9,7 +9,8 @@ import {
   serializeRangeBreakdown,
   type ProfitPoolRangeComputation,
 } from './profitPoolRange.js';
-import { transfer } from './wallet.js';
+import { transfer, WalletError } from './wallet.js';
+import { profitPoolCodePrefix } from './gameCatalog.js';
 
 export interface ProfitPoolBatchInput {
   roomId: string;
@@ -64,8 +65,27 @@ function isRoundLockConflict(error: unknown): boolean {
   );
 }
 
-function nextPoolCode(day: string, value: number): string {
-  return `TB${day.replaceAll('-', '')}${String(value).padStart(4, '0')}`;
+const VOIDABLE_STATUSES: ProfitPoolBatchStatus[] = [
+  'PENDING',
+  'NO_DISTRIBUTION',
+  'DISTRIBUTED',
+];
+
+function isBatchCountConstraint(error: unknown): boolean {
+  const message = error instanceof Error ? error.message.toLowerCase() : '';
+  const metaText = JSON.stringify(
+    (error as { meta?: unknown } | null)?.meta ?? {},
+  ).toLowerCase();
+  return (
+    message.includes('profit_pool_batches_round_count_check') ||
+    message.includes('profit_pool_batches_terminal_counts_check') ||
+    metaText.includes('profit_pool_batches_round_count_check') ||
+    metaText.includes('profit_pool_batches_terminal_counts_check')
+  );
+}
+
+export function buildProfitPoolCode(prefix: string, day: string, value: number): string {
+  return `${prefix}${day.replaceAll('-', '')}${String(value).padStart(4, '0')}`;
 }
 
 export async function previewProfitPoolBatch(
@@ -97,12 +117,14 @@ export async function generateProfitPoolBatch(input: GenerateProfitPoolBatchInpu
       }
 
       const day = malaysiaDay();
+      const prefix = profitPoolCodePrefix(computation.room.gameCode);
+      const sequenceKey = `PROFIT_POOL:${prefix}:${day.replaceAll('-', '')}`;
       const sequence = await tx.profitPoolSequence.upsert({
-        where: { key: `PROFIT_POOL:${day.replaceAll('-', '')}` },
-        create: { key: `PROFIT_POOL:${day.replaceAll('-', '')}`, value: 1 },
+        where: { key: sequenceKey },
+        create: { key: sequenceKey, value: 1 },
         update: { value: { increment: 1 } },
       });
-      const poolCode = nextPoolCode(day, sequence.value);
+      const poolCode = buildProfitPoolCode(prefix, day, sequence.value);
       const status: ProfitPoolBatchStatus =
         computation.netPoolCents > 0n ? 'PENDING' : 'NO_DISTRIBUTION';
       const batch = await tx.profitPoolBatch.create({
@@ -220,6 +242,7 @@ export async function generateProfitPoolBatch(input: GenerateProfitPoolBatchInpu
     }, 3, PROFIT_POOL_TRANSACTION_OPTIONS);
   } catch (error) {
     if (isRoundLockConflict(error)) throw new ProfitPoolError('RANGE_OVERLAP');
+    if (isBatchCountConstraint(error)) throw new ProfitPoolError('BATCH_COUNT_CONSTRAINT');
     throw error;
   }
 }
@@ -325,6 +348,181 @@ export async function distributeProfitPoolBatch(
   return result.batch;
 }
 
+/**
+ * 撤回批次：未发放只释放局锁；已发放则从代理可用余额扣回后释放局锁。
+ * 任一代理可用余额不足时整笔回滚，不部分扣款。
+ */
+export async function discardProfitPoolBatch(
+  poolId: string,
+  adminId: string,
+  auditIp?: string,
+) {
+  try {
+    const result = await serializable(async (tx) => {
+      const batch = await tx.profitPoolBatch.findUnique({
+        where: { id: poolId },
+        include: { agentSnapshots: { orderBy: { amountCents: 'desc' } } },
+      });
+      if (!batch) throw new ProfitPoolError('POOL_NOT_GENERATED');
+      if (!VOIDABLE_STATUSES.includes(batch.status)) {
+        throw new ProfitPoolError('POOL_NOT_DISCARDABLE', { status: batch.status });
+      }
+
+      const clawbackShares =
+        batch.status === 'DISTRIBUTED'
+          ? (batch.agentSnapshots ?? []).filter((share) => share.amountCents > 0n)
+          : [];
+      if (clawbackShares.length) {
+        const wallets = await tx.wallet.findMany({
+          where: { userId: { in: clawbackShares.map((share) => share.userId) } },
+          select: {
+            userId: true,
+            availableCents: true,
+            freezeBankerCents: true,
+            freezeBetCents: true,
+            freezeWithdrawCents: true,
+          },
+        });
+        const walletByUser = new Map(wallets.map((wallet) => [wallet.userId, wallet]));
+        const shortfalls = clawbackShares.flatMap((share) => {
+          const wallet = walletByUser.get(share.userId);
+          const available = wallet?.availableCents ?? 0n;
+          if (available >= share.amountCents) return [];
+          const frozenCents =
+            (wallet?.freezeBankerCents ?? 0n) +
+            (wallet?.freezeBetCents ?? 0n) +
+            (wallet?.freezeWithdrawCents ?? 0n);
+          return [
+            {
+              label: share.label,
+              uid: share.uid,
+              requiredCents: String(share.amountCents),
+              availableCents: String(available),
+              frozenCents: String(frozenCents),
+            },
+          ];
+        });
+        if (shortfalls.length) {
+          throw new ProfitPoolError('CLAWBACK_INSUFFICIENT_BALANCE', { agents: shortfalls });
+        }
+        for (const share of clawbackShares) {
+          await transfer(tx, {
+            amountCents: share.amountCents,
+            from: { userId: share.userId, accountType: AccountType.USER_AVAILABLE },
+            to: { accountType: AccountType.PLATFORM_PROFIT_POOL },
+            refType: 'profit_share_clawback',
+            refId: share.sourceAgentId,
+            idempotencyKey: `profit-share-clawback:${batch.poolCode}:${share.sourceAgentId}`,
+            operatorId: adminId,
+            memo: `强制撤回 ${batch.poolCode}`,
+          });
+        }
+      }
+
+      const discardedAt = new Date();
+      const updated = await tx.profitPoolBatch.updateMany({
+        where: { id: batch.id, status: batch.status },
+        data: {
+          status: 'VOIDED',
+          discardedBy: adminId,
+          discardedAt,
+        },
+      });
+      if (updated.count !== 1) throw new ProfitPoolError('POOL_NOT_DISCARDABLE');
+
+      await tx.profitPoolRoundLock.deleteMany({ where: { poolId: batch.id } });
+      await tx.auditLog.create({
+        data: {
+          adminId,
+          action:
+            batch.status === 'DISTRIBUTED'
+              ? 'PROFIT_POOL_BATCH_FORCE_VOIDED'
+              : 'PROFIT_POOL_BATCH_VOIDED',
+          target: batch.id,
+          after: {
+            poolCode: batch.poolCode,
+            previousStatus: batch.status,
+            roomId: batch.roomId,
+            startSeqNo: batch.startSeqNo,
+            endSeqNo: batch.endSeqNo,
+            netPoolCents: String(batch.netPoolCents),
+            clawbackCents: String(
+              clawbackShares.reduce((total, share) => total + share.amountCents, 0n),
+            ),
+          },
+          ip: auditIp,
+        },
+      });
+
+      const saved = await tx.profitPoolBatch.findUniqueOrThrow({
+        where: { id: batch.id },
+        include: {
+          room: { select: { id: true, title: true, gameCode: true } },
+        },
+      });
+      return { saved, clawbackShares, poolCode: batch.poolCode, startSeqNo: batch.startSeqNo, endSeqNo: batch.endSeqNo };
+    }, 3, PROFIT_POOL_TRANSACTION_OPTIONS);
+
+    for (const share of result.clawbackShares) {
+      const amount = `${share.amountCents / 100n}.${(share.amountCents % 100n)
+        .toString()
+        .padStart(2, '0')}`;
+      void pushService
+        .sendCustom(
+          share.userId,
+          `⚠️ ${result.poolCode} 称桶分成已强制撤回\n结算局数 ${result.startSeqNo}–${result.endSeqNo}，已从可用余额扣回 RM${amount}。`,
+        )
+        .catch(() => undefined);
+    }
+    return result.saved;
+  } catch (error) {
+    if (error instanceof WalletError && error.code === 'INSUFFICIENT_BALANCE') {
+      throw new ProfitPoolError('CLAWBACK_INSUFFICIENT_BALANCE');
+    }
+    throw error;
+  }
+}
+
+/** 仅允许删除已撤回记录：快照与局锁一并清掉，资金与局锁在撤回时已处理。 */
+export async function deleteProfitPoolBatch(
+  poolId: string,
+  adminId: string,
+  auditIp?: string,
+) {
+  return serializable(async (tx) => {
+    const batch = await tx.profitPoolBatch.findUnique({ where: { id: poolId } });
+    if (!batch) throw new ProfitPoolError('POOL_NOT_GENERATED');
+    if (batch.status !== 'VOIDED') {
+      throw new ProfitPoolError('POOL_NOT_DELETABLE', { status: batch.status });
+    }
+
+    await tx.profitPoolRoundLock.deleteMany({ where: { poolId: batch.id } });
+    await tx.profitPoolPlayerSnapshot.deleteMany({ where: { poolId: batch.id } });
+    await tx.profitPoolAgentSnapshot.deleteMany({ where: { poolId: batch.id } });
+    const deleted = await tx.profitPoolBatch.deleteMany({
+      where: { id: batch.id, status: 'VOIDED' },
+    });
+    if (deleted.count !== 1) throw new ProfitPoolError('POOL_NOT_DELETABLE');
+
+    await tx.auditLog.create({
+      data: {
+        adminId,
+        action: 'PROFIT_POOL_BATCH_DELETED',
+        target: batch.id,
+        after: {
+          poolCode: batch.poolCode,
+          roomId: batch.roomId,
+          startSeqNo: batch.startSeqNo,
+          endSeqNo: batch.endSeqNo,
+          previousStatus: batch.status,
+        },
+        ip: auditIp,
+      },
+    });
+    return { id: batch.id, poolCode: batch.poolCode };
+  }, 3, PROFIT_POOL_TRANSACTION_OPTIONS);
+}
+
 export async function listProfitPoolRooms() {
   const rooms = await prisma.room.findMany({
     orderBy: { createdAt: 'asc' },
@@ -335,12 +533,13 @@ export async function listProfitPoolRooms() {
       status: true,
       profitPoolCutover: { select: { maxSeqNo: true, source: true, createdAt: true } },
       rounds: {
-        where: { phase: { in: ['FINISHED', 'CANCELLED'] } },
+        where: { phase: 'FINISHED' },
         orderBy: { seqNo: 'desc' },
         take: 1,
         select: { seqNo: true, phase: true },
       },
       profitPoolBatches: {
+        where: { status: { not: 'VOIDED' } },
         orderBy: { endSeqNo: 'desc' },
         take: 1,
         select: { id: true, poolCode: true, startSeqNo: true, endSeqNo: true, status: true },
@@ -410,6 +609,7 @@ export async function getProfitPoolBatch(id: string) {
 export async function getProfitPoolOverview() {
   const [latest, statusCounts, totals, legacyPendingCount] = await Promise.all([
     prisma.profitPoolBatch.findFirst({
+      where: { status: { not: 'VOIDED' } },
       orderBy: { generatedAt: 'desc' },
       include: { room: { select: { id: true, title: true, gameCode: true } } },
     }),

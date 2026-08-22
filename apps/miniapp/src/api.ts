@@ -71,14 +71,20 @@ async function request<T>(
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
     try {
+      const headers = new Headers(options.headers);
+      if (token) headers.set('Authorization', `Bearer ${token}`);
+      // DELETE/GET 没有 body 时不要带 application/json，否则 Fastify 会按空 JSON 解析失败。
+      if (
+        options.body != null &&
+        !(options.body instanceof FormData) &&
+        !headers.has('Content-Type')
+      ) {
+        headers.set('Content-Type', 'application/json');
+      }
       const res = await fetch(path, {
         ...options,
         signal: controller.signal,
-        headers: {
-          'Content-Type': 'application/json',
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-          ...options.headers,
-        },
+        headers,
       });
       const body = (await res.json().catch((cause) => {
         if (res.ok) throw cause;
@@ -282,6 +288,8 @@ export const api = {
       },
     ),
 
+  uploadAvatar: (file: File) => upload<{ url: string }>('/api/me/avatar/upload', file),
+
   setNickname: (nickname: string) =>
     request<{
       ok: boolean;
@@ -483,6 +491,7 @@ export const api = {
   deleteWithdrawAccount: (id: string) =>
     request<{ ok: boolean }>(`/api/wallet/withdraw-accounts/${id}`, {
       method: 'DELETE',
+      body: '{}',
     }),
   setDefaultWithdrawAccount: (id: string) =>
     request<{ ok: boolean }>(`/api/wallet/withdraw-accounts/${id}/default`, {
@@ -837,10 +846,17 @@ export const api = {
       body: JSON.stringify(payload),
     }),
 
-  promotion: (date?: string) =>
-    request<{
+  promotion: (range?: { from?: string; to?: string; date?: string }) => {
+    const params = new URLSearchParams();
+    if (range?.from) params.set('from', range.from);
+    if (range?.to) params.set('to', range.to);
+    if (range?.date && !range.from && !range.to) params.set('date', range.date);
+    const query = params.toString();
+    return request<{
       rates: { self: number; l1: number; l2: number };
       date: string;
+      from: string;
+      to: string;
       commissionCents: string;
       turnover: { selfCents: string; l1Cents: string; l2Cents: string };
       invitedTotal: number;
@@ -853,7 +869,8 @@ export const api = {
         boundAt: string;
         contributionCents: string;
       }>;
-    }>(`/api/promotion${date ? `?date=${date}` : ''}`),
+    }>(`/api/promotion${query ? `?${query}` : ''}`);
+  },
 
   inviteLink: () =>
     request<{ uid: string; nickname: string; avatarUrl?: string; deepLink: string }>('/api/promotion/invite-link'),
@@ -870,6 +887,13 @@ export const api = {
         maxChildPoints: number;
         playerCount: number;
         subagentCount: number;
+        latestReport: {
+          poolId: string;
+          poolCode: string;
+          generatedAt: string;
+          status: string;
+          room: { title: string; gameCode: string };
+        } | null;
       } | null;
     }>('/api/agent/me'),
 
@@ -882,6 +906,7 @@ export const api = {
         nickname: string | null;
         avatarUrl: string | null;
         sharePoints: number;
+        bucketBase: number;
         directAgentCount: number;
         teamAgentCount: number;
         directPlayerCount: number;
@@ -889,6 +914,10 @@ export const api = {
         online: boolean;
         onlineTeamCount: number;
         lifetimeProfitCents: string;
+        lifetimeSelfAmountCents: string;
+        lifetimeOverrideAmountCents: string;
+        lifetimeLegacyCents: string;
+        today: string;
       };
       periods: Array<{
         poolId: string;
@@ -898,6 +927,7 @@ export const api = {
         endSeqNo: number;
         status: 'PENDING' | 'DISTRIBUTED' | 'NO_DISTRIBUTION';
         generatedAt: string;
+        generatedDate: string;
         amountCents: string;
       }>;
       periodsNextCursor: string | null;
@@ -910,6 +940,10 @@ export const api = {
           endSeqNo: number;
           status: 'PENDING' | 'DISTRIBUTED' | 'NO_DISTRIBUTION';
           generatedAt: string;
+          generatedDate: string;
+          turnoverCents: string;
+          expenseCents: string;
+          netPoolCents: string;
         };
         mine: {
           sharePoints: number;
@@ -920,6 +954,7 @@ export const api = {
           teamPlayerCount: number;
           selfTurnoverCents: string;
           teamTurnoverCents: string;
+          directTurnoverCents: string;
           contributionBp: number;
           selfAmountCents: string;
           overrideAmountCents: string;
@@ -940,6 +975,24 @@ export const api = {
           ownAmountCents: string;
           contributionAmountCents: string;
         }>;
+        downline: Array<{
+          agentId: string;
+          parentAgentId: string | null;
+          label: string;
+          uidMasked: string;
+          sharePoints: number;
+          diffPoints: number;
+          directAgentCount: number;
+          teamAgentCount: number;
+          directPlayerCount: number;
+          teamPlayerCount: number;
+          selfTurnoverCents: string;
+          teamTurnoverCents: string;
+          selfAmountCents: string;
+          overrideAmountCents: string;
+          amountCents: string;
+          contributionAmountCents: string;
+        }>;
         players: Array<{
           userId: string;
           uidMasked: string;
@@ -947,6 +1000,7 @@ export const api = {
           avatarUrl: string | null;
           turnoverCents: string;
           profitCents: string;
+          isSelf: boolean;
         }>;
         playersNextCursor: string | null;
       } | null;
@@ -962,6 +1016,7 @@ export const api = {
         endSeqNo: number;
         status: 'PENDING' | 'DISTRIBUTED' | 'NO_DISTRIBUTION';
         generatedAt: string;
+        generatedDate: string;
         amountCents: string;
       }>;
       nextCursor: string | null;
@@ -976,6 +1031,7 @@ export const api = {
         avatarUrl: string | null;
         turnoverCents: string;
         profitCents: string;
+        isSelf: boolean;
       }>;
       nextCursor: string | null;
     }>(

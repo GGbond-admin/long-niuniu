@@ -182,6 +182,35 @@ describe('房间权威聊天策略', () => {
     ).toEqual({ muted: true, stage: 'NEXT_ROUND' });
   });
 
+  it('同一局号取消后重开时，按该号的取消局而不是上一有效局决定禁言', () => {
+    expect(
+      deriveRoomChatPolicy([
+        round(RoundPhase.WAITING, { id: 'round-2b', seqNo: 2 }),
+        round(RoundPhase.CANCELLED, {
+          id: 'round-2a',
+          seqNo: 2,
+          cancelReason: '庄家投骰超时',
+          events: [
+            {
+              type: 'BANKER_REPOST_WINDOW',
+              createdAt: new Date('2026-08-19T10:00:00.000Z'),
+            },
+          ],
+        }),
+        round(RoundPhase.FINISHED, {
+          id: 'round-1',
+          seqNo: 1,
+          events: [
+            {
+              type: ROOM_ANNOUNCED_FINISHED,
+              createdAt: new Date('2026-08-19T09:59:00.000Z'),
+            },
+          ],
+        }),
+      ], now, auto),
+    ).toEqual({ muted: true, stage: 'NEXT_ROUND' });
+  });
+
   it('游戏已结束或手动单局时，投骰超时取消后不锁在准备下一局', () => {
     const cancelled = round(RoundPhase.CANCELLED, {
       id: 'round-1',

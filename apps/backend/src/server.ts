@@ -70,6 +70,24 @@ export async function buildServer() {
         ? env.trustedProxyCidrs
         : false,
   });
+  app.removeContentTypeParser('application/json');
+  app.addContentTypeParser(
+    'application/json',
+    { parseAs: 'string' },
+    (_req, body, done) => {
+      if (body == null || body === '' || (typeof body === 'string' && body.trim() === '')) {
+        done(null, {});
+        return;
+      }
+      try {
+        done(null, JSON.parse(body));
+      } catch (error) {
+        const err = error as Error & { statusCode?: number };
+        err.statusCode = 400;
+        done(err, undefined);
+      }
+    },
+  );
 
   await app.register(helmet, { contentSecurityPolicy: false });
   await app.register(cors, {
@@ -298,6 +316,13 @@ export async function buildServer() {
       return reply
         .code(429)
         .send({ error: 'RATE_LIMITED', message: '操作过于频繁，请稍后再试' });
+    }
+    const clientStatus = (err as { statusCode?: number }).statusCode;
+    if (typeof clientStatus === 'number' && clientStatus >= 400 && clientStatus < 500) {
+      return reply.code(clientStatus).send({
+        error: (err as { code?: string }).code ?? 'BAD_REQUEST',
+        message: '请求格式不正确，请重试',
+      });
     }
     app.log.error(err);
     return reply.code(500).send({ error: 'INTERNAL', message: '服务器繁忙，请稍后重试' });

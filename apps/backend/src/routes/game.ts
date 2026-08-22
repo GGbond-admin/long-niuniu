@@ -38,6 +38,7 @@ import {
 } from '../services/gameSettings.js';
 import { processRoundRewards } from '../services/rewards.js';
 import { malaysiaDay } from '../services/rebates.js';
+import { adminRoundsWhere, VALID_ROUND_PHASE_WHERE } from '../services/adminRounds.js';
 import {
   gameDefinition,
   isSupportedGameCode,
@@ -432,21 +433,8 @@ export async function gameRoutes(app: FastifyInstance) {
           select: {
             channel: true,
             roundId: true,
-            round: {
-              select: {
-                room: {
-                  select: { chatMutedAt: true, chatMuteReason: true },
-                },
-              },
-            },
           },
         });
-        if (packet?.round.room.chatMutedAt) {
-          throw new GameError('ROOM_GLOBAL_MUTED', {
-            mutedAt: packet.round.room.chatMutedAt.toISOString(),
-            reason: packet.round.room.chatMuteReason,
-          });
-        }
         if (packet?.channel === 'INTERNAL') {
           const result = await claimInternalPacket(id, userId);
           gameBus.claimRecorded({
@@ -1151,7 +1139,12 @@ export async function adminGameRoutes(app: FastifyInstance) {
       where: { gameCode: { in: SUPPORTED_GAME_CODES } },
       include: {
         bot: { select: { id: true, name: true, username: true } },
-        _count: { select: { members: true, rounds: true } },
+        _count: {
+          select: {
+            members: true,
+            rounds: { where: { phase: VALID_ROUND_PHASE_WHERE } },
+          },
+        },
       },
       orderBy: { createdAt: 'asc' },
     });
@@ -1324,8 +1317,10 @@ export async function adminGameRoutes(app: FastifyInstance) {
     const pageSize = query.limit ?? query.pageSize;
     const page = query.limit ? 1 : query.page;
     const where = {
-      phase: query.phase,
-      roomId: query.roomId,
+      ...adminRoundsWhere({
+        roomId: query.roomId,
+        phase: query.phase,
+      }),
       room: { gameCode: { in: [...SUPPORTED_GAME_CODES] } },
     };
     const activePhases: RoundPhase[] = [
@@ -1844,13 +1839,11 @@ export async function adminGameRoutes(app: FastifyInstance) {
     } catch {
       warnings.push('AUDIT_FAILED');
     }
-    let transitionReady = true;
     if (nextPhase === RoundPhase.FINISHED || nextPhase === RoundPhase.CANCELLED) {
       try {
         await ensureWaitingRound(before.roomId);
       } catch {
         warnings.push('NEXT_ROUND_FAILED');
-        transitionReady = false;
         recoverNextRoundThenEmit({
           roundId: id,
           roomId: before.roomId,
@@ -1859,13 +1852,11 @@ export async function adminGameRoutes(app: FastifyInstance) {
         });
       }
     }
-    if (transitionReady) {
-      try {
-        // FINISHED 广播会触发客户端刷新和虚拟庄家续庄，必须先让紧邻 WAITING 局可见。
-        emitTransition(id, before.roomId, before.phase, nextPhase);
-      } catch {
-        warnings.push('BROADCAST_FAILED');
-      }
+    try {
+      // 局已结束就先广播；下一局创建失败走异步补偿，不能把客户端停在旧阶段。
+      emitTransition(id, before.roomId, before.phase, nextPhase);
+    } catch {
+      warnings.push('BROADCAST_FAILED');
     }
     if (body.action === 'settle') {
       try {

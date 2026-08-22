@@ -24,6 +24,19 @@ const memory = vi.hoisted(() => ({
       },
     ] as Array<{ type: string; createdAt: Date }>,
   },
+  cancelledAttempt: null as {
+    id: string;
+    roomId: string;
+    seqNo: number;
+    phase: string;
+    bankerId: string | null;
+    isContinued: boolean;
+    continuationUsed: boolean;
+    finishedAt: Date;
+    cancelReason: string | null;
+    configSnapshot: Record<string, unknown>;
+    events: Array<{ type: string; createdAt: Date }>;
+  } | null,
   startRound: vi.fn(),
   appendSystemChatOnce: vi.fn(),
   ensureRoundAnnouncement: vi.fn(),
@@ -58,16 +71,17 @@ vi.mock('../lib/prisma.js', () => ({
           ? memory.activeRounds
           : [];
       }),
-      findUnique: vi.fn(async ({ where }: { where: Record<string, unknown> }) =>
-        'roomId_seqNo' in where
-          ? memory.previous
-          : {
-              id: 'round-2',
-              roomId: 'room-1',
-              seqNo: 2,
-              phase: 'BANKER_BID',
-            },
-      ),
+      findUnique: vi.fn(async () => ({
+        id: 'round-2',
+        roomId: 'room-1',
+        seqNo: 2,
+        phase: 'BANKER_BID',
+      })),
+      findFirst: vi.fn(async ({ where }: { where: { phase?: unknown; seqNo?: number } }) => {
+        if (where.phase === RoundPhase.CANCELLED) return memory.cancelledAttempt;
+        if (where.phase === RoundPhase.FINISHED) return memory.previous;
+        return memory.previous.phase === RoundPhase.CANCELLED ? null : memory.previous;
+      }),
     },
     room: {
       findMany: vi.fn(async () => [
@@ -177,6 +191,7 @@ describe('续庄窗口结束后的调度', () => {
     memory.previous.cancelReason = null;
     memory.previous.isContinued = false;
     memory.previous.continuationUsed = false;
+    memory.cancelledAttempt = null;
     memory.startRound.mockReset();
     memory.startRound.mockResolvedValue({
       id: 'round-2',
@@ -417,11 +432,42 @@ describe('续庄窗口结束后的调度', () => {
     expect(memory.startRound).not.toHaveBeenCalled();
   });
 
+  it('同号取消后仍按上一手完成局等待续庄，不立刻公开竞标', async () => {
+    memory.cancelledAttempt = {
+      ...memory.previous,
+      id: 'round-2-cancelled',
+      seqNo: 2,
+      phase: 'CANCELLED',
+      cancelReason: 'NO_BETS',
+      events: [],
+    };
+    memory.previous.events = [
+      {
+        type: 'ROOM_ANNOUNCED_FINISHED',
+        createdAt: new Date('2026-08-07T07:00:10.000Z'),
+      },
+    ];
+    const scheduler = new RoundScheduler();
+    await scheduler.tick();
+
+    expect(memory.startRound).not.toHaveBeenCalled();
+    expect(memory.scheduleVirtualContinuationForRound).toHaveBeenCalledWith(
+      'room-1',
+      'round-1',
+    );
+  });
+
   it('庄家重推取消后，即使自动开局关闭也会启动替代局', async () => {
     memory.autoStart = false;
     memory.startMode = 'MANUAL';
-    memory.previous.phase = 'CANCELLED';
-    memory.previous.cancelReason = '庄家重推';
+    memory.cancelledAttempt = {
+      ...memory.previous,
+      id: 'round-2-cancelled',
+      seqNo: 2,
+      phase: 'CANCELLED',
+      cancelReason: '庄家重推',
+      events: [],
+    };
 
     const scheduler = new RoundScheduler();
     await scheduler.tick();

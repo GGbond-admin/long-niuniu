@@ -245,12 +245,11 @@ type FeedItem =
       demo?: boolean;
       administrator?: boolean;
     }
-  | { 
+  | {
       kind: 'userTip';
       id: string;
       amountCents: string;
       label: string;
-      message: string;
       mine: boolean;
       name: string;
       avatar?: string | null;
@@ -470,6 +469,42 @@ function AssistantCopy({
   );
 }
 
+function centsToAmountInput(cents: number): string {
+  const whole = Math.trunc(cents / 100);
+  const fraction = cents % 100;
+  if (fraction === 0) return String(whole);
+  if (fraction % 10 === 0) return `${whole}.${fraction / 10}`;
+  return `${whole}.${String(fraction).padStart(2, '0')}`;
+}
+
+type RoomHttpAction =
+  | { type: 'bid'; amount: string }
+  | { type: 'bet'; amount: string; allIn: boolean }
+  | { type: 'withdraw' };
+
+function parseRoomHttpAction(
+  content: string,
+  currentPhase: string | null | undefined,
+): RoomHttpAction | null {
+  const trimmed = content.trim();
+  if (!trimmed) return null;
+  if (currentPhase === 'BANKER_BID') {
+    if (!/^\d+$/.test(trimmed) || trimmed === '0') return null;
+    return { type: 'bid', amount: trimmed };
+  }
+  if (currentPhase === 'BETTING') {
+    if (trimmed === '0') return { type: 'withdraw' };
+    const pending = parsePendingBetCommand(trimmed);
+    if (!pending) return null;
+    return {
+      type: 'bet',
+      amount: centsToAmountInput(Number(pending.amountCents)),
+      allIn: pending.action === 'all_in',
+    };
+  }
+  return null;
+}
+
 function parsePendingBetCommand(value: string): {
   action: 'bet' | 'all_in';
   amountCents: string;
@@ -528,19 +563,16 @@ function parseUserPacketContent(raw: string): {
 function parseUserTipContent(raw: string): {
   amountCents: string;
   label: string;
-  message: string;
 } {
   try {
     const parsed = JSON.parse(raw) as {
       amountCents?: string | number;
       label?: string;
-      message?: string;
     };
     if (parsed?.amountCents != null) {
       return {
         amountCents: String(parsed.amountCents),
         label: parsed.label || '客服小妹',
-        message: parsed.message || '谢谢小妹一直在线护航！',
       };
     }
   } catch {
@@ -549,7 +581,6 @@ function parseUserTipContent(raw: string): {
   return {
     amountCents: '0',
     label: '客服小妹',
-    message: '谢谢小妹一直在线护航！',
   };
 }
 
@@ -1233,7 +1264,7 @@ function laterTimestamp(left?: string | null, right?: string | null): string | n
   return Date.parse(left) >= Date.parse(right) ? left : right;
 }
 
-/** HTTP 整桌刷新可能晚于即时叫价；竞标中不要把更高的本地最高价盖回去。 */
+/** HTTP 整桌刷新以服务端当前叫价簿为准；只保留更晚的截标时刻，避免撤标后本地高价回写。 */
 function mergeIncomingRoomState(prev: RoomState | null, next: RoomState): RoomState {
   if (
     !prev?.round
@@ -1244,30 +1275,10 @@ function mergeIncomingRoomState(prev: RoomState | null, next: RoomState): RoomSt
   ) {
     return next;
   }
-  const localHigh = bidAmountNumber(prev.round.topBids[0]?.amountCents);
-  const remoteHigh = bidAmountNumber(next.round.topBids[0]?.amountCents);
-  if (localHigh <= remoteHigh) {
-    return {
-      ...next,
-      round: {
-        ...next.round,
-        bidEndsAt: laterTimestamp(next.round.bidEndsAt, prev.round.bidEndsAt),
-      },
-    };
-  }
   return {
     ...next,
-    me: {
-      ...next.me,
-      bidCents:
-        bidAmountNumber(prev.me.bidCents) > bidAmountNumber(next.me.bidCents)
-          ? prev.me.bidCents
-          : next.me.bidCents,
-    },
     round: {
       ...next.round,
-      topBids: prev.round.topBids,
-      bidCount: Math.max(next.round.bidCount, prev.round.bidCount),
       bidEndsAt: laterTimestamp(next.round.bidEndsAt, prev.round.bidEndsAt),
     },
   };
@@ -1690,7 +1701,6 @@ function MyHistorySheet({ roomId, onClose }: { roomId: string; onClose: () => vo
 type TipDanmakuPayload = {
   nickname: string;
   amountCents: string;
-  message?: string;
   avatarUrl?: string | null;
 };
 
@@ -2596,7 +2606,6 @@ export default function GameRoom({
           id: msg.id,
           amountCents: tip.amountCents,
           label: tip.label,
-          message: tip.message,
           mine: !!msg.from?.uid && msg.from.uid === myUid,
           name: msg.from?.nickname ?? '玩家',
           avatar: msg.from?.avatarUrl,
@@ -3253,14 +3262,11 @@ export default function GameRoom({
               const tipPayload = payload as {
                 nickname: string;
                 amountCents: string;
-                message?: string;
                 avatarUrl?: string | null;
               };
               enqueueTipDanmaku({
                 nickname: tipPayload.nickname,
                 amountCents: tipPayload.amountCents,
-                message:
-                  typeof tipPayload.message === 'string' ? tipPayload.message : undefined,
                 avatarUrl:
                   typeof tipPayload.avatarUrl === 'string' || tipPayload.avatarUrl === null
                     ? tipPayload.avatarUrl
@@ -3917,10 +3923,39 @@ export default function GameRoom({
     requestComposerInput();
   }
 
+  async function submitRoomHttpAction(action: RoomHttpAction): Promise<boolean> {
+    if (!roomId) return false;
+    setError('');
+    setChatSendPending(true);
+    try {
+      const next =
+        action.type === 'bid'
+          ? await api.placeBid(roomId, action.amount)
+          : action.type === 'bet'
+            ? await api.placeBet(roomId, action.amount, action.allIn)
+            : await api.withdrawBet(roomId);
+      setState((current) => mergeIncomingRoomState(current, next));
+      return true;
+    } catch (cause) {
+      setError((cause as Error).message || '操作失败，请检查网络后重试');
+      return false;
+    } finally {
+      setChatSendPending(false);
+    }
+  }
+
   /** 服务端回显/确认后才清空输入；拒绝、断线或超时均返回 false 并保留草稿。 */
   function sendChat(content: string): Promise<boolean> | false {
     if (!content) return false;
-    if (!ensureSocketReady()) return false;
+    const socketOpen = !!(
+      socketRef.current && socketRef.current.readyState === WebSocket.OPEN
+    );
+    if (!socketOpen) {
+      const httpAction = parseRoomHttpAction(content, phase);
+      if (httpAction) return submitRoomHttpAction(httpAction);
+      ensureSocketReady();
+      return false;
+    }
     if (pendingChatAckRef.current) return false;
     const selectedReply = activeReplyTarget;
     const pendingBet =
@@ -4546,11 +4581,8 @@ export default function GameRoom({
                   <b>{tipNotice.nickname}</b>
                   <span>打赏客服小妹</span>
                 </strong>
-                <small>{tipNotice.message || '感谢这份心意'}</small>
               </span>
-              <em>
-                <b>{rm(tipNotice.amountCents)}</b>
-              </em>
+              <em>RM {rm(tipNotice.amountCents)}</em>
               <span className="room-tip-danmaku-glint" aria-hidden />
             </div>
           </div>
@@ -4840,18 +4872,21 @@ export default function GameRoom({
                     {!item.mine && <div className="feed-chat-name">{item.name}</div>}
                     <div
                       className={`wx-transfer ${item.mine ? 'mine' : 'theirs'}`}
-                      aria-label="转账给客服"
+                      aria-label={`打赏给${item.label} RM ${rmPacket(item.amountCents)}`}
                     >
                       <div className="wx-transfer-body">
                         <span className="wx-transfer-mark" aria-hidden>
                           <TransferSwapIcon />
                         </span>
                         <div className="wx-transfer-copy">
-                          <strong>{rm(item.amountCents)}</strong>
-                          <small>{item.message}</small>
+                          <strong>
+                            <span className="wx-transfer-unit">RM</span>
+                            {rmPacket(item.amountCents)}
+                          </strong>
+                          <small>打赏给{item.label}</small>
                         </div>
                       </div>
-                      <div className="wx-transfer-foot">转账给{item.label}</div>
+                      <div className="wx-transfer-foot">互动群打赏</div>
                     </div>
                     {item.time && (
                       <time className="feed-transfer-time">{item.time}</time>

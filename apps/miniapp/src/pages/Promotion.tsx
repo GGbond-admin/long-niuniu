@@ -1,17 +1,34 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { api, rm } from '../api';
 import { goBack } from '../lib/nav';
-import BrandLogo from '../components/BrandLogo';
 
-function shiftDate(date: string, days: number): string {
-  const d = new Date(date + 'T00:00:00');
-  d.setDate(d.getDate() + days);
-  return d.toLocaleDateString('sv-SE');
+function malaysiaToday() {
+  return new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Kuala_Lumpur' });
+}
+
+function shiftDay(date: string, days: number) {
+  const next = new Date(`${date}T00:00:00+08:00`);
+  next.setDate(next.getDate() + days);
+  return next.toLocaleDateString('sv-SE', { timeZone: 'Asia/Kuala_Lumpur' });
+}
+
+function shortDay(date: string) {
+  return date.slice(5);
+}
+
+function rangeLabel(from: string, to: string, today: string) {
+  if (from === to) return from === today ? '今日' : shortDay(from);
+  return `${shortDay(from)} ~ ${shortDay(to)}`;
 }
 
 export default function Promotion() {
-  const [date, setDate] = useState<string | undefined>(undefined);
+  const today = useMemo(() => malaysiaToday(), []);
+  const [from, setFrom] = useState(today);
+  const [to, setTo] = useState(today);
+  const [draftFrom, setDraftFrom] = useState(today);
+  const [draftTo, setDraftTo] = useState(today);
+  const [pickerOpen, setPickerOpen] = useState(false);
   const [data, setData] = useState<Awaited<ReturnType<typeof api.promotion>> | null>(null);
   const [error, setError] = useState('');
   const navigate = useNavigate();
@@ -20,10 +37,30 @@ export default function Promotion() {
   useEffect(() => {
     setError('');
     api
-      .promotion(date)
-      .then(setData)
+      .promotion({ from, to })
+      .then((result) => {
+        setData(result);
+        setFrom(result.from);
+        setTo(result.to);
+      })
       .catch((reason) => setError((reason as Error).message || '加载失败'));
-  }, [date]);
+  }, [from, to]);
+
+  function applyRange(nextFrom: string, nextTo: string) {
+    const start = nextFrom > nextTo ? nextTo : nextFrom;
+    const end = nextFrom > nextTo ? nextFrom : nextTo;
+    const cappedEnd = end > today ? today : end;
+    const cappedStart = start > today ? today : start;
+    setDraftFrom(cappedStart);
+    setDraftTo(cappedEnd);
+    setFrom(cappedStart);
+    setTo(cappedEnd);
+    setPickerOpen(false);
+  }
+
+  function applyToday() {
+    applyRange(today, today);
+  }
 
   if (!data && !error) return <div className="loading">加载中…</div>;
   if (!data) {
@@ -45,6 +82,8 @@ export default function Promotion() {
 
   const pct = (r: number) => `${(r * 100).toFixed(1)}%`;
   const settled = data.commissionStatus === 'PAID';
+  const singleDay = data.from === data.to;
+  const isToday = singleDay && data.from === today;
 
   return (
     <div className="page subpage pm-page">
@@ -70,16 +109,72 @@ export default function Promotion() {
               <strong>{rm(data.commissionCents)}</strong>
             </div>
           </div>
-          <div className="pm-date">
-            <button type="button" aria-label="前一天" onClick={() => setDate(shiftDate(data.date, -1))}>
-              ‹
-            </button>
-            <b>{data.date}</b>
-            <button type="button" aria-label="后一天" onClick={() => setDate(shiftDate(data.date, 1))}>
-              ›
+          <button
+            type="button"
+            className={`pm-date${pickerOpen ? ' open' : ''}`}
+            aria-expanded={pickerOpen}
+            aria-label="选择日期区间"
+            onClick={() => {
+              setDraftFrom(from);
+              setDraftTo(to);
+              setPickerOpen((open) => !open);
+            }}
+          >
+            <b>{rangeLabel(data.from, data.to, today)}</b>
+            <i aria-hidden>▾</i>
+          </button>
+        </div>
+        {pickerOpen && (
+          <div className="pm-date-panel" role="dialog" aria-label="选择推广统计日期">
+            <div className="pm-date-presets">
+              <button type="button" className={isToday ? 'active' : ''} onClick={applyToday}>
+                今日
+              </button>
+              <button
+                type="button"
+                className={data.from === shiftDay(today, -6) && data.to === today ? 'active' : ''}
+                onClick={() => applyRange(shiftDay(today, -6), today)}
+              >
+                近7日
+              </button>
+              <button
+                type="button"
+                className={data.from === `${today.slice(0, 8)}01` && data.to === today ? 'active' : ''}
+                onClick={() => applyRange(`${today.slice(0, 8)}01`, today)}
+              >
+                本月
+              </button>
+            </div>
+            <div className="pm-date-fields">
+              <label>
+                <span>开始</span>
+                <input
+                  type="date"
+                  value={draftFrom}
+                  max={today}
+                  onChange={(event) => setDraftFrom(event.target.value)}
+                />
+              </label>
+              <label>
+                <span>结束</span>
+                <input
+                  type="date"
+                  value={draftTo}
+                  min={draftFrom}
+                  max={today}
+                  onChange={(event) => setDraftTo(event.target.value)}
+                />
+              </label>
+            </div>
+            <button
+              type="button"
+              className="pm-date-apply"
+              onClick={() => applyRange(draftFrom, draftTo)}
+            >
+              查看
             </button>
           </div>
-        </div>
+        )}
         <div className="pm-hero-stats">
           <div>
             <small>累计邀请</small>
@@ -98,36 +193,27 @@ export default function Promotion() {
 
       <section className="pm-rates">
         <div className="pm-panel-head">
-          <div>
-            <small>返水比例</small>
-            <h2>三级贡献</h2>
-          </div>
+          <h2>返水比例</h2>
         </div>
         <div className="pm-rate-grid">
           <article>
             <span>自身</span>
             <strong>{pct(data.rates.self)}</strong>
-            <small>有效下注</small>
           </article>
           <article>
             <span>直属</span>
             <strong>{pct(data.rates.l1)}</strong>
-            <small>一级贡献</small>
           </article>
           <article>
             <span>二级</span>
             <strong>{pct(data.rates.l2)}</strong>
-            <small>二级贡献</small>
           </article>
         </div>
       </section>
 
       <section className="pm-turnover">
         <div className="pm-panel-head">
-          <div>
-            <small>当日流水</small>
-            <h2>有效流水</h2>
-          </div>
+          <h2>{singleDay ? '当日流水' : '区间流水'}</h2>
         </div>
         <div className="pm-turnover-list">
           <div className="pm-turnover-row">
@@ -147,20 +233,15 @@ export default function Promotion() {
 
       <section className="pm-network">
         <div className="pm-panel-head">
-          <div>
-            <small>团队贡献</small>
-            <h2>推广记录</h2>
-          </div>
+          <h2>推广记录</h2>
           <span>{data.downlines.length} 人</span>
         </div>
 
         {data.downlines.length === 0 ? (
           <div className="pm-empty">
-            <BrandLogo size={48} className="pm-empty-logo" />
-            <strong>暂无推广记录</strong>
-            <p>邀请好友绑定后，将在此显示直属贡献</p>
+            <p>暂无直属贡献</p>
             <button type="button" className="pm-cta" onClick={() => navigate('/invite')}>
-              去邀请好友
+              去邀请
             </button>
           </div>
         ) : (

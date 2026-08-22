@@ -10,10 +10,12 @@ const mocks = vi.hoisted(() => {
       findUniqueOrThrow: vi.fn(),
       findUnique: vi.fn(),
       updateMany: vi.fn(),
+      deleteMany: vi.fn(),
     },
-    profitPoolRoundLock: { createMany: vi.fn() },
-    profitPoolAgentSnapshot: { createMany: vi.fn() },
-    profitPoolPlayerSnapshot: { createMany: vi.fn() },
+    profitPoolRoundLock: { createMany: vi.fn(), deleteMany: vi.fn() },
+    wallet: { findMany: vi.fn() },
+    profitPoolAgentSnapshot: { createMany: vi.fn(), deleteMany: vi.fn() },
+    profitPoolPlayerSnapshot: { createMany: vi.fn(), deleteMany: vi.fn() },
     auditLog: { create: vi.fn() },
   };
   return {
@@ -35,12 +37,21 @@ vi.mock('./profitPoolRange.js', async (importOriginal) => {
     computeProfitPoolRange: mocks.computeProfitPoolRange,
   };
 });
-vi.mock('./wallet.js', () => ({ transfer: mocks.transfer }));
+vi.mock('./wallet.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./wallet.js')>();
+  return {
+    ...actual,
+    transfer: mocks.transfer,
+  };
+});
 vi.mock('./push.js', () => ({
   pushService: { sendCustom: mocks.sendCustom },
 }));
 
 import {
+  buildProfitPoolCode,
+  discardProfitPoolBatch,
+  deleteProfitPoolBatch,
   distributeProfitPoolBatch,
   generateProfitPoolBatch,
 } from './profitPoolBatches.js';
@@ -127,6 +138,13 @@ function computation() {
   };
 }
 
+describe('profit pool batch codes', () => {
+  it('prefixes the daily serial with the catalog game code', () => {
+    expect(buildProfitPoolCode('ZZNN', '2026-08-22', 3)).toBe('ZZNN202608220003');
+    expect(buildProfitPoolCode('TB', '2026-08-22', 3)).toBe('TB202608220003');
+  });
+});
+
 describe('round-range profit pool batch lifecycle', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -143,6 +161,8 @@ describe('round-range profit pool batch lifecycle', () => {
       agentSnapshots: [],
     });
     mocks.tx.profitPoolRoundLock.createMany.mockResolvedValue({ count: 2 });
+    mocks.tx.profitPoolRoundLock.deleteMany.mockResolvedValue({ count: 2 });
+    mocks.tx.wallet.findMany.mockResolvedValue([]);
     mocks.tx.profitPoolAgentSnapshot.createMany.mockResolvedValue({ count: 1 });
     mocks.tx.profitPoolPlayerSnapshot.createMany.mockResolvedValue({ count: 1 });
     mocks.tx.auditLog.create.mockResolvedValue({ id: 'audit-1' });
@@ -170,8 +190,14 @@ describe('round-range profit pool batch lifecycle', () => {
       }),
       mocks.tx,
     );
+    expect(mocks.tx.profitPoolSequence.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { key: expect.stringMatching(/^PROFIT_POOL:ZZNN:\d{8}$/) },
+      }),
+    );
     expect(mocks.tx.profitPoolBatch.create).toHaveBeenCalledWith({
       data: expect.objectContaining({
+        poolCode: expect.stringMatching(/^ZZNN\d{12}$/),
         roomId: 'room-1',
         startSeqNo: 101,
         endSeqNo: 102,
@@ -191,7 +217,7 @@ describe('round-range profit pool batch lifecycle', () => {
           sourceAgentId: 'agent-1',
           parentSourceAgentId: null,
           amountCents: 10_000n,
-          ledgerRef: expect.stringMatching(/^profit-share:TB\d{12}:agent-1$/),
+          ledgerRef: expect.stringMatching(/^profit-share:ZZNN\d{12}:agent-1$/),
         }),
       ],
     });
@@ -317,6 +343,25 @@ describe('round-range profit pool batch lifecycle', () => {
     ).rejects.toThrow('RANGE_OVERLAP');
   });
 
+  it('translates the old continuous-range count check into a batch constraint error', async () => {
+    mocks.tx.profitPoolBatch.create.mockRejectedValueOnce(
+      new Error(
+        'new row for relation "profit_pool_batches" violates check constraint "profit_pool_batches_round_count_check"',
+      ),
+    );
+
+    await expect(
+      generateProfitPoolBatch({
+        roomId: 'room-1',
+        startSeqNo: 101,
+        endSeqNo: 102,
+        expenseBps: 250,
+        calculationHash: HASH,
+        actorId: 'admin-1',
+      }),
+    ).rejects.toThrow('BATCH_COUNT_CONSTRAINT');
+  });
+
   it('uses the frozen ledger key and a status CAS for one-time distribution', async () => {
     const batch = {
       id: 'pool-1',
@@ -422,5 +467,223 @@ describe('round-range profit pool batch lifecycle', () => {
     await expect(distributeProfitPoolBatch('pool-1', 'admin-1')).resolves.toBeNull();
     expect(mocks.tx.profitPoolBatch.updateMany).not.toHaveBeenCalled();
     expect(mocks.transfer).not.toHaveBeenCalled();
+  });
+
+  it('voids a pending batch, deletes round locks, and keeps the snapshot', async () => {
+    mocks.tx.profitPoolBatch.findUnique.mockResolvedValue({
+      id: 'pool-1',
+      poolCode: 'TB202608190007',
+      status: 'PENDING',
+      roomId: 'room-1',
+      startSeqNo: 101,
+      endSeqNo: 102,
+      netPoolCents: 20_000n,
+    });
+    mocks.tx.profitPoolBatch.updateMany.mockResolvedValue({ count: 1 });
+    mocks.tx.profitPoolBatch.findUniqueOrThrow.mockResolvedValue({
+      id: 'pool-1',
+      poolCode: 'TB202608190007',
+      status: 'VOIDED',
+      room: { id: 'room-1', title: '至尊厅', gameCode: 'SUPREME_NIUNIU' },
+    });
+
+    const result = await discardProfitPoolBatch('pool-1', 'admin-1');
+    expect(result.status).toBe('VOIDED');
+    expect(mocks.tx.profitPoolBatch.updateMany).toHaveBeenCalledWith({
+      where: { id: 'pool-1', status: 'PENDING' },
+      data: expect.objectContaining({
+        status: 'VOIDED',
+        discardedBy: 'admin-1',
+      }),
+    });
+    expect(mocks.tx.profitPoolRoundLock.deleteMany).toHaveBeenCalledWith({
+      where: { poolId: 'pool-1' },
+    });
+    expect(mocks.tx.profitPoolAgentSnapshot.createMany).not.toHaveBeenCalled();
+    expect(mocks.tx.auditLog.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        adminId: 'admin-1',
+        action: 'PROFIT_POOL_BATCH_VOIDED',
+        target: 'pool-1',
+      }),
+    });
+  });
+
+  it('force-voids a distributed batch by clawing funds back to the platform pool', async () => {
+    mocks.tx.profitPoolBatch.findUnique.mockResolvedValue({
+      id: 'pool-1',
+      poolCode: 'TB202608190007',
+      status: 'DISTRIBUTED',
+      roomId: 'room-1',
+      startSeqNo: 101,
+      endSeqNo: 102,
+      netPoolCents: 20_000n,
+      agentSnapshots: [
+        {
+          sourceAgentId: 'agent-1',
+          userId: 'agent-user',
+          label: '一级代理',
+          uid: 'AG1001',
+          amountCents: 10_000n,
+        },
+      ],
+    });
+    mocks.tx.wallet.findMany.mockResolvedValue([
+      { userId: 'agent-user', availableCents: 10_000n },
+    ]);
+    mocks.tx.profitPoolBatch.updateMany.mockResolvedValue({ count: 1 });
+    mocks.tx.profitPoolBatch.findUniqueOrThrow.mockResolvedValue({
+      id: 'pool-1',
+      poolCode: 'TB202608190007',
+      status: 'VOIDED',
+      room: { id: 'room-1', title: '至尊厅', gameCode: 'SUPREME_NIUNIU' },
+    });
+
+    const result = await discardProfitPoolBatch('pool-1', 'admin-1');
+    expect(result.status).toBe('VOIDED');
+    expect(mocks.transfer).toHaveBeenCalledWith(
+      mocks.tx,
+      expect.objectContaining({
+        amountCents: 10_000n,
+        from: { userId: 'agent-user', accountType: 'USER_AVAILABLE' },
+        to: { accountType: 'PLATFORM_PROFIT_POOL' },
+        refType: 'profit_share_clawback',
+        idempotencyKey: 'profit-share-clawback:TB202608190007:agent-1',
+      }),
+    );
+    expect(mocks.tx.profitPoolRoundLock.deleteMany).toHaveBeenCalledWith({
+      where: { poolId: 'pool-1' },
+    });
+    expect(mocks.tx.auditLog.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        action: 'PROFIT_POOL_BATCH_FORCE_VOIDED',
+      }),
+    });
+    expect(mocks.sendCustom).toHaveBeenCalledWith(
+      'agent-user',
+      expect.stringContaining('强制撤回'),
+    );
+  });
+
+  it('refuses a forced clawback when an agent no longer has enough available balance', async () => {
+    mocks.tx.profitPoolBatch.findUnique.mockResolvedValue({
+      id: 'pool-1',
+      poolCode: 'TB202608190007',
+      status: 'DISTRIBUTED',
+      agentSnapshots: [
+        {
+          sourceAgentId: 'agent-1',
+          userId: 'agent-user',
+          label: '一级代理',
+          uid: 'AG1001',
+          amountCents: 10_000n,
+        },
+      ],
+    });
+    mocks.tx.wallet.findMany.mockResolvedValue([
+      {
+        userId: 'agent-user',
+        availableCents: 1_000n,
+        freezeBankerCents: 0n,
+        freezeBetCents: 0n,
+        freezeWithdrawCents: 0n,
+      },
+    ]);
+
+    await expect(discardProfitPoolBatch('pool-1', 'admin-1')).rejects.toThrow(
+      'CLAWBACK_INSUFFICIENT_BALANCE',
+    );
+    expect(mocks.transfer).not.toHaveBeenCalled();
+    expect(mocks.tx.profitPoolRoundLock.deleteMany).not.toHaveBeenCalled();
+  });
+
+  it('reports frozen banker funds when forced clawback cannot take available balance', async () => {
+    mocks.tx.profitPoolBatch.findUnique.mockResolvedValue({
+      id: 'pool-1',
+      poolCode: 'TB202608190007',
+      status: 'DISTRIBUTED',
+      agentSnapshots: [
+        {
+          sourceAgentId: 'agent-1',
+          userId: 'agent-user',
+          label: '一级代理',
+          uid: 'AG1001',
+          amountCents: 10_000n,
+        },
+      ],
+    });
+    mocks.tx.wallet.findMany.mockResolvedValue([
+      {
+        userId: 'agent-user',
+        availableCents: 1_000n,
+        freezeBankerCents: 9_000n,
+        freezeBetCents: 0n,
+        freezeWithdrawCents: 0n,
+      },
+    ]);
+
+    await expect(discardProfitPoolBatch('pool-1', 'admin-1')).rejects.toMatchObject({
+      code: 'CLAWBACK_INSUFFICIENT_BALANCE',
+      details: {
+        agents: [
+          expect.objectContaining({
+            uid: 'AG1001',
+            availableCents: '1000',
+            frozenCents: '9000',
+          }),
+        ],
+      },
+    });
+    expect(mocks.transfer).not.toHaveBeenCalled();
+    expect(mocks.tx.profitPoolRoundLock.deleteMany).not.toHaveBeenCalled();
+  });
+
+  it('hard-deletes a voided batch together with snapshots and leftover locks', async () => {
+    mocks.tx.profitPoolBatch.findUnique.mockResolvedValue({
+      id: 'pool-1',
+      poolCode: 'TB202608190007',
+      status: 'VOIDED',
+      roomId: 'room-1',
+      startSeqNo: 101,
+      endSeqNo: 102,
+    });
+    mocks.tx.profitPoolBatch.deleteMany.mockResolvedValue({ count: 1 });
+
+    await expect(deleteProfitPoolBatch('pool-1', 'admin-1')).resolves.toEqual({
+      id: 'pool-1',
+      poolCode: 'TB202608190007',
+    });
+    expect(mocks.tx.profitPoolRoundLock.deleteMany).toHaveBeenCalledWith({
+      where: { poolId: 'pool-1' },
+    });
+    expect(mocks.tx.profitPoolPlayerSnapshot.deleteMany).toHaveBeenCalledWith({
+      where: { poolId: 'pool-1' },
+    });
+    expect(mocks.tx.profitPoolAgentSnapshot.deleteMany).toHaveBeenCalledWith({
+      where: { poolId: 'pool-1' },
+    });
+    expect(mocks.tx.profitPoolBatch.deleteMany).toHaveBeenCalledWith({
+      where: { id: 'pool-1', status: 'VOIDED' },
+    });
+    expect(mocks.tx.auditLog.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        adminId: 'admin-1',
+        action: 'PROFIT_POOL_BATCH_DELETED',
+        target: 'pool-1',
+      }),
+    });
+  });
+
+  it('refuses to delete a batch that has not been voided', async () => {
+    mocks.tx.profitPoolBatch.findUnique.mockResolvedValue({
+      id: 'pool-1',
+      poolCode: 'TB202608190007',
+      status: 'PENDING',
+    });
+
+    await expect(deleteProfitPoolBatch('pool-1', 'admin-1')).rejects.toThrow(
+      'POOL_NOT_DELETABLE',
+    );
+    expect(mocks.tx.profitPoolBatch.deleteMany).not.toHaveBeenCalled();
   });
 });

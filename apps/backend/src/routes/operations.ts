@@ -29,8 +29,19 @@ import {
 import { transfer } from '../services/wallet.js';
 import { recordClaim } from '../services/game.js';
 import { gameBus } from '../services/gameBus.js';
+import {
+  getTngSchedulerConfig,
+  isTngSchedulerReady,
+  saveTngSchedulerConfig,
+} from '../services/tngScheduler.js';
+import { pingScheduler } from '../services/tngSchedulerClient.js';
 import { reloadBots, validateBotCredentials } from '../bot/index.js';
 import { broadcastUserProfileChanged } from '../services/roomHub.js';
+import {
+  CustomerPurgeError,
+  customerPurgeMessage,
+  purgeCustomer,
+} from '../services/customerPurge.js';
 import {
   isSupportedGameCode,
   SUPREME_NIUNIU_GAME_CODE,
@@ -913,6 +924,42 @@ export async function adminOperationsRoutes(app: FastifyInstance) {
     ]);
     return { ok: true, adminNote: note };
   });
+
+  app.post(
+    '/api/admin/users/:id/purge',
+    { preHandler: [app.authAdmin, app.requireAdminRoles('SUPER')] },
+    async (req, reply) => {
+      const { id } = z.object({ id: cuid }).parse(req.params);
+      const adminId = (req.user as { sub: string }).sub;
+      const body = z
+        .object({
+          confirmUid: z.string().trim().min(1).max(32),
+          confirmText: z.string().trim().min(1).max(20),
+          reason: z.string().trim().min(4).max(500),
+        })
+        .parse(req.body);
+      try {
+        const purged = await purgeCustomer({
+          userId: id,
+          adminId,
+          confirmUid: body.confirmUid,
+          confirmText: body.confirmText,
+          reason: body.reason,
+          ip: req.ip,
+        });
+        return { ok: true, uid: purged.uid };
+      } catch (error) {
+        if (error instanceof CustomerPurgeError) {
+          return reply.code(error.status).send({
+            error: error.code,
+            message: customerPurgeMessage(error.code),
+            details: error.details,
+          });
+        }
+        throw error;
+      }
+    },
+  );
 
   app.patch(
     '/api/admin/users/:id/profile',
@@ -2131,6 +2178,97 @@ export async function adminOperationsRoutes(app: FastifyInstance) {
       return { duplicate: false, wallet };
     });
     return { ok: true, ...result, adjustmentId };
+  });
+
+  // ── TNG 红包调度服务器凭据（游戏后端作为调用方）──
+  function serializeSchedulerConfig() {
+    return getTngSchedulerConfig().then((config) => ({
+      enabled: config.enabled,
+      baseUrl: config.baseUrl,
+      keyId: config.keyId,
+      secretSet: config.secret.length > 0,
+      secretMasked: config.secret ? maskPlaintext(config.secret) : '',
+      ready: isTngSchedulerReady(config),
+    }));
+  }
+
+  const schedulerConfigSchema = z.object({
+    enabled: z.boolean().optional(),
+    baseUrl: z.string().max(300).optional(),
+    keyId: z.string().max(80).optional(),
+    secret: z.string().max(256).optional(),
+  });
+
+  app.get('/api/admin/tng/scheduler', { preHandler: tngManagers }, async () =>
+    serializeSchedulerConfig(),
+  );
+
+  app.put('/api/admin/tng/scheduler', { preHandler: tngManagers }, async (req, reply) => {
+    const adminId = (req.user as { sub: string }).sub;
+    const body = schedulerConfigSchema.parse(req.body);
+    if (body.baseUrl && !/^https?:\/\//i.test(body.baseUrl.trim())) {
+      return reply.code(400).send({ error: 'INVALID_BASE_URL' });
+    }
+    const secret =
+      body.secret === undefined || body.secret.includes('*') ? undefined : body.secret;
+    const saved = await saveTngSchedulerConfig(
+      {
+        enabled: body.enabled,
+        baseUrl: body.baseUrl,
+        keyId: body.keyId,
+        secret,
+      },
+      adminId,
+    );
+    if (saved.enabled && !isTngSchedulerReady(saved)) {
+      await saveTngSchedulerConfig({ enabled: false }, adminId);
+      return reply.code(400).send({ error: 'TNG_SCHEDULER_INCOMPLETE' });
+    }
+    await prisma.auditLog.create({
+      data: {
+        adminId,
+        action: 'tng_scheduler_config_update',
+        target: 'TNG_SCHEDULER',
+        after: {
+          enabled: saved.enabled,
+          baseUrl: saved.baseUrl,
+          keyId: saved.keyId,
+          secret: secret === undefined ? '[UNCHANGED]' : '[REDACTED]',
+        },
+        ip: req.ip,
+      },
+    });
+    return { ok: true, config: await serializeSchedulerConfig() };
+  });
+
+  app.post('/api/admin/tng/scheduler/test', { preHandler: tngManagers }, async (req, reply) => {
+    const adminId = (req.user as { sub: string }).sub;
+    const config = await getTngSchedulerConfig();
+    if (!config.baseUrl || !config.keyId || !config.secret) {
+      return reply.code(400).send({ error: 'TNG_SCHEDULER_INCOMPLETE' });
+    }
+    const result = await pingScheduler(config, `admin-test-${Date.now()}`);
+    await prisma.auditLog.create({
+      data: {
+        adminId,
+        action: 'tng_scheduler_config_test',
+        target: 'TNG_SCHEDULER',
+        after: {
+          ok: result.ok,
+          requestId: result.ok ? result.requestId : result.requestId,
+          code: result.ok ? 'OK' : result.error.code,
+        },
+        ip: req.ip,
+      },
+    });
+    if (!result.ok) {
+      return reply.code(502).send({
+        error: result.error.code,
+        message: result.error.message,
+        requestId: result.requestId,
+      });
+    }
+    return { ok: true, service: result.data.service, apiVersion: result.data.apiVersion, echo: result.data.echo };
   });
 
   // ── TNG 发包账号 ──

@@ -10,6 +10,48 @@ export function malaysiaDay(date = new Date()): string {
   return date.toLocaleDateString('sv-SE', { timeZone: 'Asia/Kuala_Lumpur' });
 }
 
+export const PROMOTION_RANGE_MAX_DAYS = 92;
+const DAY_KEY = /^\d{4}-\d{2}-\d{2}$/;
+
+function malaysiaDateFromKey(key: string) {
+  return new Date(`${key}T00:00:00+08:00`);
+}
+
+function daysInclusive(from: string, to: string) {
+  return (
+    Math.round(
+      (malaysiaDateFromKey(to).getTime() - malaysiaDateFromKey(from).getTime())
+        / 86_400_000,
+    ) + 1
+  );
+}
+
+/** 推广页查询区间：兼容旧 `date`，支持 `from`/`to`，不超过今天且最多 92 天。 */
+export function resolvePromotionPeriod(
+  input: { date?: string; from?: string; to?: string },
+  today = malaysiaDay(),
+): { from: string; to: string } {
+  const rawFrom = input.from ?? input.date ?? today;
+  const rawTo = input.to ?? input.date ?? input.from ?? today;
+  if (!DAY_KEY.test(rawFrom) || !DAY_KEY.test(rawTo)) {
+    throw new Error('INVALID_PROMOTION_DATE');
+  }
+  let from = rawFrom;
+  let to = rawTo;
+  if (from > to) {
+    [from, to] = [to, from];
+  }
+  if (to > today) to = today;
+  if (from > today) from = today;
+  if (from > to) {
+    from = to;
+  }
+  if (daysInclusive(from, to) > PROMOTION_RANGE_MAX_DAYS) {
+    throw new Error('PROMOTION_RANGE_TOO_LONG');
+  }
+  return { from, to };
+}
+
 export function previousMalaysiaDay(): string {
   const date = new Date();
   date.setUTCDate(date.getUTCDate() - 1);
@@ -114,16 +156,28 @@ async function rebateConfigForGame(gameCode: string) {
 }
 
 export async function estimatedCommission(userId: string, date = malaysiaDay()) {
+  return estimatedCommissionInRange(userId, date, date);
+}
+
+export async function estimatedCommissionInRange(
+  userId: string,
+  from: string,
+  to: string,
+) {
+  const date = from === to ? from : { gte: from, lte: to };
   const [turnovers, settlements] = await Promise.all([
     prisma.turnoverDaily.findMany({ where: { userId, date } }),
     prisma.rebateSettlement.findMany({ where: { userId, date } }),
   ]);
-  const settledByGame = new Map(
-    settlements.map((settlement) => [settlement.gameCode, settlement]),
+  const settledByKey = new Map(
+    settlements.map((settlement) => [
+      `${settlement.date}:${settlement.gameCode}`,
+      settlement,
+    ]),
   );
   let total = 0n;
   for (const turnover of turnovers) {
-    const settlement = settledByGame.get(turnover.gameCode);
+    const settlement = settledByKey.get(`${turnover.date}:${turnover.gameCode}`);
     if (settlement) {
       total += settlement.commissionCents;
       continue;

@@ -27,6 +27,7 @@ import {
   packetReserveHeads,
   packetTotal,
 } from '../engine/fees.js';
+import { nextWaitingSeqNo } from '../engine/roundSeq.js';
 import { evaluateHand, HAND_LABEL, maxPayoutMultiplier } from '../engine/hand.js';
 import {
   effectiveTurnoverForBanker,
@@ -148,12 +149,16 @@ async function requireGameUser(
     include: {
       kyc: true,
       wallet: true,
+      paymentPin: { select: { isSet: true } },
       virtualPlayer: true,
       roomMemberships: { where: { roomId }, take: 1 },
     },
   });
   if (!user || user.status !== UserStatus.ACTIVE) throw new GameError('USER_NOT_ACTIVE');
   if (!user.kyc || user.kyc.status !== KycStatus.APPROVED) throw new GameError('KYC_REQUIRED');
+  if (user.kind === UserKind.HUMAN && !user.paymentPin?.isSet) {
+    throw new GameError('PAYMENT_PIN_REQUIRED');
+  }
   if (!user.wallet) throw new GameError('WALLET_NOT_FOUND');
   if (user.roomMemberships[0]?.status !== 'ACTIVE') throw new GameError('NOT_IN_ROOM');
   if (user.kind === UserKind.VIRTUAL) {
@@ -299,10 +304,25 @@ export async function ensureWaitingRound(roomId: string) {
       where: { roomId, phase: { in: ACTIVE_PHASES } },
       orderBy: { seqNo: 'desc' },
     });
-    if (existing) return existing;
-    const latest = await tx.round.aggregate({ where: { roomId }, _max: { seqNo: true } });
+    const occupied = await tx.round.aggregate({
+      where: {
+        roomId,
+        phase: { notIn: [RoundPhase.CANCELLED, RoundPhase.WAITING] },
+      },
+      _max: { seqNo: true },
+    });
+    const nextSeq = nextWaitingSeqNo(occupied._max.seqNo);
+    if (existing) {
+      if (existing.phase === RoundPhase.WAITING && existing.seqNo !== nextSeq) {
+        return tx.round.update({
+          where: { id: existing.id },
+          data: { seqNo: nextSeq, version: { increment: 1 } },
+        });
+      }
+      return existing;
+    }
     return tx.round.create({
-      data: { roomId, seqNo: (latest._max.seqNo ?? 0) + 1, phase: RoundPhase.WAITING },
+      data: { roomId, seqNo: nextSeq, phase: RoundPhase.WAITING },
     });
   });
 }
@@ -1763,7 +1783,6 @@ export async function claimInternalPacket(packetId: string, userId: string) {
         round: {
           include: {
             claims: true,
-            room: { select: { chatMutedAt: true, chatMuteReason: true } },
           },
         },
       },
@@ -1771,12 +1790,6 @@ export async function claimInternalPacket(packetId: string, userId: string) {
     if (!packet) throw new GameError('PACKET_NOT_FOUND');
     if (packet.channel !== PacketChannel.INTERNAL) throw new GameError('PACKET_NOT_INTERNAL');
     const round = packet.round;
-    if (round.room?.chatMutedAt) {
-      throw new GameError('ROOM_GLOBAL_MUTED', {
-        mutedAt: round.room.chatMutedAt.toISOString(),
-        reason: round.room.chatMuteReason,
-      });
-    }
     const existing = round.claims.find((claim) => claim.userId === userId);
     if (existing) {
       throw new GameError('ALREADY_CLAIMED', { amountCents: String(existing.amountCents) });

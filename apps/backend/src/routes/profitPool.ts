@@ -26,6 +26,8 @@ import {
   previewProfitPoolBatch,
   serializeProfitPoolBatch,
   serializeProfitPoolComputation,
+  discardProfitPoolBatch,
+  deleteProfitPoolBatch,
 } from '../services/profitPoolBatches.js';
 import {
   getAdminAgentDashboard,
@@ -39,10 +41,11 @@ export const PROFIT_POOL_ERROR_MESSAGES: Record<string, string> = {
   DATE_NOT_CLOSED: '只能生成已结束日期的报表（马来西亚时区次日起可结）',
   SEQ_RANGE_INVALID: '开始局数和结束局数无效',
   SEQ_RANGE_TOO_LARGE: '单次选择的局数过多，请缩小范围',
-  ROUND_RANGE_INCOMPLETE: '所选范围存在缺失局号，请重新选择',
-  ROUNDS_NOT_TERMINAL: '所选范围包含尚未结束的牌局',
+  ROUND_RANGE_INCOMPLETE: '所选范围内没有已完成的有效局，请重新选择',
+  ROUNDS_NOT_TERMINAL: '所选范围包含尚未结束的牌局（等待开局的下一局可忽略，进行中的牌局不能结算）',
   ROUND_CONFIG_SNAPSHOT_MISSING: '所选历史牌局缺少配置快照，无法安全重算',
   RANGE_OVERLAP: '该范围包含已生成利润池的游戏局数，请重新选择',
+  BATCH_COUNT_CONSTRAINT: '利润池局数统计无法写入，请确认已执行最新数据库迁移后重试',
   CUTOVER_SEQ_BLOCKED: '所选局数属于旧按日结算范围，不能重复生成',
   PREVIEW_STALE: '牌局或代理数据已变化，请重新预览后再生成',
   LEGACY_PENDING_EXISTS: '仍有旧按日报表待处理，请先完成迁移',
@@ -71,8 +74,31 @@ export const PROFIT_POOL_ERROR_MESSAGES: Record<string, string> = {
   ROOM_NOT_FOUND: '游戏房间不存在',
   POOL_NOT_GENERATED: '利润池不存在',
   POOL_NOT_CONFIRMABLE: '该利润池状态不允许发放',
+  POOL_NOT_DISCARDABLE: '该利润池不能撤回。已撤回的请直接重新生成',
+  POOL_NOT_DELETABLE: '只能删除已撤回的利润池。请先撤回（已发放需强制撤回并扣回资金）',
+  CLAWBACK_INSUFFICIENT_BALANCE: '强制撤回失败：部分代理可用余额不足，无法扣回已发放金额',
   POOL_ALREADY_SETTLED: '该利润池已经发放',
 };
+
+function clawbackErrorMessage(error: ProfitPoolError) {
+  const base = PROFIT_POOL_ERROR_MESSAGES[error.code] ?? error.code;
+  if (error.code !== 'CLAWBACK_INSUFFICIENT_BALANCE') return base;
+  const agents = (
+    error.details as {
+      agents?: Array<{ label?: string; uid?: string; frozenCents?: string }>;
+    } | undefined
+  )?.agents;
+  if (!agents?.length) return base;
+  const names = agents
+    .map((agent) => agent.label || agent.uid)
+    .filter(Boolean)
+    .join('、');
+  const frozen = agents.some((agent) => BigInt(agent.frozenCents ?? '0') > 0n);
+  if (frozen) {
+    return `强制撤回失败：${names} 的资金仍在牌局或提现中冻结，请等本局结束或提现处理完再扣回`;
+  }
+  return `${base}：${names}`;
+}
 
 function sendProfitPoolError(reply: FastifyReply, error: ProfitPoolError) {
   const statusCode =
@@ -85,12 +111,16 @@ function sendProfitPoolError(reply: FastifyReply, error: ProfitPoolError) {
             'PREVIEW_STALE',
             'LEGACY_PENDING_EXISTS',
             'POOL_ALREADY_SETTLED',
+            'POOL_NOT_DISCARDABLE',
+            'POOL_NOT_DELETABLE',
+            'CLAWBACK_INSUFFICIENT_BALANCE',
+            'BATCH_COUNT_CONSTRAINT',
           ].includes(error.code)
         ? 409
         : 400;
   return reply.code(statusCode).send({
     error: error.code,
-    message: PROFIT_POOL_ERROR_MESSAGES[error.code] ?? error.code,
+    message: clawbackErrorMessage(error),
     details: error.details,
   });
 }
@@ -267,7 +297,7 @@ export async function adminProfitPoolRoutes(app: FastifyInstance) {
     const query = z
       .object({
         q: z.string().trim().max(40).optional(),
-        status: z.enum(['PENDING', 'DISTRIBUTED', 'NO_DISTRIBUTION']).optional(),
+        status: z.enum(['PENDING', 'DISTRIBUTED', 'NO_DISTRIBUTION', 'VOIDED']).optional(),
         roomId: z.string().trim().min(1).optional(),
         limit: z.coerce.number().int().min(1).max(100).default(30),
         cursor: z.string().optional(),
@@ -444,6 +474,36 @@ export async function adminProfitPoolRoutes(app: FastifyInstance) {
           });
         }
         return { ok: true, pool: serializeProfitPoolBatch(pool) };
+      } catch (error) {
+        if (error instanceof ProfitPoolError) return sendProfitPoolError(reply, error);
+        throw error;
+      }
+    },
+  );
+
+  /** 撤回未发放批次：释放局锁后可按相同局数重新生成。已发放不可撤回。 */
+  app.post(
+    '/api/admin/profit-pool/batches/:id/discard',
+    guard,
+    async (req, reply) => {
+      const { id } = z.object({ id: z.string().min(1) }).parse(req.params);
+      try {
+        const pool = await discardProfitPoolBatch(id, adminId(req), req.ip);
+        return { ok: true, pool: serializeProfitPoolBatch(pool) };
+      } catch (error) {
+        if (error instanceof ProfitPoolError) return sendProfitPoolError(reply, error);
+        throw error;
+      }
+    },
+  );
+
+  app.delete(
+    '/api/admin/profit-pool/batches/:id',
+    guard,
+    async (req, reply) => {
+      const { id } = z.object({ id: z.string().min(1) }).parse(req.params);
+      try {
+        return { ok: true, ...(await deleteProfitPoolBatch(id, adminId(req), req.ip)) };
       } catch (error) {
         if (error instanceof ProfitPoolError) return sendProfitPoolError(reply, error);
         throw error;

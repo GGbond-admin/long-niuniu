@@ -18,6 +18,7 @@ const mocks = vi.hoisted(() => ({
     },
     profitPoolPlayerSnapshot: {
       findMany: vi.fn(),
+      aggregate: vi.fn(),
     },
     agentProfitShare: {
       groupBy: vi.fn(),
@@ -38,6 +39,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock('../lib/prisma.js', () => ({ prisma: mocks.prisma }));
 
 import {
+  collectDownlineSnapshots,
   getAdminAgentNetwork,
   getAgentSelfDashboard,
   getOrCreateTimedPromise,
@@ -91,6 +93,7 @@ const latestBatch = {
   status: 'DISTRIBUTED',
   generatedAt: new Date('2026-08-19T00:00:00Z'),
   turnoverCents: 1_000_000n,
+  expenseCents: 25_000n,
   netPoolCents: 100_000n,
   distributedCents: 50_000n,
   residualCents: 50_000n,
@@ -285,7 +288,11 @@ describe('agent self dashboard', () => {
     mocks.prisma.agentProfitShare.groupBy.mockResolvedValue([]);
     mocks.prisma.roomMember.findMany.mockResolvedValue([{ userId: 'user-a' }]);
     mocks.prisma.profitPoolAgentSnapshot.aggregate.mockResolvedValue({
-      _sum: { amountCents: 99_999n },
+      _sum: {
+        amountCents: 99_999n,
+        selfAmountCents: 60_000n,
+        overrideAmountCents: 39_999n,
+      },
     });
     mocks.prisma.agentProfitShare.aggregate.mockResolvedValue({
       _sum: { amountCents: 1n },
@@ -293,19 +300,55 @@ describe('agent self dashboard', () => {
     mocks.prisma.profitPoolAgentSnapshot.findUnique.mockResolvedValue(null);
     mocks.prisma.profitPoolAgentSnapshot.findMany.mockImplementation(
       async ({ where }: { where: Record<string, unknown> }) => {
-        if ('parentSourceAgentId' in where) {
+        if (typeof where.poolId === 'string') {
           return [
             {
+              sourceAgentId: 'agent-a',
+              parentSourceAgentId: null,
+              label: 'A',
+              uid: 'A1000001',
+              sharePointsSnapshot: 65,
+              selfTurnoverCents: 100_000n,
+              teamTurnoverCents: 600_000n,
+              selfAmountCents: 10_000n,
+              overrideAmountCents: 10_000n,
+              amountCents: 20_000n,
+              directAgentCount: 1,
+              teamAgentCount: 2,
+              directPlayerCount: 2,
+              teamPlayerCount: 6,
+            },
+            {
               sourceAgentId: 'agent-b',
+              parentSourceAgentId: 'agent-a',
               label: 'B',
               uid: 'B1000001',
               sharePointsSnapshot: 55,
-              directAgentCount: 0,
+              directAgentCount: 1,
               teamAgentCount: 1,
               directPlayerCount: 1,
               teamPlayerCount: 4,
+              selfTurnoverCents: 200_000n,
               teamTurnoverCents: 500_000n,
+              selfAmountCents: 0n,
+              overrideAmountCents: 0n,
               amountCents: 0n,
+            },
+            {
+              sourceAgentId: 'agent-c',
+              parentSourceAgentId: 'agent-b',
+              label: 'C',
+              uid: 'C1000001',
+              sharePointsSnapshot: 45,
+              directAgentCount: 0,
+              teamAgentCount: 0,
+              directPlayerCount: 3,
+              teamPlayerCount: 3,
+              selfTurnoverCents: 300_000n,
+              teamTurnoverCents: 300_000n,
+              selfAmountCents: 5_000n,
+              overrideAmountCents: 0n,
+              amountCents: 5_000n,
             },
           ];
         }
@@ -331,6 +374,9 @@ describe('agent self dashboard', () => {
       },
     );
     mocks.prisma.profitPoolPlayerSnapshot.findMany.mockResolvedValue([]);
+    mocks.prisma.profitPoolPlayerSnapshot.aggregate.mockResolvedValue({
+      _sum: { turnoverCents: 100_000n },
+    });
   });
 
   it('uses an all-history aggregate for lifetime profit and exposes live team presence', async () => {
@@ -349,6 +395,10 @@ describe('agent self dashboard', () => {
     expect(result.profile).toEqual(
       expect.objectContaining({
         lifetimeProfitCents: '100000',
+        lifetimeSelfAmountCents: '60000',
+        lifetimeOverrideAmountCents: '39999',
+        lifetimeLegacyCents: '1',
+        bucketBase: 130,
         online: true,
         onlineTeamCount: 1,
         teamAgentCount: 2,
@@ -368,9 +418,30 @@ describe('agent self dashboard', () => {
         contributionAmountCents: '7000',
       }),
     );
-    expect(result.selected?.pool).not.toHaveProperty('turnoverCents');
-    expect(result.selected?.pool).not.toHaveProperty('expenseCents');
-    expect(result.selected?.pool).not.toHaveProperty('netPoolCents');
+    expect(result.selected?.downline).toEqual([
+      expect.objectContaining({
+        agentId: 'agent-b',
+        parentAgentId: 'agent-a',
+        amountCents: '0',
+        selfTurnoverCents: '200000',
+      }),
+      expect.objectContaining({
+        agentId: 'agent-c',
+        parentAgentId: 'agent-b',
+        amountCents: '5000',
+        selfAmountCents: '5000',
+      }),
+    ]);
+    expect(result.selected?.pool).toEqual(
+      expect.objectContaining({
+        turnoverCents: '1000000',
+        expenseCents: '25000',
+        netPoolCents: '100000',
+        generatedDate: '2026-08-19',
+      }),
+    );
+    expect(result.selected?.mine.directTurnoverCents).toBe('100000');
+    expect(result.profile.today).toMatch(/^\d{4}-\d{2}-\d{2}$/);
     expect(result.selected?.players).toHaveLength(50);
     expect(result.selected?.playersNextCursor).toBe('player-49');
     expect(mocks.prisma.profitPoolAgentSnapshot.findMany).toHaveBeenCalledWith(
@@ -398,5 +469,22 @@ describe('agent self dashboard', () => {
         teamPlayerCount: 6,
       }),
     );
+  });
+});
+
+describe('collectDownlineSnapshots', () => {
+  it('keeps only the viewer tree and excludes the viewer and other lines', () => {
+    const rows = [
+      { sourceAgentId: 'a', parentSourceAgentId: null },
+      { sourceAgentId: 'b', parentSourceAgentId: 'a' },
+      { sourceAgentId: 'c', parentSourceAgentId: 'b' },
+      { sourceAgentId: 'x', parentSourceAgentId: null },
+      { sourceAgentId: 'y', parentSourceAgentId: 'x' },
+    ];
+    expect(collectDownlineSnapshots(rows, 'a').map((row) => row.sourceAgentId)).toEqual([
+      'b',
+      'c',
+    ]);
+    expect(collectDownlineSnapshots(rows, 'x').map((row) => row.sourceAgentId)).toEqual(['y']);
   });
 });

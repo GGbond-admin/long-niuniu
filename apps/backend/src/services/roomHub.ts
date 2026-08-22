@@ -292,7 +292,7 @@ export function broadcastToRoom(roomId: string, payload: unknown) {
 
 function closeUserConnectionsLocal(userId: string, reason: string): void {
   for (const clients of clientsByRoom.values()) {
-    for (const client of clients) {
+  for (const client of clients) {
       if (client.userId === userId && client.socket.readyState === client.socket.OPEN) {
         client.socket.close(4403, reason);
       }
@@ -1881,7 +1881,7 @@ export function initRoomHub() {
       roundId: transition.roundId,
       roomId: transition.roomId,
       to: transition.to,
-    })
+      })
       .catch(() => {
         systemChat(transition.roomId, `阶段变更：${transition.to}`);
       })

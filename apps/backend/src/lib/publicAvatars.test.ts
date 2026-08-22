@@ -2,8 +2,11 @@ import { resolve, sep } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   isPublicAvatarFilename,
+  isPublicAvatarUrl,
+  parsePublicAvatarFilename,
   publicAvatarUrl,
   resolvePublicAvatarFile,
+  resolvePublicAvatarOwnerFile,
 } from './publicAvatars.js';
 
 describe('publicAvatars', () => {
@@ -23,5 +26,17 @@ describe('publicAvatars', () => {
     expect(path?.includes(`${sep}..${sep}`) ?? false).toBe(false);
     expect(publicAvatarUrl(filename)).toBe(`/api/public/avatars/${filename}`);
     expect(resolvePublicAvatarFile('/tmp/uploads', '../etc/passwd')).toBeNull();
+    expect(resolvePublicAvatarOwnerFile('/tmp/uploads', filename)).toBe(
+      `${resolve('/tmp/uploads/avatars', filename)}.owner`,
+    );
+    expect(resolvePublicAvatarOwnerFile('/tmp/uploads', '../etc/passwd')).toBeNull();
+  });
+
+  it('accepts stored public avatar URLs and rejects other paths', () => {
+    const filename = '7c9e6679-7425-40de-944b-e07fc1f90ae7.webp';
+    expect(isPublicAvatarUrl(`/api/public/avatars/${filename}`)).toBe(true);
+    expect(parsePublicAvatarFilename(`/api/public/avatars/${filename}`)).toBe(filename);
+    expect(isPublicAvatarUrl('/avatars/nft-01.jpg')).toBe(false);
+    expect(isPublicAvatarUrl('https://evil.example/api/public/avatars/' + filename)).toBe(false);
   });
 });

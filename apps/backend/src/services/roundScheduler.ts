@@ -1,7 +1,9 @@
 import { PacketChannel, RoundPhase, RoomStartMode } from '@prisma/client';
 import {
+  BANKER_REPOST_CANCEL_REASON,
   bankerContinuationError,
   nextRoundReadyAtMs,
+  selectPreviousRoundForWaiting,
   shouldStartWaitingRound,
 } from '../engine/bankerContinuation.js';
 import { redis, withRedisLock } from '../lib/redis.js';
@@ -41,6 +43,7 @@ import {
   scheduleVirtualContinuationForRound,
   scheduleVirtualDiceForRound,
 } from './virtualPlayerWorker.js';
+import { getTngSchedulerConfig, isTngSchedulerReady } from './tngScheduler.js';
 
 // 正常阶段变化都有即时事件；这里只做丢事件恢复心跳。
 // 大群若 5 秒一次会让所有在线客户端同时拉 state，形成数据库尖峰。
@@ -54,6 +57,51 @@ function eventEndsAtMs(payload: unknown): number | null {
   if (typeof value !== 'string') return null;
   const timestamp = new Date(value).getTime();
   return Number.isFinite(timestamp) ? timestamp : null;
+}
+
+const WAITING_PREVIOUS_SELECT = {
+  id: true,
+  roomId: true,
+  seqNo: true,
+  phase: true,
+  bankerId: true,
+  isContinued: true,
+  continuationUsed: true,
+  finishedAt: true,
+  cancelReason: true,
+  configSnapshot: true,
+  events: {
+    where: {
+      type: {
+        in: [
+          ROOM_ANNOUNCED_FINISHED,
+          CONTINUATION_REJECTED_INSUFFICIENT,
+        ] as string[],
+      },
+    },
+    select: { type: true, createdAt: true },
+  },
+};
+
+async function previousRoundForWaiting(roomId: string, waitingSeqNo: number) {
+  const cancelledAttempt = await prisma.round.findFirst({
+    where: { roomId, seqNo: waitingSeqNo, phase: RoundPhase.CANCELLED },
+    orderBy: { createdAt: 'desc' },
+    select: WAITING_PREVIOUS_SELECT,
+  });
+  const lastFinished =
+    waitingSeqNo <= 1
+      ? null
+      : await prisma.round.findFirst({
+          where: {
+            roomId,
+            seqNo: waitingSeqNo - 1,
+            phase: RoundPhase.FINISHED,
+          },
+          orderBy: { createdAt: 'desc' },
+          select: WAITING_PREVIOUS_SELECT,
+        });
+  return selectPreviousRoundForWaiting({ cancelledAttempt, lastFinished });
 }
 
 async function cacheRound(roundId: string) {
@@ -386,7 +434,9 @@ export class RoundScheduler {
           }
         }
 
-        if (env.tngAutoPacketUrlTemplate.includes('{{packetId}}')) {
+        // 调度器启用后由 tngSchedulerWorker 负责建包，不再用模板伪造链接。
+        const schedulerEnabled = isTngSchedulerReady(await getTngSchedulerConfig());
+        if (!schedulerEnabled && env.tngAutoPacketUrlTemplate.includes('{{packetId}}')) {
           const account = await prisma.tngAccount.findFirst({
             where: { status: 'ACTIVE' },
             orderBy: { createdAt: 'asc' },
@@ -510,37 +560,7 @@ export class RoundScheduler {
           // 当前局的超时与收尾由上面的阶段调度照常完成；这里只阻止禁言期间开启下一局。
           if (room.chatMutedAt) continue;
 
-          const previous =
-            waiting.seqNo > 1
-              ? await prisma.round.findUnique({
-                  where: {
-                    roomId_seqNo: { roomId: room.id, seqNo: waiting.seqNo - 1 },
-                  },
-                  select: {
-                    id: true,
-                    roomId: true,
-                    seqNo: true,
-                    phase: true,
-                    bankerId: true,
-                    isContinued: true,
-                    continuationUsed: true,
-                    finishedAt: true,
-                    cancelReason: true,
-                    configSnapshot: true,
-                    events: {
-                      where: {
-                        type: {
-                          in: [
-                            ROOM_ANNOUNCED_FINISHED,
-                            CONTINUATION_REJECTED_INSUFFICIENT,
-                          ],
-                        },
-                      },
-                      select: { type: true, createdAt: true },
-                    },
-                  },
-                })
-              : null;
+          const previous = await previousRoundForWaiting(room.id, waiting.seqNo);
           const finishedAnnouncement = previous?.events.find(
             (event) => event.type === ROOM_ANNOUNCED_FINISHED,
           );
@@ -583,7 +603,7 @@ export class RoundScheduler {
           }
           const bankerRepostCancelled =
             previous?.phase === RoundPhase.CANCELLED
-            && previous.cancelReason === '庄家重推';
+            && previous.cancelReason === BANKER_REPOST_CANCEL_REASON;
           const roomStartMode =
             room.roundStartMode
             ?? (settings.round.autoStart ? RoomStartMode.AUTO : RoomStartMode.MANUAL);

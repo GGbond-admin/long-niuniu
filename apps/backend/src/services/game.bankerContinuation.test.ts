@@ -52,6 +52,8 @@ const memory = vi.hoisted(() => {
       if (where.roomId && round.roomId !== where.roomId) return false;
       if (typeof where.phase === 'string' && round.phase !== where.phase) return false;
       if (where.phase?.in && !where.phase.in.includes(round.phase)) return false;
+      if (where.phase?.notIn && where.phase.notIn.includes(round.phase)) return false;
+      if (where.phase?.not && round.phase === where.phase.not) return false;
       return true;
     });
 

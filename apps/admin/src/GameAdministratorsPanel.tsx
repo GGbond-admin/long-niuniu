@@ -583,7 +583,7 @@ export default function GameAdministratorsPanel({
             {hostPick && (
               <div className="ga-grant">
                 <p>
-                  绑定后该账号展示为「{SUPPORT_HOST_LABEL}」，并使用专属头像。玩家打赏时，她会自动发其中一句感谢语。
+                  绑定后该账号展示为「{SUPPORT_HOST_LABEL}」，并使用专属头像。玩家打赏时，她会在互动群里自动发一句感谢语。
                 </p>
                 <button
                   type="button"

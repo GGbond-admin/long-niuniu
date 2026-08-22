@@ -26,13 +26,15 @@ export function logout() {
 }
 
 export async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
+  const headers = new Headers(options.headers);
+  if (token) headers.set('Authorization', `Bearer ${token}`);
+  // DELETE/GET 没有 body 时不要带 application/json，否则 Fastify 会按空 JSON 解析并 500。
+  if (options.body != null && !(options.body instanceof FormData) && !headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json');
+  }
   const res = await fetch(path, {
     ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...options.headers,
-    },
+    headers,
   });
   if (res.status === 401) {
     logout();
@@ -104,7 +106,7 @@ export function put<T>(path: string, body: unknown) {
 }
 
 export function del<T>(path: string) {
-  return request<T>(path, { method: 'DELETE' });
+  return request<T>(path, { method: 'DELETE', body: '{}' });
 }
 
 export async function openProtectedUpload(reference: string) {

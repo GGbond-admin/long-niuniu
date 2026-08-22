@@ -1,4 +1,4 @@
-export type BatchStatus = 'PENDING' | 'DISTRIBUTED' | 'NO_DISTRIBUTION';
+export type BatchStatus = 'PENDING' | 'DISTRIBUTED' | 'NO_DISTRIBUTION' | 'VOIDED';
 
 export type ProfitPoolRoom = {
   id: string;
@@ -100,6 +100,7 @@ export type BatchSummary = {
   status: BatchStatus;
   generatedAt: string;
   distributedAt: string | null;
+  discardedAt?: string | null;
   _count?: { agentSnapshots: number };
 };
 

@@ -6,6 +6,7 @@ import GameOperationsCenter from './GameOperationsCenter';
 import ProfitPoolCenter from './ProfitPoolCenter';
 import { GameLeaderboardsAdmin, GameRewardsAdmin } from './GameScopedOperations';
 import VirtualPlayers from './VirtualPlayers';
+import PurgeCustomerBox from './PurgeCustomerBox';
 
 const DEFAULT_GAME_CODE = 'SUPREME_NIUNIU';
 
@@ -25,7 +26,7 @@ const pageTitles: Record<Page, [string, string]> = {
   payments: ['支付通道', 'VPay 商户设置、回调白名单与通知地址'],
   rooms: ['游戏入口管理', '一款游戏对应一个互动群；当前仅支持至尊牛牛'],
   rounds: ['对局控制台', '竞标、下注、发包、认额与结算'],
-  tng: ['TNG 红包台账', '发包账号、在途金额与认额差异'],
+  tng: ['TNG 红包台账', '调度器密钥、发包账号、在途金额与认额差异'],
   finance: ['钱包财务', '科目总览、收支图表与全部充提订单'],
   profitPool: ['代理与利润池', '按局数结算、永久锁局、代理网络与专属看板'],
   rewards: ['每日奖励', '棋牌、庄家与特别奖励配置'],
@@ -150,6 +151,14 @@ function Login({ onLogin }: { onLogin: (admin: Admin) => void }) {
   );
 }
 
+function notifyIdentityQueueChanged() {
+  window.dispatchEvent(new Event('identity-review-queue-changed'));
+}
+
+function formatNavBadge(count: number): string {
+  return count > 99 ? '99+' : String(count);
+}
+
 type SupportToastItem = {
   id: string;
   userId: string;
@@ -167,10 +176,12 @@ function Shell({ admin }: { admin: Admin }) {
   const [financeFocus, setFinanceFocus] = useState<'deposits' | 'withdrawals' | 'payees' | null>(null);
   const [supportToasts, setSupportToasts] = useState<SupportToastItem[]>([]);
   const [supportUnreadTotal, setSupportUnreadTotal] = useState(0);
+  const [identityPendingTotal, setIdentityPendingTotal] = useState(0);
   const supportBaseline = useRef<Map<string, number> | null>(null);
   const current = allowed.includes(page) ? page : allowed[0] ?? 'dashboard';
   const [title, subtitle] = pageTitles[current];
   const canSupport = allowed.includes('support');
+  const canReviewIdentity = allowed.includes('kyc');
 
   function go(target: Page) {
     if (allowed.includes(target)) setPage(target);
@@ -255,6 +266,35 @@ function Shell({ admin }: { admin: Admin }) {
     };
   }, [canSupport]);
 
+  useEffect(() => {
+    if (!canReviewIdentity) return;
+    let cancelled = false;
+
+    async function poll() {
+      try {
+        const result = await request<{
+          pendingKyc: number;
+          pendingWithdrawAccounts: number;
+          pendingTotal: number;
+        }>('/api/admin/identity-review/summary');
+        if (cancelled) return;
+        setIdentityPendingTotal(Number(result.pendingTotal ?? 0));
+      } catch {
+        // ignore polling errors
+      }
+    }
+
+    void poll();
+    const timer = window.setInterval(() => void poll(), 8_000);
+    const onQueueChanged = () => void poll();
+    window.addEventListener('identity-review-queue-changed', onQueueChanged);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+      window.removeEventListener('identity-review-queue-changed', onQueueChanged);
+    };
+  }, [canReviewIdentity]);
+
   return (
     <div className={`admin-shell ${collapsed ? 'collapsed' : ''}`}>
       <aside className="sidebar">
@@ -264,11 +304,24 @@ function Shell({ admin }: { admin: Admin }) {
             const visible = pages.filter((item) => allowed.includes(item));
             if (!visible.length) return null;
             return <section key={group}><span>{group}</span>{visible.map((item) => (
-              <button key={item} className={current === item ? 'active' : ''} onClick={() => setPage(item)}>
+              <button
+                key={item}
+                className={current === item ? 'active' : ''}
+                onClick={() => setPage(item)}
+                aria-label={
+                  item === 'kyc' && identityPendingTotal > 0
+                    ? `资料审核，${identityPendingTotal} 条待审`
+                    : item === 'support' && supportUnreadTotal > 0
+                      ? `客服会话，${supportUnreadTotal} 条未读`
+                      : undefined
+                }
+              >
                 <i>{icons[item]}</i>
                 <em>{pageTitles[item][0]}</em>
-                {item === 'support' && supportUnreadTotal > 0 ? (
-                  <b className="nav-unread">{supportUnreadTotal > 99 ? '99+' : supportUnreadTotal}</b>
+                {item === 'kyc' && identityPendingTotal > 0 ? (
+                  <b className="nav-unread">{formatNavBadge(identityPendingTotal)}</b>
+                ) : item === 'support' && supportUnreadTotal > 0 ? (
+                  <b className="nav-unread">{formatNavBadge(supportUnreadTotal)}</b>
                 ) : null}
               </button>
             ))}</section>;
@@ -830,6 +883,7 @@ function Users({
   const [selectedId, setSelectedId] = useState<string | null>(focus?.userId ?? null);
   const [openTab, setOpenTab] = useState<UserDetailTab | undefined>(focus?.tab);
   const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
   const [busy, setBusy] = useState(false);
   const totalPages = Math.max(1, Math.ceil(total / USER_PAGE_SIZE));
 
@@ -915,6 +969,7 @@ function Users({
         </button>
       </div>
       <ErrorBox error={error} />
+      {notice && <div className="success-box">{notice}</div>}
       <div className={`user-center-layout ${selectedId ? 'has-detail' : ''}`}>
         <section className="panel user-directory">
           <div className="table-wrap">
@@ -1005,6 +1060,12 @@ function Users({
             initialTab={openTab}
             onClose={() => setSelectedId(null)}
             onChanged={() => void load(page)}
+            onPurged={(uid) => {
+              setSelectedId(null);
+              setError('');
+              setNotice(`UID ${uid} 的客户数据已全部删除`);
+              void load(page);
+            }}
             onToggleStatus={async () => {
               const user = items.find((item) => item.id === selectedId);
               if (user) await status(user);
@@ -1026,6 +1087,7 @@ function UserDetail({
   initialTab,
   onClose,
   onChanged,
+  onPurged,
   onToggleStatus,
   onUnbind,
 }: {
@@ -1034,6 +1096,7 @@ function UserDetail({
   initialTab?: UserDetailTab;
   onClose: () => void;
   onChanged: () => void;
+  onPurged: (uid: string) => void;
   onToggleStatus: () => Promise<void>;
   onUnbind: () => Promise<void>;
 }) {
@@ -1187,6 +1250,7 @@ function UserDetail({
       setNotice('实名资料已保存；TNG 提现账户已同步，银行账号请在提款账户中管理');
       await load();
       onChanged();
+      notifyIdentityQueueChanged();
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -1460,6 +1524,18 @@ function UserDetail({
 
           {canAdjustBalance(role) ? AdjustBox : (
             <div className="user-readonly-note">余额调整仅超级管理员或财务可执行；你仍可查看流水与牌局。</div>
+          )}
+
+          {role === 'SUPER' && detail.user.kind !== 'VIRTUAL' && (
+            <PurgeCustomerBox
+              userId={userId}
+              uid={detail.user.uid}
+              nickname={detail.user.nickname}
+              busy={busy}
+              onBusy={setBusy}
+              onError={setError}
+              onPurged={onPurged}
+            />
           )}
 
           <section className="user-subsection">
@@ -1867,8 +1943,30 @@ function IdentityReviewHub() {
   const [kycCount, setKycCount] = useState<number | null>(null);
   const [accountCount, setAccountCount] = useState<number | null>(null);
   useEffect(() => {
-    void request<{ items: Row[] }>('/api/admin/kyc?status=PENDING').then((result) => setKycCount(result.items.length));
-    void request<{ items: Row[] }>('/api/admin/withdraw-accounts?status=PENDING').then((result) => setAccountCount(result.items.length));
+    let cancelled = false;
+    async function load() {
+      try {
+        const result = await request<{
+          pendingKyc: number;
+          pendingWithdrawAccounts: number;
+        }>('/api/admin/identity-review/summary');
+        if (cancelled) return;
+        setKycCount(result.pendingKyc);
+        setAccountCount(result.pendingWithdrawAccounts);
+      } catch {
+        if (!cancelled) {
+          setKycCount(null);
+          setAccountCount(null);
+        }
+      }
+    }
+    void load();
+    const onQueueChanged = () => void load();
+    window.addEventListener('identity-review-queue-changed', onQueueChanged);
+    return () => {
+      cancelled = true;
+      window.removeEventListener('identity-review-queue-changed', onQueueChanged);
+    };
   }, []);
   return (
     <HubTabs
@@ -1898,6 +1996,7 @@ function KycReview() {
     setBusy(true);
     try {
       await post(`/api/admin/kyc/${id}/review`, { action, reason }); await load();
+      notifyIdentityQueueChanged();
     } finally { setBusy(false); }
   }
   return <section className="panel"><div className="panel-title"><div><small>实名队列</small><h2>待审核 {items.length} 人</h2></div></div>
@@ -1931,6 +2030,7 @@ function WithdrawAccountReview() {
       setError('');
       await post(`/api/admin/withdraw-accounts/${id}/review`, { action, reason });
       await load();
+      notifyIdentityQueueChanged();
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -2542,7 +2642,7 @@ function Rooms() {
   useEffect(() => { void load(); }, []);
   return <><div className="toolbar standalone"><div className="toolbar-hint"><small>游戏目录</small><span>一款游戏 = 一个互动群</span></div></div>
     <p style={{fontSize:13,color:'#6b7280',margin:'0 0 12px'}}>当前目录只有「至尊牛牛」。不能自由复制或改名创建其他群；以后新增互动群，必须先接入独立规则引擎与游戏代码。</p>
-    <div className="room-grid">{items.map((game) => <article className="room-card" key={game.code}><header><div className="room-symbol"><img src="/logo.png" alt="" /></div><div><strong>{game.title}</strong><small>{game.interactionGroupTitle} · {game.code}</small></div><Badge value={game.room?.status ?? 'PAUSED'} /></header><div className="room-stats"><div><span>群成员</span><b>{game.room?.members ?? 0}</b></div><div><span>最低人数</span><b>{game.room?.minPlayers ?? '—'}</b></div><div><span>历史局数</span><b>{game.room?.rounds ?? 0}</b></div></div><footer>{game.room ? <><button onClick={async()=>{await patch(`/api/admin/rooms/${game.room.id}`,{status:game.room.status==='ACTIVE'?'PAUSED':'ACTIVE'});await load();}}>{game.room.status==='ACTIVE'?'暂停入口':'启用入口'}</button><button className="success" onClick={async()=>{await post(`/api/admin/rooms/${game.room.id}/start`,{force:true});alert('已开启竞标');}}>强制开局</button></> : <span>尚未建互动群</span>}</footer></article>)}</div>
+    <div className="room-grid">{items.map((game) => <article className="room-card" key={game.code}><header><div className="room-symbol"><img src="/logo.png" alt="" /></div><div><strong>{game.title}</strong><small>{game.interactionGroupTitle} · {game.code}</small></div><Badge value={game.room?.status ?? 'PAUSED'} /></header><div className="room-stats"><div><span>群成员</span><b>{game.room?.members ?? 0}</b></div><div><span>最低人数</span><b>{game.room?.minPlayers ?? '—'}</b></div><div><span>有效局数</span><b>{game.room?.rounds ?? 0}</b></div></div><footer>{game.room ? <><button onClick={async()=>{await patch(`/api/admin/rooms/${game.room.id}`,{status:game.room.status==='ACTIVE'?'PAUSED':'ACTIVE'});await load();}}>{game.room.status==='ACTIVE'?'暂停入口':'启用入口'}</button><button className="success" onClick={async()=>{await post(`/api/admin/rooms/${game.room.id}/start`,{force:true});alert('已开启竞标');}}>强制开局</button></> : <span>尚未建互动群</span>}</footer></article>)}</div>
     {items.length===0&&<Empty text="游戏目录为空" />}</>;
 }
 
@@ -2613,6 +2713,7 @@ function Rounds({ canReconcile }: { canReconcile: boolean }) {
   }, [items, detail?.id, detail?.phase]);
 
   const filtered = items.filter((round) => {
+    if (round.phase === 'CANCELLED') return false;
     if (filter === 'all') return true;
     if (filter === 'live') {
       return !['FINISHED', 'CANCELLED', 'WAITING'].includes(round.phase);
@@ -3068,13 +3169,174 @@ function Rounds({ canReconcile }: { canReconcile: boolean }) {
   );
 }
 
+type TngSchedulerConfig = {
+  enabled: boolean;
+  baseUrl: string;
+  keyId: string;
+  secretSet: boolean;
+  secretMasked: string;
+  ready: boolean;
+};
+
+function TngSchedulerPanel() {
+  const [config, setConfig] = useState<TngSchedulerConfig | null>(null);
+  const [draft, setDraft] = useState({ enabled: false, baseUrl: '', keyId: '' });
+  const [secret, setSecret] = useState('');
+  const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const load = () =>
+    request<TngSchedulerConfig>('/api/admin/tng/scheduler')
+      .then((result) => {
+        setConfig(result);
+        setDraft({ enabled: result.enabled, baseUrl: result.baseUrl, keyId: result.keyId });
+        setSecret('');
+      })
+      .catch((e) => setError((e as Error).message));
+
+  useEffect(() => {
+    void load();
+  }, []);
+
+  async function save() {
+    setBusy(true);
+    setError('');
+    setNotice('');
+    try {
+      const result = await put<{ ok: boolean; config: TngSchedulerConfig }>(
+        '/api/admin/tng/scheduler',
+        {
+          enabled: draft.enabled,
+          baseUrl: draft.baseUrl.trim(),
+          keyId: draft.keyId.trim(),
+          ...(secret.trim() ? { secret: secret.trim() } : {}),
+        },
+      );
+      setConfig(result.config);
+      setDraft({
+        enabled: result.config.enabled,
+        baseUrl: result.config.baseUrl,
+        keyId: result.config.keyId,
+      });
+      setSecret('');
+      setNotice(result.config.ready ? '已保存，调度器已启用。' : '已保存。填写完整后勾选启用即可自动发包。');
+    } catch (e) {
+      const message = (e as Error).message;
+      setError(
+        message.includes('TNG_SCHEDULER_INCOMPLETE')
+          ? '资料不完整，无法启用：请填写调度地址、keyId 和 secret。'
+          : message.includes('INVALID_BASE_URL')
+            ? '调度地址必须以 http:// 或 https:// 开头。'
+            : message,
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function test() {
+    setBusy(true);
+    setError('');
+    setNotice('');
+    try {
+      const result = await post<{ ok: boolean; service: string; apiVersion: string }>(
+        '/api/admin/tng/scheduler/test',
+        {},
+      );
+      setNotice(`连通成功 · ${result.service} ${result.apiVersion}`);
+    } catch (e) {
+      setError(`连通失败：${(e as Error).message}。请核对地址、keyId、secret，并先保存再测试。`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!config) return <section className="panel"><Empty text="加载调度器配置…" /></section>;
+
+  return (
+    <>
+      <ErrorBox error={error} />
+      {notice && <div className="ok-box">{notice}</div>}
+      <section className="panel">
+        <div className="panel-title">
+          <div>
+            <small>独立红包调度服务器</small>
+            <h2>
+              API 凭据 {config.ready ? <Badge value="ACTIVE" /> : <Badge value="DISABLED" />}
+            </h2>
+          </div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button className="small" type="button" disabled={busy} onClick={() => void test()}>
+              测试连通
+            </button>
+            <button className="primary small" type="button" disabled={busy} onClick={() => void save()}>
+              {busy ? '保存中…' : '保存设置'}
+            </button>
+          </div>
+        </div>
+        <p className="muted" style={{ marginTop: 0 }}>
+          启用后，系统会在投封盘发包时自动向调度器提交金额、个数和随机红包 ID，再按红包 ID 轮询链接与领取明细。
+        </p>
+        <div className="gateway-form">
+          <label>
+            <span>启用状态</span>
+            <label className="gateway-switch">
+              <input
+                type="checkbox"
+                checked={draft.enabled}
+                onChange={(e) => setDraft((current) => ({ ...current, enabled: e.target.checked }))}
+              />
+              开启后自动创建 TNG 红包并同步领取
+            </label>
+          </label>
+          <label>
+            <span>调度地址 Base URL</span>
+            <input
+              placeholder="http://205.186.67.114:8080"
+              value={draft.baseUrl}
+              onChange={(e) => setDraft((current) => ({ ...current, baseUrl: e.target.value }))}
+            />
+            <small>不含路径，系统会自动请求 /api/v1/packets/create 与 /query</small>
+          </label>
+          <label>
+            <span>keyId</span>
+            <input
+              placeholder="tng-prod-202608-U"
+              value={draft.keyId}
+              autoComplete="off"
+              onChange={(e) => setDraft((current) => ({ ...current, keyId: e.target.value }))}
+            />
+            <small>公开标识，放在请求头 X-TNG-Key-Id</small>
+          </label>
+          <label>
+            <span>secret</span>
+            <input
+              type="password"
+              autoComplete="new-password"
+              placeholder={
+                config.secretSet
+                  ? `已设置：${config.secretMasked}（留空不修改）`
+                  : '服务方单独提供的 32 字节以上密钥'
+              }
+              value={secret}
+              onChange={(e) => setSecret(e.target.value)}
+            />
+            <small>加密存储，保存后不再回显明文。更换密钥时直接填新值保存即可。</small>
+          </label>
+        </div>
+      </section>
+    </>
+  );
+}
+
 function Tng({ canReconcile }: { canReconcile: boolean }) {
   const [accounts,setAccounts]=useState<Row[]>([]);const [packets,setPackets]=useState<Row[]>([]);const [form,setForm]=useState({label:'',accountName:'',maskedId:'',monthlyLimitCents:''});
   const load=()=>Promise.all([request<{items:Row[]}>('/api/admin/tng/accounts'),request<{items:Row[]}>('/api/admin/tng/reconciliation')]).then(([a,p])=>{setAccounts(a.items);setPackets(p.items);});
   useEffect(()=>{void load();},[]);
   async function add(){await post('/api/admin/tng/accounts',{...form,monthlyLimitCents:form.monthlyLimitCents?toCents(form.monthlyLimitCents):undefined});setForm({label:'',accountName:'',maskedId:'',monthlyLimitCents:''});await load();}
   async function reconcileCancelled(packet:Row){const claimed=prompt('实际已领取累计金额（RM）',rm(packet.reconciledCents??0));const returned=prompt('TNG 实际退回累计金额（RM）',rm(packet.returnedCents??0));if(claimed===null||returned===null)return;await post(`/api/admin/packets/${packet.id}/reconcile-cancelled`,{claimedCents:toCents(claimed),returnedCents:toCents(returned)});await load();}
-  return <><section className="panel inline-form"><input placeholder="账号标签" value={form.label} onChange={e=>setForm({...form,label:e.target.value})}/><input placeholder="TNG 户名" value={form.accountName} onChange={e=>setForm({...form,accountName:e.target.value})}/><input placeholder="账号尾号" value={form.maskedId} onChange={e=>setForm({...form,maskedId:e.target.value})}/><input placeholder="月限额 RM" value={form.monthlyLimitCents} onChange={e=>setForm({...form,monthlyLimitCents:e.target.value})}/><button className="primary small" onClick={()=>void add()}>添加发包账号</button></section><section className="panel"><div className="account-chips">{accounts.map(a=><div key={a.id}><span><i/> {a.label}</span><strong>{a.accountName}</strong><small>{a.maskedId||'未填尾号'} · 月限额 {a.monthlyLimitCents?`RM ${rm(a.monthlyLimitCents)}`:'未设置'}</small><footer><Badge value={a.status}/><button onClick={async()=>{await patch(`/api/admin/tng/accounts/${a.id}`,{status:a.status==='ACTIVE'?'DISABLED':'ACTIVE'});await load();}}>{a.status==='ACTIVE'?'停用':'启用'}</button></footer></div>)}</div></section><section className="panel"><div className="panel-title"><div><small>红包台账</small><h2>红包对账</h2></div></div><div className="table-wrap"><table><thead><tr><th>局号</th><th>房间</th><th>总额</th><th>已领取</th><th>已退回</th><th>领取人数</th><th>状态</th><th>操作</th></tr></thead><tbody>{packets.map(p=><tr key={p.id}><td>#{p.round.seqNo}</td><td>{p.round.room.title}</td><td>RM {rm(p.totalCents)}</td><td>RM {rm(p.reconciledCents)}</td><td>RM {rm(p.returnedCents??0)}</td><td>{p.claims.length}/{p.participantCount}</td><td><Badge value={p.status}/></td><td>{canReconcile&&p.round.phase==='CANCELLED'&&BigInt(String(p.reconciledCents??0))+BigInt(String(p.returnedCents??0))<BigInt(String(p.totalCents))?<button onClick={()=>void reconcileCancelled(p)}>核销取消包</button>:(p.sentAt?new Date(p.sentAt).toLocaleString('zh-MY'):'—')}</td></tr>)}</tbody></table></div></section></>;
+  return <><TngSchedulerPanel /><section className="panel inline-form"><input placeholder="账号标签" value={form.label} onChange={e=>setForm({...form,label:e.target.value})}/><input placeholder="TNG 户名" value={form.accountName} onChange={e=>setForm({...form,accountName:e.target.value})}/><input placeholder="账号尾号" value={form.maskedId} onChange={e=>setForm({...form,maskedId:e.target.value})}/><input placeholder="月限额 RM" value={form.monthlyLimitCents} onChange={e=>setForm({...form,monthlyLimitCents:e.target.value})}/><button className="primary small" onClick={()=>void add()}>添加发包账号</button></section><section className="panel"><div className="account-chips">{accounts.map(a=><div key={a.id}><span><i/> {a.label}</span><strong>{a.accountName}</strong><small>{a.maskedId||'未填尾号'} · 月限额 {a.monthlyLimitCents?`RM ${rm(a.monthlyLimitCents)}`:'未设置'}</small><footer><Badge value={a.status}/><button onClick={async()=>{await patch(`/api/admin/tng/accounts/${a.id}`,{status:a.status==='ACTIVE'?'DISABLED':'ACTIVE'});await load();}}>{a.status==='ACTIVE'?'停用':'启用'}</button></footer></div>)}</div></section><section className="panel"><div className="panel-title"><div><small>红包台账</small><h2>红包对账</h2></div></div><div className="table-wrap"><table><thead><tr><th>局号</th><th>房间</th><th>总额</th><th>已领取</th><th>已退回</th><th>领取人数</th><th>状态</th><th>操作</th></tr></thead><tbody>{packets.map(p=><tr key={p.id}><td>#{p.round.seqNo}</td><td>{p.round.room.title}</td><td>RM {rm(p.totalCents)}</td><td>RM {rm(p.reconciledCents)}</td><td>RM {rm(p.returnedCents??0)}</td><td>{p.claims.length}/{p.participantCount}</td><td><Badge value={p.status}/></td><td>{canReconcile&&p.round.phase==='CANCELLED'&&BigInt(String(p.reconciledCents??0))+BigInt(String(p.returnedCents??0))<BigInt(String(p.totalCents))?<button onClick={()=>void reconcileCancelled(p)}>核销取消包</button>:(p.sentAt?new Date(p.sentAt).toLocaleString('zh-MY'):'—')}</td></tr>)}</tbody></table></div></section></>;
 }
 
 function RewardsAdmin({ canManageMoney }: { canManageMoney: boolean }) {

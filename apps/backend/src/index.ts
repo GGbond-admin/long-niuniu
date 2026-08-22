@@ -12,6 +12,7 @@ import { backgroundJobs } from './services/backgroundJobs.js';
 import { ensureGameConfigDefaults } from './services/gameSettings.js';
 import { ensureCatalogInteractionGroups } from './services/gameCatalog.js';
 import { initVirtualPlayerWorker } from './services/virtualPlayerWorker.js';
+import { initTngSchedulerWorker, stopTngSchedulerWorker } from './services/tngSchedulerWorker.js';
 import { ensureMissingUserAvatars } from './services/user.js';
 import { ensureHouseInviter } from './services/houseInviter.js';
 import { ensureGameRuleDefaults } from './services/gameRules.js';
@@ -75,6 +76,7 @@ async function main() {
   roundScheduler.start();
   backgroundJobs.start();
   initVirtualPlayerWorker();
+  initTngSchedulerWorker();
 
   let shuttingDown = false;
   const shutdown = async (signal: string) => {
@@ -83,6 +85,7 @@ async function main() {
     console.log(`[shutdown] ${signal}`);
     roundScheduler.stop();
     backgroundJobs.stop();
+    stopTngSchedulerWorker();
     await stopBots();
     await app.close();
     await disconnectRedis();

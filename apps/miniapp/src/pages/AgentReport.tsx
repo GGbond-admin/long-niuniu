@@ -1,16 +1,55 @@
 /**
- * 代理专属看板：按正式称桶利润池批次展示不可变快照。
+ * 代理专属：看板看整体，称桶报表看某一批名下完整快照。
  */
 import { useEffect, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { api, rm } from '../api';
 import { goBack } from '../lib/nav';
+import { markAgentReportSeen } from '../sessionStore';
 
 const STATUS_LABEL = {
   PENDING: { text: '待分配', tone: 'pending' },
   DISTRIBUTED: { text: '已分配', tone: 'paid' },
   NO_DISTRIBUTION: { text: '无需分配', tone: 'none' },
 } as const;
+
+const TODAY_PENDING = '报表准备中 请在下午2点后查看';
+
+function malaysiaDayOf(iso: string) {
+  return new Date(iso).toLocaleDateString('sv-SE', { timeZone: 'Asia/Kuala_Lumpur' });
+}
+
+function formatReportDay(day: string) {
+  const [year, month, date] = day.split('-');
+  if (!year || !month || !date) return day;
+  return `${Number(year)}年${Number(month)}月${Number(date)}日`;
+}
+
+function periodDay(period: { generatedDate?: string; generatedAt: string }) {
+  return period.generatedDate || malaysiaDayOf(period.generatedAt);
+}
+
+function selectedDateLabel(generatedDate: string | undefined, today: string, isLatest: boolean) {
+  if (generatedDate === today) return formatReportDay(generatedDate);
+  if (isLatest || !generatedDate) return TODAY_PENDING;
+  return formatReportDay(generatedDate);
+}
+
+type ReportData = Awaited<ReturnType<typeof api.agentReport>>;
+type DownlineAgent = NonNullable<ReportData['selected']>['downline'][number];
+type PeriodRoom = ReportData['periods'][number]['room'];
+
+function gameLabel(room?: { title?: string; gameCode?: string } | null) {
+  return room?.title?.trim() || room?.gameCode || '未知游戏';
+}
+
+function uniqueGames(periods: ReportData['periods']): PeriodRoom[] {
+  const seen = new Map<string, PeriodRoom>();
+  for (const period of periods) {
+    if (!seen.has(period.room.gameCode)) seen.set(period.room.gameCode, period.room);
+  }
+  return [...seen.values()];
+}
 
 function Icon({
   name,
@@ -27,16 +66,45 @@ function Icon({
   return <svg viewBox="0 0 24 24" aria-hidden="true">{paths[name]}</svg>;
 }
 
+function visibleDownline(
+  items: DownlineAgent[],
+  rootId: string,
+  expanded: Set<string>,
+) {
+  const byParent = new Map<string, DownlineAgent[]>();
+  for (const item of items) {
+    const parent = item.parentAgentId ?? '';
+    const list = byParent.get(parent) ?? [];
+    list.push(item);
+    byParent.set(parent, list);
+  }
+  const result: Array<{ item: DownlineAgent; depth: number; childCount: number }> = [];
+  const visit = (parentId: string, depth: number) => {
+    for (const item of byParent.get(parentId) ?? []) {
+      const childCount = byParent.get(item.agentId)?.length ?? 0;
+      result.push({ item, depth, childCount });
+      if (childCount > 0 && expanded.has(item.agentId)) visit(item.agentId, depth + 1);
+    }
+  };
+  visit(rootId, 0);
+  return result;
+}
+
 export default function AgentReport() {
-  const [poolId, setPoolId] = useState<string | undefined>();
-  const [data, setData] = useState<Awaited<ReturnType<typeof api.agentReport>> | null>(null);
+  const navigate = useNavigate();
+  const location = useLocation();
+  const searchParams = new URLSearchParams(location.search);
+  const reportOnly = searchParams.get('tab') === 'report';
+  const requestedPoolId = searchParams.get('poolId') || undefined;
+  const [poolId, setPoolId] = useState<string | undefined>(requestedPoolId);
+  const [data, setData] = useState<ReportData | null>(null);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
   const [loadingMorePeriods, setLoadingMorePeriods] = useState(false);
   const [loadingMorePlayers, setLoadingMorePlayers] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
-  const navigate = useNavigate();
-  const location = useLocation();
+  const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
+  const [gameFilter, setGameFilter] = useState<string>('all');
 
   useEffect(() => {
     let active = true;
@@ -61,6 +129,8 @@ export default function AgentReport() {
                 }
               : result,
           );
+          const latestPoolId = result.periods[0]?.poolId;
+          if (latestPoolId) markAgentReportSeen(result.profile.id, latestPoolId);
         }
       })
       .catch((reason) => {
@@ -73,6 +143,14 @@ export default function AgentReport() {
       active = false;
     };
   }, [poolId, reloadKey]);
+
+  useEffect(() => {
+    setExpanded(new Set());
+  }, [poolId, data?.selected?.pool.id]);
+
+  useEffect(() => {
+    if (requestedPoolId) setPoolId(requestedPoolId);
+  }, [requestedPoolId]);
 
   async function loadMorePeriods() {
     const cursor = data?.periodsNextCursor;
@@ -141,7 +219,7 @@ export default function AgentReport() {
       <div className="page subpage ag2-page">
         <header className="subpage-header">
           <button type="button" onClick={() => goBack(navigate, location)} aria-label="返回">‹</button>
-          <div><h1>代理专属看板</h1></div>
+          <div><h1>{reportOnly ? '称桶报表' : '代理专属看板'}</h1></div>
           <span />
         </header>
         <div className="inline-alert error">{error}</div>
@@ -153,19 +231,57 @@ export default function AgentReport() {
   const status = selected
     ? STATUS_LABEL[selected.pool.status] ?? { text: selected.pool.status, tone: 'none' }
     : null;
+  const activePickerPeriod =
+    data.periods.find((period) => period.poolId === (poolId ?? selected?.pool.id)) ??
+    data.periods[0] ??
+    null;
+  const downlineRows = selected
+    ? visibleDownline(selected.downline ?? [], data.profile.id, expanded)
+    : [];
+  const games = uniqueGames(data.periods);
+  const visiblePeriods =
+    gameFilter === 'all'
+      ? data.periods
+      : data.periods.filter((period) => period.room.gameCode === gameFilter);
+  const recentPeriods = visiblePeriods.slice(0, 6);
+  const recentMaxCents = recentPeriods.reduce(
+    (max, item) => (BigInt(item.amountCents) > max ? BigInt(item.amountCents) : max),
+    0n,
+  );
+  const today =
+    data.profile.today
+    || new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Kuala_Lumpur' });
+  const hasTodayReport =
+    data.periods.some((period) => periodDay(period) === today)
+    || (selected ? periodDay(selected.pool) === today : false);
+  const isLatestSelected = Boolean(
+    selected && (data.periods[0]?.poolId ?? selected.pool.id) === selected.pool.id,
+  );
+  const selectedDate = selected
+    ? selectedDateLabel(periodDay(selected.pool), today, isLatestSelected)
+    : TODAY_PENDING;
+
+  function toggleAgent(id: string) {
+    setExpanded((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
 
   return (
     <div className="page subpage ag2-page">
       <header className="subpage-header ag2-header">
         <button type="button" onClick={() => goBack(navigate, location)} aria-label="返回">‹</button>
         <div>
-          <small>AGENT PROFIT</small>
-          <h1>代理专属看板</h1>
+          <small>{reportOnly ? 'BUCKET REPORT' : 'AGENT PROFIT'}</small>
+          <h1>{reportOnly ? '称桶报表' : '代理专属看板'}</h1>
         </div>
         <button
           type="button"
           className="ag2-refresh"
-          aria-label="刷新看板"
+          aria-label="刷新"
           disabled={loading}
           onClick={() => setReloadKey((value) => value + 1)}
         >
@@ -176,95 +292,313 @@ export default function AgentReport() {
         </button>
       </header>
 
-      <section className="ag2-profile">
-        <div className="ag2-profile-orbit" aria-hidden="true" />
-        <div className="ag2-avatar">
-          {(data.profile.nickname ?? data.profile.label).slice(0, 1).toUpperCase()}
-        </div>
-        <div className="ag2-profile-copy">
-          <small>专属代理账户 · {data.profile.online ? '当前在线' : '当前离线'}</small>
-          <h2>{data.profile.label}</h2>
-          <p>{data.profile.nickname ?? '未设置昵称'} · {data.profile.uidMasked}</p>
-        </div>
-        <div className="ag2-points">
-          <small>当前占成</small>
-          <strong>{data.profile.sharePoints}</strong>
-          <span>点</span>
-        </div>
-      </section>
+      {!reportOnly && (
+        <>
+          <section className="ag2-profile">
+            <div className="ag2-profile-orbit" aria-hidden="true" />
+            <div className="ag2-avatar">
+              {(data.profile.nickname ?? data.profile.label).slice(0, 1).toUpperCase()}
+            </div>
+            <div className="ag2-profile-copy">
+              <small>专属代理账户 · {data.profile.online ? '当前在线' : '当前离线'}</small>
+              <h2>{data.profile.label}</h2>
+              <p>{data.profile.nickname ?? '未设置昵称'} · {data.profile.uidMasked}</p>
+            </div>
+            <div className="ag2-points">
+              <small>当前占成</small>
+              <strong>{data.profile.sharePoints}</strong>
+              <span>/{data.profile.bucketBase ?? selected?.mine.bucketBase ?? 130} 点</span>
+            </div>
+          </section>
 
-      <section className="ag2-lifetime">
-        <div>
-          <small>累计已发称桶利润</small>
-          <strong>RM {rm(data.profile.lifetimeProfitCents)}</strong>
-        </div>
-        <div>
-          <span><Icon name="network" /> 团队代理</span>
-          <b>{data.profile.teamAgentCount}</b>
-          <small>
-            直属 {data.profile.directAgentCount} · 在线 {data.profile.onlineTeamCount}
-          </small>
-        </div>
-        <div>
-          <span><Icon name="players" /> 团队玩家</span>
-          <b>{data.profile.teamPlayerCount}</b>
-          <small>直属 {data.profile.directPlayerCount}</small>
-        </div>
-      </section>
+          <section className="ag2-lifetime">
+            <div>
+              <small>累计已发称桶利润</small>
+              <strong>RM {rm(data.profile.lifetimeProfitCents)}</strong>
+              <small>
+                直属 RM {rm(data.profile.lifetimeSelfAmountCents ?? '0')} · 点差 RM{' '}
+                {rm(data.profile.lifetimeOverrideAmountCents ?? '0')}
+              </small>
+            </div>
+            <div>
+              <span><Icon name="network" /> 团队代理</span>
+              <b>{data.profile.teamAgentCount}</b>
+              <small>
+                直属 {data.profile.directAgentCount} · 在线 {data.profile.onlineTeamCount}
+              </small>
+            </div>
+            <div>
+              <span><Icon name="players" /> 团队玩家</span>
+              <b>{data.profile.teamPlayerCount}</b>
+              <small>直属 {data.profile.directPlayerCount}</small>
+            </div>
+          </section>
 
-      <section className="ag2-period-selector">
-        <div className="ag2-section-title">
-          <div>
-            <small>SETTLEMENT PERIOD</small>
-            <h2>选择利润池批次</h2>
-          </div>
-          {status && <span className={`ag2-status ${status.tone}`}>{status.text}</span>}
-        </div>
-        {data.periods.length > 0 ? (
-          <>
-            <label>
-              <span className="sr-only">利润池批次</span>
-              <select
-                value={selected?.pool.id ?? ''}
-                onChange={(event) => setPoolId(event.target.value)}
-              >
-                {data.periods.map((period) => (
-                  <option value={period.poolId} key={period.poolId}>
-                    {period.poolCode} · 第 {period.startSeqNo}–{period.endSeqNo} 局 · RM {rm(period.amountCents)}
-                  </option>
-                ))}
-              </select>
-              <Icon name="chevron" />
-            </label>
-            {data.periodsNextCursor && (
+          {selected && !hasTodayReport && (
+            <p className="ag2-today-wait">{TODAY_PENDING}</p>
+          )}
+
+          {selected && (
+            <section className="ag2-period-hero">
+              <header>
+                <div>
+                  <small>{gameLabel(selected.pool.room)} · 最近一批</small>
+                  <h2>{selected.pool.poolCode}</h2>
+                </div>
+                <span className={selectedDate === TODAY_PENDING ? 'is-wait' : ''}>
+                  {selectedDate}
+                </span>
+              </header>
+              <div className="ag2-profit-main">
+                <small>本期我的称桶利润</small>
+                <strong>RM {rm(selected.mine.totalAmountCents)}</strong>
+                <span>
+                  {new Date(selected.pool.generatedAt).toLocaleString('zh-MY', {
+                    hour12: false,
+                  })}
+                  {status ? ` · ${status.text}` : ''}
+                  {selected.pool.status === 'PENDING' ? ' · 尚未计入累计' : ''}
+                </span>
+              </div>
+              <div className="ag2-profit-split">
+                <article>
+                  <span>直属玩家利润</span>
+                  <strong>RM {rm(selected.mine.selfAmountCents)}</strong>
+                </article>
+                <i>+</i>
+                <article>
+                  <span>下级占成差额</span>
+                  <strong>RM {rm(selected.mine.overrideAmountCents)}</strong>
+                </article>
+              </div>
+              <div className="ag2-dash-flow">
+                <article>
+                  <span>团队流水</span>
+                  <strong>RM {rm(selected.mine.teamTurnoverCents)}</strong>
+                </article>
+                <article>
+                  <span>自身流水</span>
+                  <strong>RM {rm(selected.mine.selfTurnoverCents)}</strong>
+                </article>
+              </div>
               <button
                 type="button"
-                className="ag2-load-more"
-                disabled={loadingMorePeriods}
-                onClick={() => void loadMorePeriods()}
+                className="ag2-open-report"
+                onClick={() => navigate(`/agent/report?tab=report&poolId=${selected.pool.id}`)}
               >
-                {loadingMorePeriods ? '正在加载…' : '加载更早批次'}
+                查看完整称桶报表
               </button>
-            )}
-          </>
-        ) : (
-          <div className="ag2-empty">
-            <Icon name="history" />
-            <strong>尚无称桶利润池</strong>
-            <span>公司生成第一批局数报表后，这里会自动显示。</span>
-          </div>
-        )}
-      </section>
+            </section>
+          )}
 
-      {selected && (
+          {data.periods.length > 0 && (
+            <section className="ag2-trend">
+              <div className="ag2-section-title">
+                <div>
+                  <small>RECENT BATCHES</small>
+                  <h2>近几批利润</h2>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => navigate('/agent/report?tab=report')}
+                >
+                  全部报表
+                </button>
+              </div>
+              {games.length > 1 && (
+                <div className="ag2-game-filter" role="tablist" aria-label="按游戏筛选批次">
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={gameFilter === 'all'}
+                    className={gameFilter === 'all' ? 'is-active' : ''}
+                    onClick={() => setGameFilter('all')}
+                  >
+                    全部游戏
+                  </button>
+                  {games.map((game) => (
+                    <button
+                      type="button"
+                      role="tab"
+                      key={game.gameCode}
+                      aria-selected={gameFilter === game.gameCode}
+                      className={gameFilter === game.gameCode ? 'is-active' : ''}
+                      onClick={() => setGameFilter(game.gameCode)}
+                    >
+                      {gameLabel(game)}
+                    </button>
+                  ))}
+                </div>
+              )}
+              <div className="ag2-trend-list">
+                {recentPeriods.map((period) => {
+                  const width =
+                    recentMaxCents > 0n
+                      ? Number((BigInt(period.amountCents) * 100n) / recentMaxCents)
+                      : 0;
+                  const tone =
+                    STATUS_LABEL[period.status] ?? { text: period.status, tone: 'none' };
+                  return (
+                    <button
+                      type="button"
+                      key={period.poolId}
+                      className="ag2-trend-row"
+                      onClick={() =>
+                        navigate(`/agent/report?tab=report&poolId=${period.poolId}`)
+                      }
+                    >
+                      <div>
+                        <strong>{period.poolCode}</strong>
+                        <small>
+                          {gameLabel(period.room)} · {formatReportDay(periodDay(period))} · {tone.text}
+                        </small>
+                      </div>
+                      <span className="ag2-trend-bar" aria-hidden="true">
+                        <i
+                          style={{
+                            transform: `scaleX(${width > 0 ? Math.max(0.04, width / 100) : 0})`,
+                          }}
+                        />
+                      </span>
+                      <b>RM {rm(period.amountCents)}</b>
+                    </button>
+                  );
+                })}
+              </div>
+            </section>
+          )}
+
+          {!selected && (
+            <div className="ag2-empty">
+              <Icon name="history" />
+              <strong>{TODAY_PENDING}</strong>
+              <span>今日报表生成后，这里会显示利润拆分和近几批走势。</span>
+            </div>
+          )}
+        </>
+      )}
+
+      {reportOnly && (
+        <section
+          id="ag2-period"
+          className="ag2-period-selector is-report-focus"
+        >
+          <div className="ag2-section-title">
+            <div>
+              <small>SETTLEMENT PERIOD</small>
+              <h2>选择利润池批次</h2>
+            </div>
+            {status && <span className={`ag2-status ${status.tone}`}>{status.text}</span>}
+          </div>
+          {!hasTodayReport && (
+            <p className="ag2-today-wait">{TODAY_PENDING}</p>
+          )}
+          {data.periods.length > 0 ? (
+            <>
+              {games.length > 1 && (
+                <div className="ag2-game-filter" role="tablist" aria-label="按游戏筛选批次">
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={gameFilter === 'all'}
+                    className={gameFilter === 'all' ? 'is-active' : ''}
+                    onClick={() => setGameFilter('all')}
+                  >
+                    全部游戏
+                  </button>
+                  {games.map((game) => (
+                    <button
+                      type="button"
+                      role="tab"
+                      key={game.gameCode}
+                      aria-selected={gameFilter === game.gameCode}
+                      className={gameFilter === game.gameCode ? 'is-active' : ''}
+                      onClick={() => {
+                        setGameFilter(game.gameCode);
+                        const latest = data.periods.find((period) => period.room.gameCode === game.gameCode);
+                        if (latest) {
+                          setPoolId(latest.poolId);
+                          navigate(
+                            `/agent/report?tab=report&poolId=${encodeURIComponent(latest.poolId)}`,
+                            { replace: true },
+                          );
+                        }
+                      }}
+                    >
+                      {gameLabel(game)}
+                    </button>
+                  ))}
+                </div>
+              )}
+              <label className="ag2-period-picker">
+                <div className="ag2-period-picker-value" aria-hidden="true">
+                  {activePickerPeriod ? (
+                    <>
+                      <strong>
+                        {gameLabel(activePickerPeriod.room)} · {activePickerPeriod.poolCode}
+                      </strong>
+                      <span>
+                        {selectedDate} · RM {rm(activePickerPeriod.amountCents)}
+                      </span>
+                    </>
+                  ) : (
+                    <span>请选择批次</span>
+                  )}
+                </div>
+                <select
+                  className="ag2-period-picker-native"
+                  aria-label="利润池批次"
+                  value={selected?.pool.id ?? activePickerPeriod?.poolId ?? ''}
+                  onChange={(event) => {
+                    const next = event.target.value;
+                    setPoolId(next);
+                    navigate(
+                      `/agent/report?tab=report&poolId=${encodeURIComponent(next)}`,
+                      { replace: true },
+                    );
+                  }}
+                >
+                  {visiblePeriods.map((period) => (
+                    <option value={period.poolId} key={period.poolId}>
+                      {gameLabel(period.room)} · {period.poolCode} ·{' '}
+                      {formatReportDay(periodDay(period))} · RM {rm(period.amountCents)}
+                    </option>
+                  ))}
+                </select>
+                <Icon name="chevron" />
+              </label>
+              {data.periodsNextCursor && (
+                <button
+                  type="button"
+                  className="ag2-load-more"
+                  disabled={loadingMorePeriods}
+                  onClick={() => void loadMorePeriods()}
+                >
+                  {loadingMorePeriods ? '正在加载…' : '加载更早批次'}
+                </button>
+              )}
+            </>
+          ) : (
+            <div className="ag2-empty">
+              <Icon name="history" />
+              <strong>尚无称桶利润池</strong>
+              <span>{TODAY_PENDING}</span>
+            </div>
+          )}
+        </section>
+      )}
+
+      {reportOnly && selected && (
         <>
           <section className="ag2-period-hero">
             <header>
               <div>
-                <small>{selected.pool.room.title}</small>
+                  <small>{gameLabel(selected.pool.room)}</small>
                 <h2>{selected.pool.poolCode}</h2>
               </div>
-              <span>第 {selected.pool.startSeqNo}–{selected.pool.endSeqNo} 局</span>
+              <span className={selectedDate === TODAY_PENDING ? 'is-wait' : ''}>
+                {selectedDate}
+              </span>
             </header>
             <div className="ag2-profit-main">
               <small>本期我的称桶利润</small>
@@ -288,26 +622,21 @@ export default function AgentReport() {
             </div>
           </section>
 
-          <section className="ag2-metrics">
+          <section className="ag2-metrics ag2-metrics-company">
             <article>
-              <span><Icon name="network" /> 团队代理</span>
-              <strong>{selected.mine.teamAgentCount}</strong>
-              <small>直属 {selected.mine.directAgentCount}</small>
+              <span><Icon name="profit" /> 公司总流水</span>
+              <strong>RM {rm(selected.pool.turnoverCents)}</strong>
+              <small>本批房间全部有效流水</small>
             </article>
             <article>
-              <span><Icon name="players" /> 团队玩家</span>
-              <strong>{selected.mine.teamPlayerCount}</strong>
-              <small>直属 {selected.mine.directPlayerCount}</small>
+              <span><Icon name="history" /> 公司支出</span>
+              <strong>RM {rm(selected.pool.expenseCents)}</strong>
+              <small>按本批支出比例计算</small>
             </article>
             <article>
-              <span><Icon name="profit" /> 团队流水</span>
-              <strong>RM {rm(selected.mine.teamTurnoverCents)}</strong>
-              <small>贡献 {(selected.mine.contributionBp / 100).toFixed(2)}%</small>
-            </article>
-            <article>
-              <span><Icon name="history" /> 本期占成</span>
-              <strong>{selected.mine.sharePoints}/{selected.mine.bucketBase}</strong>
-              <small>历史快照不随当前配置变化</small>
+              <span><Icon name="network" /> 利润池</span>
+              <strong>RM {rm(selected.pool.netPoolCents)}</strong>
+              <small>抽水减去支出后的可分配池</small>
             </article>
           </section>
 
@@ -315,29 +644,57 @@ export default function AgentReport() {
             <div className="ag2-section-title">
               <div>
                 <small>MY NETWORK</small>
-                <h2>我的直属代理</h2>
+                <h2>名下全部代理</h2>
               </div>
               <button type="button" onClick={() => navigate('/agent/sharing')}>分成管理</button>
             </div>
+            <p className="ag2-tree-hint">
+              只显示你这棵线下的代理。有下级的可点开查看占成、流水和利润。
+            </p>
             <div className="ag2-agent-list">
-              {selected.subagents.map((agent) => (
-                <article key={agent.agentId}>
-                  <span className="ag2-list-avatar">{agent.label.slice(0, 1)}</span>
+              {downlineRows.map(({ item, depth, childCount }) => (
+                <article
+                  key={item.agentId}
+                  className={childCount > 0 ? 'ag2-tree-row is-expandable' : 'ag2-tree-row'}
+                  style={{ paddingLeft: 10 + depth * 16 }}
+                >
+                  {childCount > 0 ? (
+                    <button
+                      type="button"
+                      className={`ag2-tree-toggle ${expanded.has(item.agentId) ? 'open' : ''}`}
+                      aria-expanded={expanded.has(item.agentId)}
+                      aria-label={expanded.has(item.agentId) ? `收起 ${item.label}` : `展开 ${item.label}`}
+                      onClick={() => toggleAgent(item.agentId)}
+                    >
+                      <Icon name="chevron" />
+                    </button>
+                  ) : (
+                    <span className="ag2-tree-toggle-spacer" aria-hidden="true" />
+                  )}
+                  <span className="ag2-list-avatar">{item.label.slice(0, 1)}</span>
                   <div>
-                    <strong>{agent.label}</strong>
-                    <small>{agent.uidMasked} · {agent.teamAgentCount} 代理 / {agent.teamPlayerCount} 玩家</small>
+                    <strong>{item.label}</strong>
+                    <small>
+                      {item.uidMasked} · {item.sharePoints} 点 · {item.teamAgentCount} 代理 / {item.teamPlayerCount} 玩家
+                    </small>
+                    <small>
+                      自身流水 RM {rm(item.selfTurnoverCents)} · 团队 RM {rm(item.teamTurnoverCents)}
+                    </small>
                   </div>
                   <span>
-                    <strong>差额贡献 RM {rm(agent.contributionAmountCents)}</strong>
+                    <strong>合计 RM {rm(item.amountCents)}</strong>
                     <small>
-                      下级本期 RM {rm(agent.ownAmountCents)} · 差额 {agent.diffPoints} 点
+                      自身 {rm(item.selfAmountCents)} + 差额 {rm(item.overrideAmountCents)}
                     </small>
+                    {item.parentAgentId === data.profile.id && (
+                      <small>给你的差额 RM {rm(item.contributionAmountCents)}</small>
+                    )}
                   </span>
                 </article>
               ))}
-              {selected.subagents.length === 0 && (
+              {downlineRows.length === 0 && (
                 <div className="ag2-empty compact">
-                  <strong>暂无直属代理</strong>
+                  <strong>本期名下没有下级代理</strong>
                   <span>可在玩家列表将符合条件的直属玩家升级为代理。</span>
                 </div>
               )}
@@ -349,6 +706,9 @@ export default function AgentReport() {
               <div>
                 <small>DIRECT PLAYERS</small>
                 <h2>我的直属玩家</h2>
+                <small className="ag2-direct-sum">
+                  含自己 · 合计流水 RM {rm(selected.mine.directTurnoverCents ?? selected.mine.selfTurnoverCents)}
+                </small>
               </div>
               <button type="button" onClick={() => navigate('/agent/players')}>玩家管理</button>
             </div>
@@ -359,8 +719,11 @@ export default function AgentReport() {
                     {(player.nickname ?? player.uidMasked).slice(0, 1)}
                   </span>
                   <div>
-                    <strong>{player.nickname ?? '玩家'}</strong>
-                    <small>{player.uidMasked}</small>
+                    <strong>
+                      {player.isSelf ? '自己' : (player.nickname ?? '玩家')}
+                      {player.isSelf && player.nickname ? ` · ${player.nickname}` : ''}
+                    </strong>
+                    <small>{player.isSelf ? `${player.uidMasked} · 自身流水` : player.uidMasked}</small>
                   </div>
                   <span>
                     <strong>RM {rm(player.turnoverCents)}</strong>
@@ -370,7 +733,7 @@ export default function AgentReport() {
               ))}
               {selected.players.length === 0 && (
                 <div className="ag2-empty compact">
-                  <strong>本期暂无直属玩家流水</strong>
+                  <strong>本期暂无自己或直属玩家流水</strong>
                   <span>玩家归属和金额以该利润池生成时的快照为准。</span>
                 </div>
               )}
@@ -391,7 +754,11 @@ export default function AgentReport() {
 
       {error && <div className="inline-alert error">{error}</div>}
       <footer className="ag2-footnote">
-        历史代理关系、占成、流水与利润均按利润池生成时保存，不受之后调整影响。
+        {reportOnly
+          ? '历史代理关系、占成、流水与利润均按利润池生成时保存，不受之后调整影响。公司三项为本批房间总账。'
+          : data.profile.lifetimeLegacyCents && data.profile.lifetimeLegacyCents !== '0'
+            ? `累计只统计已发放批次，含切换前旧日结 RM ${rm(data.profile.lifetimeLegacyCents)}。分成与玩家请从「我的」进入。`
+            : '累计只统计已发放批次；待分配利润不会计入。分成与玩家请从「我的」进入。'}
       </footer>
     </div>
   );

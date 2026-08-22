@@ -256,13 +256,20 @@ function money(value: bigint): string {
   return value.toString();
 }
 
-function missingSeqNos(rounds: RangeRoundRow[], startSeqNo: number, endSeqNo: number): number[] {
-  const found = new Set(rounds.map((round) => round.seqNo));
-  const missing: number[] = [];
-  for (let seq = startSeqNo; seq <= endSeqNo && missing.length < 20; seq += 1) {
-    if (!found.has(seq)) missing.push(seq);
+/** 同一局号若先取消再重开，利润池只取有效局。 */
+function preferRoundsBySeqNo<T extends { seqNo: number; phase: string }>(rounds: T[]): T[] {
+  const bySeq = new Map<number, T>();
+  for (const round of rounds) {
+    const current = bySeq.get(round.seqNo);
+    if (!current) {
+      bySeq.set(round.seqNo, round);
+      continue;
+    }
+    if (current.phase === 'CANCELLED' && round.phase !== 'CANCELLED') {
+      bySeq.set(round.seqNo, round);
+    }
   }
-  return missing;
+  return [...bySeq.values()].sort((left, right) => left.seqNo - right.seqNo);
 }
 
 export async function computeProfitPoolRange(
@@ -285,8 +292,8 @@ export async function computeProfitPoolRange(
   ) {
     throw new ProfitPoolError('SEQ_RANGE_INVALID');
   }
-  const expectedRoundCount = endSeqNo - startSeqNo + 1;
-  if (expectedRoundCount > MAX_PROFIT_POOL_ROUNDS) {
+  const requestedSpan = endSeqNo - startSeqNo + 1;
+  if (requestedSpan > MAX_PROFIT_POOL_ROUNDS) {
     throw new ProfitPoolError('SEQ_RANGE_TOO_LARGE', { maxRounds: MAX_PROFIT_POOL_ROUNDS });
   }
   expenseFromBps(0n, expenseBps);
@@ -339,27 +346,30 @@ export async function computeProfitPoolRange(
       poolCode: locked.pool.poolCode,
     });
   }
-  if (rounds.length !== expectedRoundCount) {
-    throw new ProfitPoolError('ROUND_RANGE_INCOMPLETE', {
-      expected: expectedRoundCount,
-      found: rounds.length,
-      missingSeqNos: missingSeqNos(rounds, startSeqNo, endSeqNo),
-    });
-  }
-  const nonTerminal = rounds.filter(
-    (round) => round.phase !== 'FINISHED' && round.phase !== 'CANCELLED',
+  const preferredRounds = preferRoundsBySeqNo(rounds);
+  const activeRounds = preferredRounds.filter(
+    (round) => round.phase !== 'FINISHED' && round.phase !== 'CANCELLED' && round.phase !== 'WAITING',
   );
-  if (nonTerminal.length) {
+  if (activeRounds.length) {
     throw new ProfitPoolError('ROUNDS_NOT_TERMINAL', {
-      rounds: nonTerminal.slice(0, 20).map((round) => ({
+      rounds: activeRounds.slice(0, 20).map((round) => ({
         seqNo: round.seqNo,
         phase: round.phase,
       })),
     });
   }
+  const settlementRounds = preferredRounds.filter((round) => round.phase === 'FINISHED');
+  if (settlementRounds.length === 0) {
+    throw new ProfitPoolError('ROUND_RANGE_INCOMPLETE', {
+      expected: requestedSpan,
+      found: 0,
+    });
+  }
+  const settledEndSeqNo = settlementRounds[settlementRounds.length - 1]!.seqNo;
+  const cancelledRoundCount = preferredRounds.filter((round) => round.phase === 'CANCELLED').length;
 
   const participantIds = new Set<string>();
-  for (const round of rounds) {
+  for (const round of settlementRounds) {
     if (round.bankerId) participantIds.add(round.bankerId);
     for (const settlement of round.settlements) participantIds.add(settlement.userId);
   }
@@ -371,7 +381,7 @@ export async function computeProfitPoolRange(
     : [];
   const userKinds = new Map(participants.map((user) => [user.id, user.kind]));
   const financials = aggregateRangeFinancials(
-    rounds.map((round) => ({
+    settlementRounds.map((round) => ({
       ...round,
       bankerRakeCents: bankerRakeCentsFromSummary(round.scoreboard?.bankerSummary),
     })),
@@ -574,10 +584,10 @@ export async function computeProfitPoolRange(
   const calculationHash = stableRangeHash({
     roomId,
     startSeqNo,
-    endSeqNo,
+    endSeqNo: settledEndSeqNo,
     expenseBps,
     bucketBase,
-    rounds: rounds.map((round) => [
+    rounds: settlementRounds.map((round) => [
       round.id,
       round.seqNo,
       round.phase,
@@ -625,11 +635,11 @@ export async function computeProfitPoolRange(
   return {
     room,
     startSeqNo,
-    endSeqNo,
-    roundCount: expectedRoundCount,
-    finishedRoundCount: rounds.filter((round) => round.phase === 'FINISHED').length,
-    cancelledRoundCount: rounds.filter((round) => round.phase === 'CANCELLED').length,
-    rounds: rounds.map((round) => ({
+    endSeqNo: settledEndSeqNo,
+    roundCount: settlementRounds.length,
+    finishedRoundCount: settlementRounds.length,
+    cancelledRoundCount,
+    rounds: settlementRounds.map((round) => ({
       id: round.id,
       seqNo: round.seqNo,
       phase: round.phase,

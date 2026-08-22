@@ -62,6 +62,21 @@ export async function agentRoutes(app: FastifyInstance) {
       getProfitPoolConfig(),
     ]);
     if (!agent || agent.status !== 'ACTIVE') return { agent: null };
+    const latestReport = await prisma.profitPoolAgentSnapshot.findFirst({
+      where: { sourceAgentId: agent.id, pool: { status: { not: 'VOIDED' } } },
+      orderBy: [{ pool: { generatedAt: 'desc' } }, { poolId: 'desc' }],
+      select: {
+        poolId: true,
+        pool: {
+          select: {
+            poolCode: true,
+            generatedAt: true,
+            status: true,
+            room: { select: { title: true, gameCode: true } },
+          },
+        },
+      },
+    });
     return {
       agent: {
         id: agent.id,
@@ -72,6 +87,15 @@ export async function agentRoutes(app: FastifyInstance) {
         maxChildPoints: Math.max(0, agent.sharePoints - config.minReservePoints),
         playerCount: agent._count.players,
         subagentCount: agent._count.children,
+        latestReport: latestReport
+          ? {
+              poolId: latestReport.poolId,
+              poolCode: latestReport.pool.poolCode,
+              generatedAt: latestReport.pool.generatedAt.toISOString(),
+              status: latestReport.pool.status,
+              room: latestReport.pool.room,
+            }
+          : null,
       },
     };
   });

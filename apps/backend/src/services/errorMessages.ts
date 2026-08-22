@@ -108,6 +108,7 @@ const GAME_ERROR_MESSAGES: Record<string, string> = {
   CORRECTION_REASON_REQUIRED: '请填写更正原因（至少 4 字）',
   // 准入
   KYC_REQUIRED: '请先完成实名认证',
+  PAYMENT_PIN_REQUIRED: '请先设置支付密码后再对局',
   NOT_IN_ROOM: '您已不在互动群内，请点右上角刷新重新进入',
   USER_NOT_ACTIVE: '账号状态异常，请联系客服',
   WALLET_NOT_FOUND: '钱包状态异常，请联系客服',
