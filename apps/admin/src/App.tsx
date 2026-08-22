@@ -1,4 +1,4 @@
-import { Fragment, memo, useEffect, useRef, useState, type ReactNode } from 'react';
+import { Fragment, useEffect, useRef, useState, type ReactNode } from 'react';
 import { del, downloadAuthorized, hasToken, logout, patch, post, put, request, rm, setAdminToken } from './api';
 import FinanceCenter from './FinanceCenter';
 import GameConfigEditor from './GameConfigEditor';
@@ -8,6 +8,9 @@ import { GameLeaderboardsAdmin, GameRewardsAdmin } from './GameScopedOperations'
 import VirtualPlayers from './VirtualPlayers';
 import PurgeCustomerBox from './PurgeCustomerBox';
 import StickerManager from './StickerManager';
+import AdminDashboard from './AdminDashboard';
+import AdminDialog from './AdminDialog';
+import NavIcon from './NavIcon';
 
 const DEFAULT_GAME_CODE = 'SUPREME_NIUNIU';
 
@@ -19,7 +22,7 @@ type Page =
 type Row = Record<string, any>;
 
 const pageTitles: Record<Page, [string, string]> = {
-  dashboard: ['运营总览', '实时掌握审核、资金、牌局与风险状态'],
+  dashboard: ['运营总览', '牌桌实况、待办、今日经营与风险资金'],
   gameOps: ['游戏运营中心', '游戏目录 → 互动群运营台（小助手 / 牌局 / TNG）'],
   virtualPlayers: ['虚拟玩家', '互动群假人：能力开关、资金、自动参与与代操作'],
   users: ['用户中心', '点选用户即可调账、改资料、看流水与牌局'],
@@ -61,24 +64,19 @@ const badgeLabels: Record<string, string> = {
   SENT: '已发送', FAILED: '失败', PARTIAL: '部分成功', PROCESSING: '发送中',
   CLAIM_EXPIRED: '认额复核', CLAIMING: '抢包中', WAITING: '等待开局', BANKER_BID: '竞标中',
   BETTING: '下注中', SENDING_PACKET: '待发包', SETTLING: '结算中', BANNED: '已封禁',
-  UNBOUND: '未绑定', BOUND: '已绑定', MISSING: '未认额', PUBLISHED: '已发布', ARCHIVED: '已下架',
+  UNBOUND: '未绑定', UNSUBMITTED: '未提交', BOUND: '已绑定', MISSING: '未认额', PUBLISHED: '已发布', ARCHIVED: '已下架',
+  PAID: '已发放', REVOKED: '已撤回',
   DRAFT: '草稿', ALL: '全部用户', KYC_APPROVED: '已实名', UIDS: '指定 UID',
 };
 
 const groups: Array<[string, Page[]]> = [
   ['总览', ['dashboard']],
   ['会员', ['users', 'kyc']],
-  ['资金', ['tng', 'profitPool', 'finance', 'payments']],
+  ['资金', ['tng', 'profitPool', 'rebates', 'finance', 'payments']],
   ['游戏', ['gameOps']],
-  ['增长', ['rebates', 'messaging', 'support']],
+  ['增长', ['messaging', 'support']],
   ['系统', ['bots', 'admins', 'audit']],
 ];
-
-const icons: Record<Page, string> = {
-  dashboard: '⌁', gameOps: '◈', virtualPlayers: '♟', users: '◎', kyc: '◇', payments: '⇄', rooms: '▦',
-  rounds: '◉', tng: '◫', finance: '¥', profitPool: '◍', rewards: '✦', rebates: '%', leaderboards: '♛',
-  messaging: '✉', support: '◌', config: '⚙', bots: '◆', admins: '♙', audit: '≡',
-};
 
 function storedAdmin(): Admin | null {
   try { return JSON.parse(localStorage.getItem('admin_profile') ?? 'null'); } catch { return null; }
@@ -314,39 +312,52 @@ function Shell({ admin }: { admin: Admin }) {
   return (
     <div className={`admin-shell ${collapsed ? 'collapsed' : ''}`}>
       <aside className="sidebar">
-        <div className="sidebar-brand"><span className="brand-mark"><img src="/logo.png" alt="" /></span><div><strong>至尊牛牛</strong><small>运营后台</small></div></div>
+        <div className="sidebar-brand">
+          <span className="brand-mark"><img src="/logo.png" alt="" /></span>
+          <div>
+            <strong>至尊牛牛</strong>
+            <small>运营后台</small>
+          </div>
+        </div>
         <nav>
           {groups.map(([group, pages]) => {
             const visible = pages.filter((item) => allowed.includes(item));
             if (!visible.length) return null;
-            return <section key={group}><span>{group}</span>{visible.map((item) => (
-              <button
-                key={item}
-                className={current === item ? 'active' : ''}
-                onClick={() => setPage(item)}
-                aria-label={
-                  item === 'kyc' && identityPendingTotal > 0
-                    ? `资料审核，${identityPendingTotal} 条待审`
-                    : item === 'support' && supportUnreadTotal > 0
-                      ? `客服会话，${supportUnreadTotal} 条未读`
-                      : undefined
-                }
-              >
-                <i>{icons[item]}</i>
-                <em>{pageTitles[item][0]}</em>
-                {item === 'kyc' && identityPendingTotal > 0 ? (
-                  <b className="nav-unread">{formatNavBadge(identityPendingTotal)}</b>
-                ) : item === 'support' && supportUnreadTotal > 0 ? (
-                  <b className="nav-unread">{formatNavBadge(supportUnreadTotal)}</b>
-                ) : null}
-              </button>
-            ))}</section>;
+            return (
+              <section key={group}>
+                <span>{group}</span>
+                {visible.map((item) => (
+                  <button
+                    key={item}
+                    type="button"
+                    className={current === item ? 'active' : ''}
+                    aria-current={current === item ? 'page' : undefined}
+                    onClick={() => setPage(item)}
+                    aria-label={
+                      item === 'kyc' && identityPendingTotal > 0
+                        ? `资料审核，${identityPendingTotal} 条待审`
+                        : item === 'support' && supportUnreadTotal > 0
+                          ? `客服会话，${supportUnreadTotal} 条未读`
+                          : undefined
+                    }
+                  >
+                    <i><NavIcon name={item} /></i>
+                    <em>{pageTitles[item][0]}</em>
+                    {item === 'kyc' && identityPendingTotal > 0 ? (
+                      <b className="nav-unread">{formatNavBadge(identityPendingTotal)}</b>
+                    ) : item === 'support' && supportUnreadTotal > 0 ? (
+                      <b className="nav-unread">{formatNavBadge(supportUnreadTotal)}</b>
+                    ) : null}
+                  </button>
+                ))}
+              </section>
+            );
           })}
         </nav>
         <div className="sidebar-user">
           <div>{admin.username[0]?.toUpperCase() ?? '管'}</div>
           <span><strong>{admin.username}</strong><small>{roleLabels[admin.role] ?? admin.role}</small></span>
-          <button type="button" title="退出登录" aria-label="退出登录" onClick={logout}>↪</button>
+          <button type="button" title="退出登录" aria-label="退出登录" onClick={logout}><NavIcon name="logout" /></button>
         </div>
       </aside>
       <main className="workspace">
@@ -356,7 +367,7 @@ function Shell({ admin }: { admin: Admin }) {
           <div className="top-actions"><span className="system-live"><i /> 系统在线</span><time>{new Date().toLocaleDateString('zh-MY')}</time></div>
         </header>
         <div className="content">
-          {current === 'dashboard' && <Dashboard allowed={allowed} onNavigate={go} onOpenFinance={openFinance} />}
+          {current === 'dashboard' && <AdminDashboard allowed={allowed} onNavigate={go} onOpenFinance={openFinance} />}
           {current === 'gameOps' && <GameOperationsCenter admin={admin} />}
           {current === 'virtualPlayers' && (
             <VirtualPlayers
@@ -371,7 +382,7 @@ function Shell({ admin }: { admin: Admin }) {
               onFocusConsumed={() => setUserFocus(null)}
             />
           )}
-          {current === 'kyc' && <IdentityReviewHub />}
+          {current === 'kyc' && <IdentityReviewHub onOpenUser={openUserCenter} />}
           {current === 'payments' && <PaymentGateway />}
           {current === 'rooms' && <Rooms />}
           {current === 'rounds' && <Rounds canReconcile={admin.role === 'SUPER' || admin.role === 'FINANCE'} />}
@@ -437,7 +448,7 @@ function Shell({ admin }: { admin: Admin }) {
 }
 
 function Stat({ label, value, hint, tone = 'gold' }: { label: string; value: string | number; hint: string; tone?: string }) {
-  return <article className={`stat-card ${tone}`}><div><span>{label}</span><strong>{value}</strong></div><i>{icons.dashboard}</i><p>{hint}</p></article>;
+  return <article className={`stat-card ${tone}`}><div><span>{label}</span><strong>{value}</strong></div><i><NavIcon name="dashboard" /></i><p>{hint}</p></article>;
 }
 function Badge({ value }: { value: string }) {
   return <span className={`badge ${value.toLowerCase()}`}>{badgeLabels[value] ?? value}</span>;
@@ -503,338 +514,6 @@ function toCents(value: string) {
   return String(negative ? -cents : cents);
 }
 
-function DashMetric({
-  label,
-  value,
-  hint,
-  tone = 'gold',
-  level = 0,
-  alert = false,
-  onClick,
-}: {
-  label: string;
-  value: string | number;
-  hint: string;
-  tone?: string;
-  level?: number;
-  alert?: boolean;
-  onClick?: () => void;
-}) {
-  const clickable = typeof onClick === 'function';
-  return (
-    <button
-      type="button"
-      className={`dash-metric ${tone}${alert ? ' alert' : ''}${clickable ? ' clickable' : ''}`}
-      onClick={onClick}
-      disabled={!clickable}
-    >
-      <div className="dash-metric-top">
-        <span>{label}</span>
-        {clickable && <em>查看 ›</em>}
-      </div>
-      <strong>{value}</strong>
-      <p>{hint}</p>
-      <div className="dash-meter" aria-hidden>
-        <i style={{ width: `${Math.max(6, Math.min(100, level))}%` }} />
-      </div>
-    </button>
-  );
-}
-
-const Dashboard = memo(function Dashboard({
-  allowed,
-  onNavigate,
-  onOpenFinance,
-}: {
-  allowed: Page[];
-  onNavigate: (page: Page) => void;
-  onOpenFinance: (tab: 'deposits' | 'withdrawals') => void;
-}) {
-  const [data, setData] = useState<Row | null>(null);
-  const dataRef = useRef<Row | null>(null);
-  const [checks, setChecks] = useState<boolean[]>(() => {
-    try {
-      const raw = localStorage.getItem('admin_dashboard_checks');
-      const parsed = raw ? JSON.parse(raw) : null;
-      return Array.isArray(parsed)
-        ? parsed.map(Boolean).slice(0, 4).concat([false, false, false, false]).slice(0, 4)
-        : [false, false, false, false];
-    } catch {
-      return [false, false, false, false];
-    }
-  });
-
-  useEffect(() => {
-    function accept(next: Row) {
-      const encoded = JSON.stringify(next);
-      if (encoded === JSON.stringify(dataRef.current)) return;
-      dataRef.current = next;
-      setData(next);
-    }
-    function load() {
-      if (document.hidden) return;
-      request<Row>('/api/admin/dashboard').then(accept).catch(() => {
-        if (!dataRef.current) setData(null);
-      });
-    }
-    load();
-    const timer = window.setInterval(load, 30_000);
-    const onVisible = () => {
-      if (document.visibilityState === 'visible') load();
-    };
-    document.addEventListener('visibilitychange', onVisible);
-    return () => {
-      window.clearInterval(timer);
-      document.removeEventListener('visibilitychange', onVisible);
-    };
-  }, []);
-
-  useEffect(() => {
-    localStorage.setItem('admin_dashboard_checks', JSON.stringify(checks));
-  }, [checks]);
-
-  function go(page: Page) {
-    if (allowed.includes(page)) onNavigate(page);
-  }
-
-  const pendingKyc = Number(data?.pendingKyc ?? 0);
-  const pendingDeposits = Number(data?.pendingDeposits ?? 0);
-  const pendingWithdrawals = Number(data?.pendingWithdrawals ?? 0);
-  const pendingWithdrawAccounts = Number(data?.pendingWithdrawAccounts ?? 0);
-  const activeRounds = Number(data?.activeRounds ?? 0);
-  const todaySettlements = Number(data?.todaySettlements ?? 0);
-  const todayPushFailures = Number(data?.todayPushFailures ?? 0);
-  const reconcileAnomalies = Number(data?.reconcileAnomalies ?? 0);
-  const transitCents = BigInt(data?.packetTransitCents ?? 0);
-  const betsCents = BigInt(data?.todayBetsCents ?? 0);
-  const rakeCents = BigInt(data?.todayRakeCents ?? 0);
-
-  const todoTotal = pendingKyc + pendingWithdrawAccounts + pendingDeposits + pendingWithdrawals + todayPushFailures + reconcileAnomalies + (activeRounds > 0 ? 1 : 0);
-  const maxTodo = Math.max(pendingKyc, pendingWithdrawAccounts, pendingDeposits, pendingWithdrawals, activeRounds, reconcileAnomalies, todayPushFailures, 1);
-  const maxMoney = Number(betsCents > rakeCents ? betsCents : rakeCents || 1n);
-  const checkedCount = checks.filter(Boolean).length;
-
-  const checklist: Array<{ label: string; page: Page; tip: string }> = [
-    { label: '核对 TNG 发包账号额度', page: 'tng', tip: '红包台账' },
-    {
-      label: '处理待审实名与充提工单',
-      page: pendingKyc ? 'kyc' : pendingDeposits || pendingWithdrawals ? 'finance' : 'kyc',
-      tip: '审核队列',
-    },
-    {
-      label: '检查异常局与在途红包',
-      page: activeRounds || reconcileAnomalies ? 'gameOps' : 'tng',
-      tip: '牌局 / TNG',
-    },
-    { label: '确认推送与奖励配置', page: 'messaging', tip: '消息中心' },
-  ];
-
-  return (
-    <div className="dash-page">
-      <section className="dash-summary panel">
-        <div className="dash-summary-main">
-          <small>今日运营状态</small>
-          <strong>
-            {!data ? '正在同步今日数据…' : todoTotal > 0 ? `${todoTotal} 项待处理` : '暂无紧急待办'}
-          </strong>
-          <p>
-            {!data
-              ? '审核、流水与风险指标加载中'
-              : `已结算 ${todaySettlements} 局 · 流水 RM ${rm(betsCents)} · 抽水 RM ${rm(rakeCents)}`}
-          </p>
-        </div>
-        <div className="dash-summary-side">
-          <button type="button" className="dash-pill" onClick={() => go('gameOps')} disabled={!allowed.includes('gameOps')}>
-            <span>进行中牌局</span>
-            <b>{data ? activeRounds : '—'}</b>
-          </button>
-          <button type="button" className="dash-pill" onClick={() => go('tng')} disabled={!allowed.includes('tng')}>
-            <span>TNG 在途</span>
-            <b>{data ? `RM ${rm(transitCents)}` : '—'}</b>
-          </button>
-          <button type="button" className="dash-pill" onClick={() => go('kyc')} disabled={!allowed.includes('kyc')}>
-            <span>待审实名</span>
-            <b className={pendingKyc ? 'warn' : ''}>{data ? pendingKyc : '—'}</b>
-          </button>
-        </div>
-      </section>
-
-      <section className="dash-section">
-        <div className="dash-section-head">
-          <h2>待办处理</h2>
-          <span>点击卡片进入对应模块</span>
-        </div>
-        <div className="dash-metrics">
-          <DashMetric
-            label="待审实名"
-            value={data ? pendingKyc : '—'}
-            hint={pendingWithdrawAccounts ? `另有 ${pendingWithdrawAccounts} 个提款账户待审` : '实名与提款账户'}
-            tone="gold"
-            alert={pendingKyc + pendingWithdrawAccounts > 0}
-            level={((pendingKyc + pendingWithdrawAccounts) / maxTodo) * 100}
-            onClick={allowed.includes('kyc') ? () => go('kyc') : undefined}
-          />
-          <DashMetric
-            label="待处理充值"
-            value={data ? pendingDeposits : '—'}
-            hint="充值工单"
-            tone="jade"
-            alert={pendingDeposits > 0}
-            level={(pendingDeposits / maxTodo) * 100}
-            onClick={allowed.includes('finance') ? () => onOpenFinance('deposits') : undefined}
-          />
-          <DashMetric
-            label="待处理提现"
-            value={data ? pendingWithdrawals : '—'}
-            hint="提现工单"
-            tone="jade"
-            alert={pendingWithdrawals > 0}
-            level={(pendingWithdrawals / maxTodo) * 100}
-            onClick={allowed.includes('finance') ? () => onOpenFinance('withdrawals') : undefined}
-          />
-          <DashMetric
-            label="推送失败"
-            value={data ? todayPushFailures : '—'}
-            hint="今日私聊触达异常"
-            tone={todayPushFailures ? 'red' : 'gold'}
-            alert={todayPushFailures > 0}
-            level={(todayPushFailures / maxTodo) * 100}
-            onClick={allowed.includes('messaging') ? () => go('messaging') : undefined}
-          />
-        </div>
-      </section>
-
-      <section className="dash-section">
-        <div className="dash-section-head">
-          <h2>今日经营</h2>
-          <span>结算与抽水一眼看清</span>
-        </div>
-        <div className="dash-metrics dash-metrics-4">
-          <DashMetric
-            label="今日已结算"
-            value={data ? todaySettlements : '—'}
-            hint="局数"
-            tone="gold"
-            level={Math.min(100, todaySettlements * 8)}
-            onClick={allowed.includes('gameOps') ? () => go('gameOps') : undefined}
-          />
-          <DashMetric
-            label="今日投注流水"
-            value={data ? `RM ${rm(betsCents)}` : '—'}
-            hint="已结算注单合计"
-            tone="jade"
-            level={maxMoney ? Number((betsCents * 100n) / BigInt(maxMoney)) : 0}
-            onClick={allowed.includes('finance') ? () => go('finance') : allowed.includes('gameOps') ? () => go('gameOps') : undefined}
-          />
-          <DashMetric
-            label="今日抽水"
-            value={data ? `RM ${rm(rakeCents)}` : '—'}
-            hint="平台赢方抽水"
-            tone="gold"
-            level={maxMoney ? Number((rakeCents * 100n) / BigInt(maxMoney)) : 0}
-            onClick={allowed.includes('finance') ? () => go('finance') : allowed.includes('rebates') ? () => go('rebates') : undefined}
-          />
-          <DashMetric
-            label="进行中牌局"
-            value={data ? activeRounds : '—'}
-            hint="需关注的实时牌桌"
-            tone={activeRounds ? 'red' : 'jade'}
-            alert={activeRounds > 0}
-            level={(activeRounds / Math.max(activeRounds, todaySettlements, 1)) * 100}
-            onClick={allowed.includes('gameOps') ? () => go('gameOps') : undefined}
-          />
-        </div>
-      </section>
-
-      <div className="dashboard-grid dash-bottom">
-        <section className="panel dash-risk">
-          <div className="dash-section-head compact">
-            <h2>风险与资金</h2>
-            <span>异常优先处理</span>
-          </div>
-          <div className="dash-risk-list">
-            <button type="button" className="dash-risk-row" onClick={() => go('tng')} disabled={!allowed.includes('tng')}>
-              <div>
-                <strong>TNG 在途金额</strong>
-                <small>等待核销红包</small>
-              </div>
-              <b>RM {data ? rm(transitCents) : '—'}</b>
-            </button>
-            <button
-              type="button"
-              className={`dash-risk-row${reconcileAnomalies ? ' alert' : ''}`}
-              onClick={() => go('tng')}
-              disabled={!allowed.includes('tng')}
-            >
-              <div>
-                <strong>待核销红包</strong>
-                <small>领取与退回未对平</small>
-              </div>
-              <b>{data ? reconcileAnomalies : '—'}</b>
-            </button>
-            <button
-              type="button"
-              className={`dash-risk-row${todayPushFailures ? ' alert' : ''}`}
-              onClick={() => go('messaging')}
-              disabled={!allowed.includes('messaging')}
-            >
-              <div>
-                <strong>推送失败</strong>
-                <small>消息中心查看重试</small>
-              </div>
-              <b>{data ? todayPushFailures : '—'}</b>
-            </button>
-            <button type="button" className="dash-risk-row" onClick={() => go('support')} disabled={!allowed.includes('support')}>
-              <div>
-                <strong>客服会话</strong>
-                <small>设备 / 资金 / 牌局咨询</small>
-              </div>
-              <em>进入 ›</em>
-            </button>
-          </div>
-        </section>
-
-        <section className="panel checklist dash-checklist">
-          <div className="panel-title">
-            <div>
-              <small>每日清单</small>
-              <h2>今日运营检查</h2>
-            </div>
-            <span>{checkedCount}/4</span>
-          </div>
-          {checklist.map((item, index) => (
-            <label key={item.label} className={checks[index] ? 'done' : ''}>
-              <input
-                type="checkbox"
-                checked={checks[index]}
-                onChange={(event) => {
-                  const next = [...checks];
-                  next[index] = event.target.checked;
-                  setChecks(next);
-                }}
-              />
-              <span>
-                {item.label}
-                <small>{item.tip}</small>
-              </span>
-              <button
-                type="button"
-                className="dash-check-go"
-                onClick={(event) => {
-                  event.preventDefault();
-                  go(item.page);
-                }}
-                disabled={!allowed.includes(item.page)}
-              >
-                前往
-              </button>
-            </label>
-          ))}
-        </section>
-      </div>
-    </div>
-  );
-});
 
 type UserDetailTab = 'overview' | 'profile' | 'kyc' | 'withdrawAccounts' | 'ledger' | 'rounds' | 'invitees' | 'orders';
 
@@ -1456,19 +1135,28 @@ function UserDetail({
 
   const AdjustBox = (
     <section className="user-adjust-box">
-      <div>
+      <header>
         <small>高风险操作</small>
         <h3>人工调整可用余额</h3>
-        <p>通过 ADJUST_CLEARING 双分录入账；不会直接改钱包字段。原因至少 4 个字，重复提交由请求号防重。</p>
-      </div>
+        <p>增加或扣减玩家可用余额，会写入账本和审计日志。原因至少 4 个字。</p>
+      </header>
       <div className="user-adjust-form">
-        <select value={adjustment.direction} onChange={(event) => setAdjustment({ ...adjustment, direction: event.target.value })}>
-          <option value="credit">增加余额</option>
-          <option value="debit">扣减余额</option>
-        </select>
-        <input value={adjustment.amount} onChange={(event) => setAdjustment({ ...adjustment, amount: event.target.value })} placeholder="金额 RM，如 222" />
-        <input value={adjustment.reason} onChange={(event) => setAdjustment({ ...adjustment, reason: event.target.value })} placeholder="原因至少 4 字，如：客服补分" />
-        <button className="primary" disabled={busy || !adjustReady} onClick={() => void adjustBalance()}>确认调账</button>
+        <label>
+          方向
+          <select value={adjustment.direction} onChange={(event) => setAdjustment({ ...adjustment, direction: event.target.value })}>
+            <option value="credit">增加余额</option>
+            <option value="debit">扣减余额</option>
+          </select>
+        </label>
+        <label>
+          金额 RM
+          <input value={adjustment.amount} onChange={(event) => setAdjustment({ ...adjustment, amount: event.target.value })} placeholder="例如 222" />
+        </label>
+        <label>
+          原因
+          <input value={adjustment.reason} onChange={(event) => setAdjustment({ ...adjustment, reason: event.target.value })} placeholder="例如：客服补分" />
+        </label>
+        <button className="primary small" disabled={busy || !adjustReady} onClick={() => void adjustBalance()}>确认调账</button>
       </div>
       <p className={`user-adjust-hint ${adjustReady ? 'ok' : 'warn'}`}>{adjustHint}</p>
     </section>
@@ -1979,9 +1667,65 @@ function UserDetail({
   );
 }
 
-function IdentityReviewHub() {
+function shortWhen(value: string | Date) {
+  return new Date(value).toLocaleString('zh-MY', {
+    month: 'numeric',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  });
+}
+
+function IdentityDesk({
+  kicker,
+  title,
+  hint,
+  count,
+  tone = 'gold',
+  children,
+  empty,
+}: {
+  kicker: string;
+  title: string;
+  hint: string;
+  count: number;
+  tone?: 'gold' | 'wait';
+  children: ReactNode;
+  empty?: string;
+}) {
+  return (
+    <section className={`id-desk tone-${tone}`}>
+      <header className="id-desk-head">
+        <div>
+          <small>{kicker}</small>
+          <h2>{title}</h2>
+          <p>{hint}</p>
+        </div>
+        <div className="id-desk-count">
+          <em>{count}</em>
+          <span>人</span>
+        </div>
+      </header>
+      {count > 0 ? children : empty ? <div className="id-empty">{empty}</div> : null}
+    </section>
+  );
+}
+
+function BindChip({ on, label }: { on: boolean; label: string }) {
+  return (
+    <span className={`id-chip ${on ? 'is-on' : 'is-off'}`}>
+      <i />
+      {label}
+      <b>{on ? '已绑' : '未绑'}</b>
+    </span>
+  );
+}
+
+function IdentityReviewHub({ onOpenUser }: { onOpenUser: (userId: string) => void }) {
   const [kycCount, setKycCount] = useState<number | null>(null);
   const [accountCount, setAccountCount] = useState<number | null>(null);
+  const [unsubmittedCount, setUnsubmittedCount] = useState<number | null>(null);
   useEffect(() => {
     let cancelled = false;
     async function load() {
@@ -1989,14 +1733,17 @@ function IdentityReviewHub() {
         const result = await request<{
           pendingKyc: number;
           pendingWithdrawAccounts: number;
+          unsubmittedKyc?: number;
         }>('/api/admin/identity-review/summary');
         if (cancelled) return;
         setKycCount(result.pendingKyc);
         setAccountCount(result.pendingWithdrawAccounts);
+        setUnsubmittedCount(result.unsubmittedKyc ?? 0);
       } catch {
         if (!cancelled) {
           setKycCount(null);
           setAccountCount(null);
+          setUnsubmittedCount(null);
         }
       }
     }
@@ -2012,63 +1759,148 @@ function IdentityReviewHub() {
     <HubTabs
       tabs={[
         { id: 'kyc', label: kycCount ? `实名审核 · ${kycCount}` : '实名审核' },
-        { id: 'accounts', label: accountCount ? `账户审核 · ${accountCount}` : '账户审核' },
+        {
+          id: 'accounts',
+          label: accountCount || unsubmittedCount
+            ? `账户审核 · ${(accountCount ?? 0) + (unsubmittedCount ?? 0)}`
+            : '账户审核',
+        },
       ]}
     >
-      {(tab) => (tab === 'accounts' ? <WithdrawAccountReview /> : <KycReview />)}
+      {(tab) =>
+        tab === 'accounts' ? (
+          <WithdrawAccountReview onOpenUser={onOpenUser} unsubmittedCount={unsubmittedCount} />
+        ) : (
+          <KycReview unsubmittedCount={unsubmittedCount} />
+        )
+      }
     </HubTabs>
   );
 }
 
-function KycReview() {
+function KycReview({ unsubmittedCount }: { unsubmittedCount: number | null }) {
   const [items, setItems] = useState<Row[]>([]);
   const [busy, setBusy] = useState(false);
+  const [rejectId, setRejectId] = useState<string | null>(null);
+  const [reason, setReason] = useState('');
   const load = () => request<{ items: Row[] }>('/api/admin/kyc?status=PENDING').then((result) => setItems(result.items));
   useEffect(() => { void load(); }, []);
-  async function review(id: string, action: 'approve' | 'reject') {
-    let reason: string | undefined;
-    if (action === 'reject') {
-      const input = prompt('驳回原因');
-      if (input === null) return;
-      if (input.trim().length < 2) { alert('请填写驳回原因（至少 2 字）'); return; }
-      reason = input.trim();
-    }
+  async function review(id: string, action: 'approve' | 'reject', rejectReason?: string) {
     setBusy(true);
     try {
-      await post(`/api/admin/kyc/${id}/review`, { action, reason }); await load();
+      await post(`/api/admin/kyc/${id}/review`, { action, reason: rejectReason });
+      setRejectId(null);
+      setReason('');
+      await load();
       notifyIdentityQueueChanged();
     } finally { setBusy(false); }
   }
-  return <section className="panel"><div className="panel-title"><div><small>实名队列</small><h2>待审核 {items.length} 人</h2></div></div>
-    <div className="review-grid">{items.map((item) => <article className="review-card" key={item.id}><header><SupportAvatar url={item.avatarUrl} name={item.nickname} /><div><strong>{item.nickname}</strong><small>UID {item.uid}</small></div><Badge value={item.status} /></header><dl><div><dt>TNG 实名</dt><dd>{item.realName}</dd></div><div><dt>DuitNow</dt><dd>{item.duitnowId}</dd></div>{item.bankName ? <div><dt>历史银行</dt><dd>{item.bankName}</dd></div> : null}{item.bankAccount ? <div><dt>历史账号</dt><dd>{item.bankAccount}</dd></div> : null}</dl><footer><button className="danger" disabled={busy} onClick={() => void review(item.id, 'reject')}>驳回</button><button className="success" disabled={busy} onClick={() => void review(item.id, 'approve')}>审核通过</button></footer></article>)}</div>
-    {items.length === 0 && <Empty text="实名审核队列已清空" />}
-  </section>;
+  return (
+    <>
+      <IdentityDesk
+        kicker="KYC QUEUE"
+        title="实名待审"
+        hint="核对 TNG 姓名与 DuitNow，通过后才能进钱包。驳回原因会同步给玩家。"
+        count={items.length}
+        empty={
+          unsubmittedCount
+            ? `队列已清空。另有 ${unsubmittedCount} 人尚未提交，请到「账户审核」跟进。`
+            : '这会儿没有待审实名。'
+        }
+      >
+        <div className="id-ticket-grid">
+          {items.map((item) => (
+            <article className="id-ticket" key={item.id}>
+              <header>
+                <SupportAvatar url={item.avatarUrl} name={item.nickname} />
+                <div>
+                  <strong>{item.nickname || '未设置昵称'}</strong>
+                  <small>UID {item.uid}</small>
+                </div>
+                <span className="id-tag is-pending">待核对</span>
+              </header>
+              <div className="id-ticket-fields">
+                <div>
+                  <small>TNG 实名</small>
+                  <b>{item.realName}</b>
+                </div>
+                <div>
+                  <small>DuitNow</small>
+                  <code>{item.duitnowId}</code>
+                </div>
+                {item.bankName ? (
+                  <div>
+                    <small>历史银行</small>
+                    <b>{item.bankName}</b>
+                  </div>
+                ) : null}
+                {item.bankAccount ? (
+                  <div>
+                    <small>历史账号</small>
+                    <code>{item.bankAccount}</code>
+                  </div>
+                ) : null}
+              </div>
+              <footer>
+                <time>{item.submittedAt ? shortWhen(item.submittedAt) : ''}</time>
+                <button className="id-btn ghost" disabled={busy} onClick={() => { setRejectId(item.id); setReason(''); }}>驳回</button>
+                <button className="id-btn go" disabled={busy} onClick={() => void review(item.id, 'approve')}>审核通过</button>
+              </footer>
+            </article>
+          ))}
+        </div>
+      </IdentityDesk>
+      <AdminDialog
+        open={Boolean(rejectId)}
+        title="驳回实名资料"
+        copy="原因会展示给玩家，至少写 2 个字。"
+        confirmLabel="确认驳回"
+        danger
+        busy={busy}
+        disabled={reason.trim().length < 2}
+        onClose={() => { setRejectId(null); setReason(''); }}
+        onConfirm={() => { if (rejectId) void review(rejectId, 'reject', reason.trim()); }}
+      >
+        <textarea value={reason} onChange={(e) => setReason(e.target.value)} placeholder="例如：姓名与 TNG 不一致" />
+      </AdminDialog>
+    </>
+  );
 }
 
-function WithdrawAccountReview() {
+function WithdrawAccountReview({
+  onOpenUser,
+  unsubmittedCount,
+}: {
+  onOpenUser: (userId: string) => void;
+  unsubmittedCount: number | null;
+}) {
   const [items, setItems] = useState<Row[]>([]);
+  const [unsubmitted, setUnsubmitted] = useState<Row[]>([]);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  const [rejectId, setRejectId] = useState<string | null>(null);
+  const [reason, setReason] = useState('');
   const load = () =>
-    request<{ items: Row[] }>('/api/admin/withdraw-accounts?status=PENDING')
-      .then((result) => setItems(result.items))
+    Promise.all([
+      request<{ items: Row[] }>('/api/admin/withdraw-accounts?status=PENDING'),
+      request<{ items: Row[] }>('/api/admin/kyc/unsubmitted'),
+    ])
+      .then(([accounts, waiting]) => {
+        setItems(accounts.items);
+        setUnsubmitted(waiting.items);
+      })
       .catch((e) => setError((e as Error).message));
   useEffect(() => {
     void load();
   }, []);
 
-  async function review(id: string, action: 'approve' | 'reject') {
-    let reason: string | undefined;
-    if (action === 'reject') {
-      const input = prompt('驳回原因');
-      if (input === null) return;
-      if (input.trim().length < 2) { alert('请填写驳回原因（至少 2 字）'); return; }
-      reason = input.trim();
-    }
+  async function review(id: string, action: 'approve' | 'reject', rejectReason?: string) {
     setBusy(true);
     try {
       setError('');
-      await post(`/api/admin/withdraw-accounts/${id}/review`, { action, reason });
+      await post(`/api/admin/withdraw-accounts/${id}/review`, { action, reason: rejectReason });
+      setRejectId(null);
+      setReason('');
       await load();
       notifyIdentityQueueChanged();
     } catch (e) {
@@ -2079,57 +1911,103 @@ function WithdrawAccountReview() {
   }
 
   return (
-    <section className="panel">
+    <div className="id-stack">
       <ErrorBox error={error} />
-      <div className="panel-title">
-        <div>
-          <small>绑定审核</small>
-          <h2>待审核 {items.length} 个账户</h2>
-        </div>
-      </div>
-      <div className="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>用户</th>
-              <th>类型</th>
-              <th>机构</th>
-              <th>账号 / 户名</th>
-              <th>提交时间</th>
-              <th>操作</th>
-            </tr>
-          </thead>
-          <tbody>
-            {items.map((item) => (
-              <tr key={item.id}>
-                <td>
+      <IdentityDesk
+        kicker="PAYOUT BOOK"
+        title="提现账户待审"
+        hint="核对户名与账号后再通过。驳回原因会给到玩家。"
+        count={items.length}
+        empty="没有待审的提现账户。"
+      >
+        <div className="id-ticket-grid">
+          {items.map((item) => (
+            <article className="id-ticket" key={item.id}>
+              <header>
+                <SupportAvatar url={item.user?.avatarUrl} name={item.user?.nickname} />
+                <div>
                   <strong>{item.user?.nickname ?? '—'}</strong>
                   <small>UID {item.user?.uid}</small>
-                </td>
-                <td>{item.type === 'BANK' ? '银行' : '电子钱包'}</td>
-                <td>
-                  <strong>{item.institution}</strong>
-                </td>
-                <td>
-                  <strong>{item.accountNo}</strong>
-                  <small>{item.accountName}</small>
-                </td>
-                <td>{new Date(item.createdAt).toLocaleString('zh-MY')}</td>
-                <td className="actions">
-                  <button className="danger" type="button" disabled={busy} onClick={() => void review(item.id, 'reject')}>
-                    驳回
-                  </button>
-                  <button className="success" type="button" disabled={busy} onClick={() => void review(item.id, 'approve')}>
-                    审核通过
-                  </button>
-                </td>
-              </tr>
+                </div>
+                <span className="id-tag is-pending">待核对</span>
+              </header>
+              <div className="id-ticket-fields">
+                <div>
+                  <small>类型</small>
+                  <b>{item.type === 'BANK' ? '银行' : '电子钱包'}</b>
+                </div>
+                <div>
+                  <small>机构</small>
+                  <b>{item.institution}</b>
+                </div>
+                <div>
+                  <small>户名</small>
+                  <b>{item.accountName}</b>
+                </div>
+                <div>
+                  <small>账号</small>
+                  <code>{item.accountNo}</code>
+                </div>
+              </div>
+              <footer>
+                <time>{shortWhen(item.createdAt)}</time>
+                <button className="id-btn ghost" type="button" disabled={busy} onClick={() => { setRejectId(item.id); setReason(''); }}>驳回</button>
+                <button className="id-btn go" type="button" disabled={busy} onClick={() => void review(item.id, 'approve')}>审核通过</button>
+              </footer>
+            </article>
+          ))}
+        </div>
+      </IdentityDesk>
+      <IdentityDesk
+        kicker="WAITLIST"
+        title="未交实名"
+        hint="还没交 TNG 姓名和 DuitNow，进不了房、也不能充提。点开资料到用户中心跟进。"
+        count={unsubmitted.length || unsubmittedCount || 0}
+        tone="wait"
+        empty="没有尚未提交实名的玩家。"
+      >
+        {unsubmitted.length > 0 && (
+          <div className="id-roster" role="list">
+            <div className="id-roster-head" aria-hidden="true">
+              <span>#</span>
+              <span>玩家</span>
+              <span>绑定</span>
+              <span>注册</span>
+              <span />
+            </div>
+            {unsubmitted.map((item, index) => (
+              <article className="id-roster-row" key={item.id} role="listitem">
+                <b className="id-roster-no">{String(index + 1).padStart(2, '0')}</b>
+                <SupportAvatar url={item.avatarUrl} name={item.nickname} />
+                <div className="id-roster-who">
+                  <strong>{item.nickname || '未设置昵称'}</strong>
+                  <small>UID {item.uid}</small>
+                </div>
+                <div className="id-roster-meta">
+                  <BindChip on={item.inviterBound} label="邀请" />
+                  <BindChip on={item.deviceBound} label="设备" />
+                </div>
+                <time>{shortWhen(item.createdAt)}</time>
+                <button className="id-btn ghost" type="button" onClick={() => onOpenUser(item.id)}>查看资料</button>
+              </article>
             ))}
-          </tbody>
-        </table>
-        {items.length === 0 && <Empty text="暂无待审核的提现账户" />}
-      </div>
-    </section>
+          </div>
+        )}
+      </IdentityDesk>
+      <AdminDialog
+        open={Boolean(rejectId)}
+        title="驳回提款账户"
+        copy="原因会展示给玩家，至少写 2 个字。"
+        confirmLabel="确认驳回"
+        danger
+        busy={busy}
+        disabled={reason.trim().length < 2}
+        onClose={() => { setRejectId(null); setReason(''); }}
+        onConfirm={() => { if (rejectId) void review(rejectId, 'reject', reason.trim()); }}
+      >
+        <textarea value={reason} onChange={(e) => setReason(e.target.value)} placeholder="例如：户名与实名不符" />
+      </AdminDialog>
+    </div>
   );
 }
 
@@ -3306,7 +3184,7 @@ function TngSchedulerPanel() {
               API 凭据 {config.ready ? <Badge value="ACTIVE" /> : <Badge value="DISABLED" />}
             </h2>
           </div>
-          <div style={{ display: 'flex', gap: 8 }}>
+          <div className="rebate-order-actions">
             <button className="small" type="button" disabled={busy} onClick={() => void test()}>
               测试连通
             </button>
@@ -3315,8 +3193,8 @@ function TngSchedulerPanel() {
             </button>
           </div>
         </div>
-        <p className="muted" style={{ marginTop: 0 }}>
-          启用后，系统会在投封盘发包时自动向调度器提交金额、个数和随机红包 ID，再按红包 ID 轮询链接与领取明细。
+        <p className="desk-copy">
+          启用后，投封盘发包时会自动向调度器提交金额、个数和红包 ID，再按红包 ID 轮询链接与领取明细。
         </p>
         <div className="gateway-form">
           <label>
@@ -3371,12 +3249,169 @@ function TngSchedulerPanel() {
 }
 
 function Tng({ canReconcile }: { canReconcile: boolean }) {
-  const [accounts,setAccounts]=useState<Row[]>([]);const [packets,setPackets]=useState<Row[]>([]);const [form,setForm]=useState({label:'',accountName:'',maskedId:'',monthlyLimitCents:''});
-  const load=()=>Promise.all([request<{items:Row[]}>('/api/admin/tng/accounts'),request<{items:Row[]}>('/api/admin/tng/reconciliation')]).then(([a,p])=>{setAccounts(a.items);setPackets(p.items);});
-  useEffect(()=>{void load();},[]);
-  async function add(){await post('/api/admin/tng/accounts',{...form,monthlyLimitCents:form.monthlyLimitCents?toCents(form.monthlyLimitCents):undefined});setForm({label:'',accountName:'',maskedId:'',monthlyLimitCents:''});await load();}
-  async function reconcileCancelled(packet:Row){const claimed=prompt('实际已领取累计金额（RM）',rm(packet.reconciledCents??0));const returned=prompt('TNG 实际退回累计金额（RM）',rm(packet.returnedCents??0));if(claimed===null||returned===null)return;await post(`/api/admin/packets/${packet.id}/reconcile-cancelled`,{claimedCents:toCents(claimed),returnedCents:toCents(returned)});await load();}
-  return <><TngSchedulerPanel /><section className="panel inline-form"><input placeholder="账号标签" value={form.label} onChange={e=>setForm({...form,label:e.target.value})}/><input placeholder="TNG 户名" value={form.accountName} onChange={e=>setForm({...form,accountName:e.target.value})}/><input placeholder="账号尾号" value={form.maskedId} onChange={e=>setForm({...form,maskedId:e.target.value})}/><input placeholder="月限额 RM" value={form.monthlyLimitCents} onChange={e=>setForm({...form,monthlyLimitCents:e.target.value})}/><button className="primary small" onClick={()=>void add()}>添加发包账号</button></section><section className="panel"><div className="account-chips">{accounts.map(a=><div key={a.id}><span><i/> {a.label}</span><strong>{a.accountName}</strong><small>{a.maskedId||'未填尾号'} · 月限额 {a.monthlyLimitCents?`RM ${rm(a.monthlyLimitCents)}`:'未设置'}</small><footer><Badge value={a.status}/><button onClick={async()=>{await patch(`/api/admin/tng/accounts/${a.id}`,{status:a.status==='ACTIVE'?'DISABLED':'ACTIVE'});await load();}}>{a.status==='ACTIVE'?'停用':'启用'}</button></footer></div>)}</div></section><section className="panel"><div className="panel-title"><div><small>红包台账</small><h2>红包对账</h2></div></div><div className="table-wrap"><table><thead><tr><th>局号</th><th>房间</th><th>总额</th><th>已领取</th><th>已退回</th><th>领取人数</th><th>状态</th><th>操作</th></tr></thead><tbody>{packets.map(p=><tr key={p.id}><td>#{p.round.seqNo}</td><td>{p.round.room.title}</td><td>RM {rm(p.totalCents)}</td><td>RM {rm(p.reconciledCents)}</td><td>RM {rm(p.returnedCents??0)}</td><td>{p.claims.length}/{p.participantCount}</td><td><Badge value={p.status}/></td><td>{canReconcile&&p.round.phase==='CANCELLED'&&BigInt(String(p.reconciledCents??0))+BigInt(String(p.returnedCents??0))<BigInt(String(p.totalCents))?<button onClick={()=>void reconcileCancelled(p)}>核销取消包</button>:(p.sentAt?new Date(p.sentAt).toLocaleString('zh-MY'):'—')}</td></tr>)}</tbody></table></div></section></>;
+  const [accounts, setAccounts] = useState<Row[]>([]);
+  const [packets, setPackets] = useState<Row[]>([]);
+  const [form, setForm] = useState({ label: '', accountName: '', maskedId: '', monthlyLimitCents: '' });
+  const [packet, setPacket] = useState<Row | null>(null);
+  const [claimed, setClaimed] = useState('');
+  const [returned, setReturned] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const load = () =>
+    Promise.all([
+      request<{ items: Row[] }>('/api/admin/tng/accounts'),
+      request<{ items: Row[] }>('/api/admin/tng/reconciliation'),
+    ]).then(([a, p]) => {
+      setAccounts(a.items);
+      setPackets(p.items);
+    });
+  useEffect(() => { void load(); }, []);
+  async function add() {
+    if (!form.label || !form.accountName) return;
+    setBusy(true);
+    setError('');
+    try {
+      await post('/api/admin/tng/accounts', {
+        ...form,
+        monthlyLimitCents: form.monthlyLimitCents ? toCents(form.monthlyLimitCents) : undefined,
+      });
+      setForm({ label: '', accountName: '', maskedId: '', monthlyLimitCents: '' });
+      await load();
+    } catch (cause) {
+      setError((cause as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+  function openReconcile(row: Row) {
+    setPacket(row);
+    setClaimed(rm(row.reconciledCents ?? 0));
+    setReturned(rm(row.returnedCents ?? 0));
+  }
+  async function reconcileCancelled() {
+    if (!packet) return;
+    setBusy(true);
+    setError('');
+    try {
+      await post(`/api/admin/packets/${packet.id}/reconcile-cancelled`, {
+        claimedCents: toCents(claimed),
+        returnedCents: toCents(returned),
+      });
+      setPacket(null);
+      await load();
+    } catch (cause) {
+      setError((cause as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <>
+      <TngSchedulerPanel />
+      <ErrorBox error={error} />
+      <section className="panel">
+        <div className="panel-title">
+          <div>
+            <small>发包账号</small>
+            <h2>TNG 出款户</h2>
+          </div>
+        </div>
+        <p className="desk-copy">这里只登记实际用来发红包的 TNG 账号，方便对账和看月限额。</p>
+        <div className="desk-form">
+          <label><span>账号标签</span><input value={form.label} onChange={(e) => setForm({ ...form, label: e.target.value })} placeholder="例如 主号 A" /></label>
+          <label><span>TNG 户名</span><input value={form.accountName} onChange={(e) => setForm({ ...form, accountName: e.target.value })} placeholder="与 TNG App 一致" /></label>
+          <label><span>账号尾号</span><input value={form.maskedId} onChange={(e) => setForm({ ...form, maskedId: e.target.value })} placeholder="后 4 位即可" /></label>
+          <label><span>月限额 RM</span><input value={form.monthlyLimitCents} onChange={(e) => setForm({ ...form, monthlyLimitCents: e.target.value })} placeholder="可选" /></label>
+          <div className="wide">
+            <button className="primary small" disabled={busy || !form.label || !form.accountName} onClick={() => void add()}>添加发包账号</button>
+          </div>
+        </div>
+        <div className="account-chips">
+          {accounts.map((a) => (
+            <div key={a.id}>
+              <span><i /> {a.label}</span>
+              <strong>{a.accountName}</strong>
+              <small>{a.maskedId || '未填尾号'} · 月限额 {a.monthlyLimitCents ? `RM ${rm(a.monthlyLimitCents)}` : '未设置'}</small>
+              <footer>
+                <Badge value={a.status} />
+                <button onClick={async () => { await patch(`/api/admin/tng/accounts/${a.id}`, { status: a.status === 'ACTIVE' ? 'DISABLED' : 'ACTIVE' }); await load(); }}>
+                  {a.status === 'ACTIVE' ? '停用' : '启用'}
+                </button>
+              </footer>
+            </div>
+          ))}
+        </div>
+        {accounts.length === 0 && <Empty text="还没有发包账号" />}
+      </section>
+      <section className="panel">
+        <div className="panel-title">
+          <div>
+            <small>红包台账</small>
+            <h2>取消包对账</h2>
+          </div>
+        </div>
+        <p className="desk-copy">按 TNG 实际领取和退回金额核销在途账。已领 + 已退 应等于红包总额。</p>
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>局号</th>
+                <th>房间</th>
+                <th>总额</th>
+                <th>已领取</th>
+                <th>已退回</th>
+                <th>领取人数</th>
+                <th>状态</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              {packets.map((p) => {
+                const needReconcile =
+                  canReconcile
+                  && p.round.phase === 'CANCELLED'
+                  && BigInt(String(p.reconciledCents ?? 0)) + BigInt(String(p.returnedCents ?? 0)) < BigInt(String(p.totalCents));
+                return (
+                  <tr key={p.id}>
+                    <td>#{p.round.seqNo}</td>
+                    <td>{p.round.room.title}</td>
+                    <td>RM {rm(p.totalCents)}</td>
+                    <td>RM {rm(p.reconciledCents)}</td>
+                    <td>RM {rm(p.returnedCents ?? 0)}</td>
+                    <td>{p.claims.length}/{p.participantCount}</td>
+                    <td><Badge value={p.status} /></td>
+                    <td>
+                      {needReconcile ? (
+                        <button onClick={() => openReconcile(p)}>核销取消包</button>
+                      ) : (
+                        p.sentAt ? new Date(p.sentAt).toLocaleString('zh-MY') : '—'
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          {packets.length === 0 && <Empty text="暂无待对账红包" />}
+        </div>
+      </section>
+      <AdminDialog
+        open={Boolean(packet)}
+        title={packet ? `核销第 ${packet.round.seqNo} 局红包` : '核销取消包'}
+        copy={packet ? `总额 RM ${rm(packet.totalCents)}，按 TNG 明细分别填已领和退回。` : undefined}
+        confirmLabel="确认核销"
+        busy={busy}
+        disabled={!claimed.trim() || !returned.trim()}
+        onClose={() => setPacket(null)}
+        onConfirm={() => void reconcileCancelled()}
+      >
+        <div className="desk-form single">
+          <label><span>实际已领取 RM</span><input value={claimed} onChange={(e) => setClaimed(e.target.value)} /></label>
+          <label><span>实际已退回 RM</span><input value={returned} onChange={(e) => setReturned(e.target.value)} /></label>
+        </div>
+      </AdminDialog>
+    </>
+  );
 }
 
 function RewardsAdmin({ canManageMoney }: { canManageMoney: boolean }) {
@@ -3393,26 +3428,331 @@ function RewardsAdmin({ canManageMoney }: { canManageMoney: boolean }) {
   );
 }
 
+function malaysiaYesterday(today: string) {
+  const [year, month, day] = today.split('-').map(Number);
+  const utc = new Date(Date.UTC(year ?? 1970, (month ?? 1) - 1, day ?? 1));
+  utc.setUTCDate(utc.getUTCDate() - 1);
+  return utc.toISOString().slice(0, 10);
+}
+
+function malaysiaNowParts() {
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat('en-GB', {
+      timeZone: 'Asia/Kuala_Lumpur',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hourCycle: 'h23',
+    })
+      .formatToParts(new Date())
+      .map((part) => [part.type, part.value]),
+  );
+  return {
+    date: `${parts.year}-${parts.month}-${parts.day}`,
+    time: `${parts.hour}:${parts.minute}`,
+  };
+}
+
+type RebateOrder = {
+  date: string;
+  createdCount?: number;
+  paidCount: number;
+  revokedCount: number;
+  totalCommissionCents: string;
+  funding?: { from: string; to: string };
+  items: Row[];
+};
+
+function rebateRatePct(rate: number | string | undefined) {
+  const value = Number(rate ?? 0);
+  return `${(value * 100).toFixed(2)}%`;
+}
+
+function rebateLayers(item: Row) {
+  if (Array.isArray(item.breakdown) && item.breakdown.length > 0) return item.breakdown as Row[];
+  const rates = item.rates ?? item.ratesSnapshot ?? {};
+  return [
+    { key: 'self', label: '自身有效流水', turnoverCents: item.selfCents, rate: rates.selfRate, commissionCents: 0 },
+    { key: 'l1', label: '直属有效流水', turnoverCents: item.l1Cents, rate: rates.l1Rate, commissionCents: 0 },
+    { key: 'l2', label: '二级有效流水', turnoverCents: item.l2Cents, rate: rates.l2Rate, commissionCents: 0 },
+  ];
+}
+
+function RebateSourceDetail({ item }: { item: Row }) {
+  const layers = rebateLayers(item);
+  const contributors = (item.contributors ?? []) as Row[];
+  return (
+    <div className="rebate-detail">
+      <div className="rebate-formula">
+        {layers.map((layer) => {
+          const people = contributors.filter((row) =>
+            layer.key === 'l1' ? row.level === 1 : layer.key === 'l2' ? row.level === 2 : false,
+          );
+          return (
+            <div key={layer.key} className="rebate-formula-col">
+              <small>{layer.label} · {rebateRatePct(layer.rate)}</small>
+              <strong>RM {rm(layer.commissionCents ?? 0)}</strong>
+              <span>流水 RM {rm(layer.turnoverCents ?? 0)}</span>
+              {people.map((person) => (
+                <em key={`${layer.key}-${person.userId ?? person.nickname}`}>
+                  {person.nickname}
+                  {person.uid ? ` · ${person.uid}` : ''}
+                  {' '}RM {rm(person.turnoverCents)}
+                </em>
+              ))}
+              {layer.key !== 'self' && people.length === 0 && BigInt(layer.turnoverCents ?? 0) > 0n ? (
+                <em>下线已无法对应</em>
+              ) : null}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function applyRebateOrder(order: RebateOrder, setItems: (items: Row[]) => void) {
+  setItems(order.items);
+  return order;
+}
+
 function Rebates() {
-  const today=new Date().toLocaleDateString('sv-SE',{timeZone:'Asia/Kuala_Lumpur'});const [date,setDate]=useState(today);const [items,setItems]=useState<Row[]>([]);
-  const load=()=>request<{items:Row[]}>(`/api/admin/rebates?date=${date}`).then(r=>setItems(r.items));
-  useEffect(()=>{void load();},[date]);
-  const sum=(key:string)=>items.reduce((total,item)=>total+BigInt(item[key]??0),0n);
-  const summary: Array<{label:string; value:string; tone?:string}> = [
-    { label: '结算人数', value: `${items.length} 人` },
+  const now = malaysiaNowParts();
+  const today = now.date;
+  const [date, setDate] = useState(() => malaysiaYesterday(today));
+  const [time, setTime] = useState('23:59');
+  const [items, setItems] = useState<Row[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+  const [orderOpen, setOrderOpen] = useState(false);
+  const [openDetailId, setOpenDetailId] = useState<string | null>(null);
+  const periodOpen = date >= today;
+  const paidItems = items.filter((item) => item.status === 'PAID');
+  const load = () =>
+    request<RebateOrder>(`/api/admin/rebates?date=${date}`).then((order) => applyRebateOrder(order, setItems));
+  useEffect(() => {
+    void load();
+    setOrderOpen(false);
+    setOpenDetailId(null);
+  }, [date]);
+  const sum = (key: string) => paidItems.reduce((total, item) => total + BigInt(item[key] ?? 0), 0n);
+  const summary: Array<{ label: string; value: string; tone?: string }> = [
+    { label: '结算人数', value: `${paidItems.length} 人` },
     { label: '自身流水合计', value: `RM ${rm(sum('selfCents'))}` },
     { label: '直属流水合计', value: `RM ${rm(sum('l1Cents'))}` },
     { label: '二级流水合计', value: `RM ${rm(sum('l2Cents'))}` },
     { label: '佣金支出合计', value: `RM ${rm(sum('commissionCents'))}`, tone: 'gold' },
   ];
-  return <>
-    <div className="toolbar standalone"><div className="toolbar-hint"><small>业务日（马来西亚时区）</small><span>发给玩家/邀请人的推广佣金：自身 0.7% · 直属 0.5% · 二级 0.3%（可配置）</span></div><input type="date" value={date} onChange={e=>setDate(e.target.value)}/><button className="primary small" onClick={async()=>{await post('/api/admin/rebates/settle',{settlementDate:date});await load();}}>执行日结</button></div>
-    <div className="pp-metrics rebate-metrics">{summary.map(card=>
-      <article key={card.label} className={`pp-card tone-${card.tone??'plain'}`}>
-        <small>{card.label}</small><strong>{card.value}</strong>
-      </article>)}
-    </div>
-    <section className="panel"><div className="panel-title"><div><small>{date} 结算明细</small><h2>返水佣金名单</h2></div><span>佣金从「推广返水支出户」发放到玩家可用余额</span></div><div className="table-wrap"><table><thead><tr><th>玩家</th><th>自身流水</th><th>直属流水</th><th>二级流水</th><th>佣金</th><th>状态</th></tr></thead><tbody>{items.map(i=><tr key={i.id}><td>{i.user.nickname}<small>UID {i.user.uid}</small></td><td>RM {rm(i.selfCents)}</td><td>RM {rm(i.l1Cents)}</td><td>RM {rm(i.l2Cents)}</td><td className="money">RM {rm(i.commissionCents)}</td><td><Badge value={i.status}/></td></tr>)}</tbody></table>{items.length===0&&<Empty text="该业务日尚无返水结算" />}</div></section></>;
+  async function settle() {
+    if (periodOpen) return;
+    setBusy(true);
+    setError('');
+    setNotice('');
+    try {
+      const result = await post<RebateOrder>('/api/admin/rebates/settle', { settlementDate: date });
+      applyRebateOrder(result, setItems);
+      setOrderOpen(true);
+      if ((result.createdCount ?? 0) > 0) {
+        setNotice(`日结单已生成：${result.paidCount} 人，合计 RM ${rm(result.totalCommissionCents)}`);
+      } else if (result.paidCount > 0) {
+        setNotice('该业务日已经日结过，正在打开日结单；同一人同一天不会重复入账');
+      } else {
+        setNotice('该业务日没有可结算的有效流水');
+        setOrderOpen(false);
+      }
+    } catch (cause) {
+      const code = (cause as { code?: string }).code;
+      setError(
+        code === 'REBATE_PERIOD_NOT_CLOSED'
+          ? '该业务日尚未结束，日结只能跑已经过完的日子（昨天及更早）'
+          : (cause as Error).message || '日结失败',
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function revokeOne(id: string, label: string) {
+    if (!confirm(`确定撤回 ${label} 的返水？将从该玩家可用余额扣回佣金。`)) return;
+    setBusy(true);
+    setError('');
+    try {
+      const result = await post<RebateOrder>(`/api/admin/rebates/${id}/revoke`, {});
+      applyRebateOrder(result, setItems);
+      setNotice(`已撤回 ${label} 的返水`);
+    } catch (cause) {
+      setError((cause as Error).message || '撤回失败');
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function revokeOrder() {
+    if (!confirm(`确定撤回 ${date} 整张日结单？将从 ${paidItems.length} 名玩家可用余额扣回合计 RM ${rm(sum('commissionCents'))}。`)) {
+      return;
+    }
+    setBusy(true);
+    setError('');
+    try {
+      const result = await post<RebateOrder>('/api/admin/rebates/revoke', { settlementDate: date });
+      applyRebateOrder(result, setItems);
+      setNotice(`已撤回 ${date} 日结单`);
+    } catch (cause) {
+      setError((cause as Error).message || '撤回失败');
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <>
+      <div className="toolbar standalone">
+        <div className="toolbar-hint">
+          <small>业务日（马来西亚时区）</small>
+          <span>
+            {periodOpen
+              ? '当天还在累计流水，可先选时刻查看；日结要等这一天过完才能发佣金'
+              : `按 ${date} 整天结算，所选 ${time} 为马来西亚时间记录`}
+          </span>
+        </div>
+        <div className="rebate-datetime">
+          <input
+            type="date"
+            max={today}
+            value={date}
+            onChange={(e) => {
+              setDate(e.target.value);
+              setError('');
+              setNotice('');
+            }}
+          />
+          <input
+            type="time"
+            step={60}
+            value={time}
+            onChange={(e) => {
+              setTime(e.target.value);
+              setError('');
+              setNotice('');
+            }}
+          />
+        </div>
+        <button className="primary small" disabled={periodOpen || busy} onClick={() => void settle()}>
+          {busy ? '处理中…' : '执行日结'}
+        </button>
+      </div>
+      <ErrorBox error={error} />
+      {notice ? <div className="success-box">{notice}</div> : null}
+      <div className="pp-metrics rebate-metrics">
+        {summary.map((card) => (
+          <article key={card.label} className={`pp-card tone-${card.tone ?? 'plain'}`}>
+            <small>{card.label}</small>
+            <strong>{card.value}</strong>
+          </article>
+        ))}
+      </div>
+      {orderOpen && paidItems.length > 0 && (
+        <section className="panel rebate-order">
+          <div className="panel-title">
+            <div>
+              <small>日结单</small>
+              <h2>{date} · RM {rm(sum('commissionCents'))} · {paidItems.length} 人</h2>
+            </div>
+            <div className="rebate-order-actions">
+              <button disabled={busy} onClick={() => void revokeOrder()}>撤回本单</button>
+              <button disabled={busy} onClick={() => setOrderOpen(false)}>收起</button>
+            </div>
+          </div>
+          <p className="rebate-order-copy">
+            推广返水支出户 → 玩家可用余额。自身 / 直属 / 二级流水 × 当时比例 = 佣金。
+          </p>
+          <ol className="rebate-order-list">
+            {paidItems.map((item) => (
+              <li key={item.id} className="rebate-order-item">
+                <div className="rebate-order-head">
+                  <span>
+                    <strong>{item.user.nickname}</strong>
+                    <small>UID {item.user.uid}{item.gameTitle ? ` · ${item.gameTitle}` : ''}</small>
+                  </span>
+                  <b>RM {rm(item.commissionCents)}</b>
+                </div>
+                <RebateSourceDetail item={item} />
+              </li>
+            ))}
+          </ol>
+        </section>
+      )}
+      <section className="panel">
+        <div className="panel-title">
+          <div>
+            <small>{date} {time} 结算明细</small>
+            <h2>返水佣金名单</h2>
+          </div>
+          <span>
+            {paidItems.length > 0 && !orderOpen ? (
+              <button className="primary small" onClick={() => setOrderOpen(true)}>查看日结单</button>
+            ) : (
+              '佣金从「推广返水支出户」发放到玩家可用余额'
+            )}
+          </span>
+        </div>
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>玩家</th>
+                <th>自身流水</th>
+                <th>直属流水</th>
+                <th>二级流水</th>
+                <th>佣金</th>
+                <th>状态</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              {items.map((i) => (
+                <Fragment key={i.id}>
+                  <tr className={i.status === 'REVOKED' ? 'is-muted' : undefined}>
+                    <td>
+                      {i.user.nickname}
+                      <small>UID {i.user.uid}</small>
+                    </td>
+                    <td>RM {rm(i.selfCents)}</td>
+                    <td>RM {rm(i.l1Cents)}</td>
+                    <td>RM {rm(i.l2Cents)}</td>
+                    <td className="money">RM {rm(i.commissionCents)}</td>
+                    <td>
+                      <Badge value={i.status} />
+                    </td>
+                    <td>
+                      <div className="rebate-row-actions">
+                        <button onClick={() => setOpenDetailId(openDetailId === i.id ? null : i.id)}>
+                          {openDetailId === i.id ? '收起' : '来源'}
+                        </button>
+                        {i.status === 'PAID' ? (
+                          <button disabled={busy} onClick={() => void revokeOne(i.id, `${i.user.nickname}（UID ${i.user.uid}）`)}>
+                            撤回
+                          </button>
+                        ) : null}
+                      </div>
+                    </td>
+                  </tr>
+                  {openDetailId === i.id && (
+                    <tr className="rebate-expand">
+                      <td colSpan={7}>
+                        <RebateSourceDetail item={i} />
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
+              ))}
+            </tbody>
+          </table>
+          {items.length === 0 && <Empty text="该业务日尚无返水结算" />}
+        </div>
+      </section>
+    </>
+  );
 }
 
 function LeaderboardsAdmin({ canManageMoney }: { canManageMoney: boolean }) {
@@ -3433,69 +3773,282 @@ function LeaderboardsAdmin({ canManageMoney }: { canManageMoney: boolean }) {
 }
 
 function PushCenter() {
-  const [jobs,setJobs]=useState<Row[]>([]);const [templates,setTemplates]=useState<Row[]>([]);const [rooms,setRooms]=useState<Row[]>([]);
-  const [body,setBody]=useState('');const [audience,setAudience]=useState('all');const [uids,setUids]=useState('');const [roomId,setRoomId]=useState('');const [templateId,setTemplateId]=useState('');const [scheduledAt,setScheduledAt]=useState('');
-  const audienceLabel:Record<string,string>={all:'全部用户',kyc_approved:'已实名',uids:'指定 UID',room:'指定房间'};
-  const load=()=>Promise.all([request<{items:Row[]}>('/api/admin/push/jobs'),request<{items:Row[]}>('/api/admin/push/templates'),request<{items:Row[]}>('/api/admin/rooms')]).then(([a,b,c])=>{setJobs(a.items);setTemplates(b.items);setRooms(c.items);});
-  useEffect(()=>{void load();},[]);
-  async function send(){
-    await post('/api/admin/push/jobs',{
-      templateId:templateId||undefined,
-      audience:{type:audience,uids:audience==='uids'?uids.split(/[\s,]+/).filter(Boolean):undefined,roomId:audience==='room'?roomId:undefined},
-      payload:body?{body}:{},
-      scheduledAt:scheduledAt?new Date(scheduledAt).toISOString():undefined,
+  const [jobs, setJobs] = useState<Row[]>([]);
+  const [templates, setTemplates] = useState<Row[]>([]);
+  const [rooms, setRooms] = useState<Row[]>([]);
+  const [body, setBody] = useState('');
+  const [audience, setAudience] = useState('all');
+  const [uids, setUids] = useState('');
+  const [roomId, setRoomId] = useState('');
+  const [templateId, setTemplateId] = useState('');
+  const [scheduledAt, setScheduledAt] = useState('');
+  const [tpl, setTpl] = useState<Row | null | 'new'>(null);
+  const [tplForm, setTplForm] = useState({ code: '', title: '', body: '' });
+  const [busy, setBusy] = useState(false);
+  const audienceLabel: Record<string, string> = { all: '全部用户', kyc_approved: '已实名', uids: '指定 UID', room: '指定房间' };
+  const load = () =>
+    Promise.all([
+      request<{ items: Row[] }>('/api/admin/push/jobs'),
+      request<{ items: Row[] }>('/api/admin/push/templates'),
+      request<{ items: Row[] }>('/api/admin/rooms'),
+    ]).then(([a, b, c]) => {
+      setJobs(a.items);
+      setTemplates(b.items);
+      setRooms(c.items);
     });
-    setBody('');setScheduledAt('');setTimeout(()=>void load(),800);
+  useEffect(() => { void load(); }, []);
+  const selectedTemplate = templates.find((item) => item.id === templateId);
+  const preview = body.trim() || selectedTemplate?.body || '左边写完，这里会看到玩家收到的样子。';
+  async function send() {
+    setBusy(true);
+    try {
+      await post('/api/admin/push/jobs', {
+        templateId: templateId || undefined,
+        audience: {
+          type: audience,
+          uids: audience === 'uids' ? uids.split(/[\s,]+/).filter(Boolean) : undefined,
+          roomId: audience === 'room' ? roomId : undefined,
+        },
+        payload: body ? { body } : {},
+        scheduledAt: scheduledAt ? new Date(scheduledAt).toISOString() : undefined,
+      });
+      setBody('');
+      setScheduledAt('');
+      setTimeout(() => void load(), 800);
+    } finally {
+      setBusy(false);
+    }
   }
-  async function editTemplate(item?:Row){
-    const code=prompt('模板代码（小写字母/数字/下划线）',item?.code??'')??'';
-    const title=prompt('模板名称',item?.title??'')??'';
-    const tplBody=prompt('模板内容（支持 {{变量}}）',item?.body??'')??'';
-    if(!code||!title||!tplBody)return;
-    await post('/api/admin/push/templates',{code,title,body:tplBody});await load();
+  function openTemplate(item?: Row) {
+    setTpl(item ?? 'new');
+    setTplForm({
+      code: item?.code ?? '',
+      title: item?.title ?? '',
+      body: item?.body ?? '',
+    });
   }
-  const canSend=(templateId||body)&&(audience!=='room'||roomId)&&(audience!=='uids'||uids.trim());
-  return <>
-    <section className="panel push-compose"><div><small>新建推送</small><h2>创建运营推送</h2></div>
-      <textarea value={body} onChange={e=>setBody(e.target.value)} placeholder={templateId?'选择模板后可留空，或输入变量替换内容…':'输入将通过 Telegram Bot 发送的内容…'} />
-      <div className="inline-form">
-        <select value={templateId} onChange={e=>setTemplateId(e.target.value)}><option value="">不使用模板</option>{templates.map(t=><option value={t.id} key={t.id}>{t.title}</option>)}</select>
-        <select value={audience} onChange={e=>setAudience(e.target.value)}><option value="all">全部用户</option><option value="kyc_approved">已实名用户</option><option value="uids">指定 UID</option><option value="room">指定房间成员</option></select>
-        {audience==='uids'&&<input value={uids} onChange={e=>setUids(e.target.value)} placeholder="多个 UID 用逗号分隔"/>}
-        {audience==='room'&&<select value={roomId} onChange={e=>setRoomId(e.target.value)}><option value="">选择房间</option>{rooms.map(r=><option value={r.id} key={r.id}>{r.title}</option>)}</select>}
-        <input type="datetime-local" value={scheduledAt} onChange={e=>setScheduledAt(e.target.value)} title="留空立即发送"/>
-        <button className="primary small" disabled={!canSend} onClick={()=>void send()}>{scheduledAt?'定时推送':'立即推送'}</button>
-      </div>
-    </section>
-    <section className="panel"><div className="panel-title"><div><small>模板库</small><h2>推送模板</h2></div><button className="primary small" onClick={()=>void editTemplate()}>＋ 新建模板</button></div>
-      <div className="table-wrap"><table><thead><tr><th>代码</th><th>名称</th><th>内容</th><th>操作</th></tr></thead><tbody>{templates.map(t=><tr key={t.id}><td><code>{t.code}</code></td><td>{t.title}</td><td className="truncate">{t.body}</td><td><button onClick={()=>void editTemplate(t)}>编辑</button></td></tr>)}</tbody></table>{templates.length===0&&<Empty text="暂无模板，业务事件将使用内置文案"/>}</div>
-    </section>
-    <section className="panel"><div className="panel-title"><div><small>任务队列</small><h2>推送任务</h2></div></div>
-      <div className="table-wrap"><table><thead><tr><th>创建时间</th><th>人群</th><th>内容</th><th>定时</th><th>状态</th><th>日志</th><th>操作</th></tr></thead><tbody>{jobs.map(j=><tr key={j.id}><td>{new Date(j.createdAt).toLocaleString('zh-MY')}</td><td>{audienceLabel[j.audience.type]??j.audience.type}</td><td className="truncate">{j.template?.title??j.payload.body}</td><td>{j.scheduledAt?new Date(j.scheduledAt).toLocaleString('zh-MY'):'立即'}</td><td><Badge value={j.status}/></td><td>{j._count.logs}</td><td><button onClick={async()=>{await post(`/api/admin/push/jobs/${j.id}/retry`,{});setTimeout(()=>void load(),600);}}>重试</button></td></tr>)}</tbody></table></div>
-    </section>
-  </>;
+  async function saveTemplate() {
+    if (!tplForm.code || !tplForm.title || !tplForm.body) return;
+    setBusy(true);
+    try {
+      await post('/api/admin/push/templates', tplForm);
+      setTpl(null);
+      await load();
+    } finally {
+      setBusy(false);
+    }
+  }
+  const canSend = (templateId || body) && (audience !== 'room' || roomId) && (audience !== 'uids' || uids.trim());
+  return (
+    <>
+      <section className="panel">
+        <div className="panel-title">
+          <div>
+            <small>新建推送</small>
+            <h2>写一条 Telegram 推送</h2>
+          </div>
+        </div>
+        <div className="desk-compose">
+          <div className="desk-form">
+            <label className="wide">
+              <span>正文</span>
+              <textarea
+                value={body}
+                onChange={(e) => setBody(e.target.value)}
+                placeholder={templateId ? '可留空，直接用模板；也可在这里改写' : '将通过默认 Bot 发给选定人群'}
+              />
+            </label>
+            <label>
+              <span>模板</span>
+              <select value={templateId} onChange={(e) => setTemplateId(e.target.value)}>
+                <option value="">不使用模板</option>
+                {templates.map((t) => <option value={t.id} key={t.id}>{t.title}</option>)}
+              </select>
+            </label>
+            <label>
+              <span>受众</span>
+              <select value={audience} onChange={(e) => setAudience(e.target.value)}>
+                <option value="all">全部用户</option>
+                <option value="kyc_approved">已实名用户</option>
+                <option value="uids">指定 UID</option>
+                <option value="room">指定房间成员</option>
+              </select>
+            </label>
+            {audience === 'uids' && (
+              <label className="wide"><span>UID</span><input value={uids} onChange={(e) => setUids(e.target.value)} placeholder="多个 UID 用逗号或空格分隔" /></label>
+            )}
+            {audience === 'room' && (
+              <label className="wide">
+                <span>房间</span>
+                <select value={roomId} onChange={(e) => setRoomId(e.target.value)}>
+                  <option value="">选择房间</option>
+                  {rooms.map((r) => <option value={r.id} key={r.id}>{r.title}</option>)}
+                </select>
+              </label>
+            )}
+            <label>
+              <span>定时（可空）</span>
+              <input type="datetime-local" value={scheduledAt} onChange={(e) => setScheduledAt(e.target.value)} />
+            </label>
+            <div className="wide">
+              <button className="primary small" disabled={!canSend || busy} onClick={() => void send()}>
+                {busy ? '处理中…' : scheduledAt ? '定时推送' : '立即推送'}
+              </button>
+            </div>
+          </div>
+          <aside className="desk-preview">
+            <small>预览</small>
+            <strong>{selectedTemplate?.title || '运营推送'}</strong>
+            <p>{preview}</p>
+            <em>{audienceLabel[audience]}{scheduledAt ? ' · 定时发送' : ' · 立刻发出'}</em>
+          </aside>
+        </div>
+      </section>
+      <section className="panel">
+        <div className="panel-title">
+          <div>
+            <small>模板库</small>
+            <h2>推送模板</h2>
+          </div>
+          <button className="primary small" onClick={() => openTemplate()}>新建模板</button>
+        </div>
+        <div className="table-wrap">
+          <table>
+            <thead><tr><th>代码</th><th>名称</th><th>内容</th><th>操作</th></tr></thead>
+            <tbody>
+              {templates.map((t) => (
+                <tr key={t.id}>
+                  <td><code>{t.code}</code></td>
+                  <td>{t.title}</td>
+                  <td className="truncate">{t.body}</td>
+                  <td><button onClick={() => openTemplate(t)}>编辑</button></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {templates.length === 0 && <Empty text="暂无模板，业务事件将使用内置文案" />}
+        </div>
+      </section>
+      <section className="panel">
+        <div className="panel-title">
+          <div>
+            <small>任务队列</small>
+            <h2>推送任务</h2>
+          </div>
+        </div>
+        <div className="table-wrap">
+          <table>
+            <thead><tr><th>创建时间</th><th>人群</th><th>内容</th><th>定时</th><th>状态</th><th>日志</th><th>操作</th></tr></thead>
+            <tbody>
+              {jobs.map((j) => (
+                <tr key={j.id}>
+                  <td>{new Date(j.createdAt).toLocaleString('zh-MY')}</td>
+                  <td>{audienceLabel[j.audience.type] ?? j.audience.type}</td>
+                  <td className="truncate">{j.template?.title ?? j.payload.body}</td>
+                  <td>{j.scheduledAt ? new Date(j.scheduledAt).toLocaleString('zh-MY') : '立即'}</td>
+                  <td><Badge value={j.status} /></td>
+                  <td>{j._count.logs}</td>
+                  <td><button onClick={async () => { await post(`/api/admin/push/jobs/${j.id}/retry`, {}); setTimeout(() => void load(), 600); }}>重试</button></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </section>
+      <AdminDialog
+        open={tpl !== null}
+        title={tpl === 'new' || !tpl ? '新建推送模板' : `编辑 ${tpl.title}`}
+        confirmLabel="保存模板"
+        busy={busy}
+        disabled={!tplForm.code.trim() || !tplForm.title.trim() || !tplForm.body.trim()}
+        onClose={() => setTpl(null)}
+        onConfirm={() => void saveTemplate()}
+      >
+        <div className="desk-form single">
+          <label><span>代码</span><input value={tplForm.code} onChange={(e) => setTplForm({ ...tplForm, code: e.target.value })} placeholder="小写字母 / 数字 / 下划线" /></label>
+          <label><span>名称</span><input value={tplForm.title} onChange={(e) => setTplForm({ ...tplForm, title: e.target.value })} placeholder="例如 充值到账" /></label>
+          <label><span>内容</span><textarea value={tplForm.body} onChange={(e) => setTplForm({ ...tplForm, body: e.target.value })} placeholder="支持 {{变量}}" /></label>
+        </div>
+      </AdminDialog>
+    </>
+  );
 }
 
 function Announcements() {
-  const [items,setItems]=useState<Row[]>([]);const [title,setTitle]=useState('');const [body,setBody]=useState('');const [pinOnCreate,setPinOnCreate]=useState(true);
-  const load=()=>request<{items:Row[]}>('/api/admin/announcements').then(r=>setItems(r.items));
-  useEffect(()=>{void load();},[]);
-  async function create(){await post('/api/admin/announcements',{title,body,publishNow:true,pinned:pinOnCreate});setTitle('');setBody('');await load();}
-  return <>
-    <section className="panel" style={{padding:'12px 16px',marginBottom:14}}>
-      <p style={{margin:0,color:'#98988e',fontSize:12,lineHeight:1.55}}>已发布且勾选「置顶」的公告，会作为互动群「置顶小通告」展示（最多 7 条）。可用于认包提示、防诈说明等。</p>
-    </section>
-    <section className="panel inline-form announcement-form">
-      <input value={title} onChange={e=>setTitle(e.target.value)} placeholder="公告标题"/>
-      <input value={body} onChange={e=>setBody(e.target.value)} placeholder="公告正文"/>
-      <label style={{display:'flex',alignItems:'center',gap:6,fontSize:12,whiteSpace:'nowrap'}}>
-        <input type="checkbox" checked={pinOnCreate} onChange={e=>setPinOnCreate(e.target.checked)}/> 发布为互动群置顶
-      </label>
-      <button className="primary small" disabled={!title||!body} onClick={()=>void create()}>发布公告</button>
-    </section>
-    <div className="announcement-admin-grid">{items.map(item=><article className="panel" key={item.id}><header><Badge value={item.status}/><time>{new Date(item.createdAt).toLocaleString('zh-MY')}</time></header><h3>{item.title}</h3><p>{item.body}</p><footer><label><input type="checkbox" checked={item.pinned} onChange={async(e)=>{await patch(`/api/admin/announcements/${item.id}`,{pinned:e.target.checked});await load();}}/> 置顶</label><button onClick={async()=>{await patch(`/api/admin/announcements/${item.id}`,{status:item.status==='PUBLISHED'?'ARCHIVED':'PUBLISHED'});await load();}}>{item.status==='PUBLISHED'?'下架':'发布'}</button></footer></article>)}</div>
-    {items.length===0&&<Empty text="暂无公告，发布后会展示在大厅 Banner" />}
-  </>;
+  const [items, setItems] = useState<Row[]>([]);
+  const [title, setTitle] = useState('');
+  const [body, setBody] = useState('');
+  const [pinOnCreate, setPinOnCreate] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const load = () => request<{ items: Row[] }>('/api/admin/announcements').then((r) => setItems(r.items));
+  useEffect(() => { void load(); }, []);
+  async function create() {
+    setBusy(true);
+    try {
+      await post('/api/admin/announcements', { title, body, publishNow: true, pinned: pinOnCreate });
+      setTitle('');
+      setBody('');
+      await load();
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <>
+      <section className="panel">
+        <div className="panel-title">
+          <div>
+            <small>公告管理</small>
+            <h2>写一条大厅公告</h2>
+          </div>
+        </div>
+        <p className="desk-copy">已发布且置顶的公告会进互动群「置顶小通告」（最多 7 条），适合认包提示、防诈说明。</p>
+        <div className="desk-compose">
+          <div className="desk-form">
+            <label className="wide"><span>标题</span><input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="例如 今晚 9 点维护" /></label>
+            <label className="wide"><span>正文</span><textarea value={body} onChange={(e) => setBody(e.target.value)} placeholder="玩家在大厅和置顶条里看到的内容" /></label>
+            <label className="desk-check wide">
+              <input type="checkbox" checked={pinOnCreate} onChange={(e) => setPinOnCreate(e.target.checked)} />
+              发布为互动群置顶
+            </label>
+            <div className="wide">
+              <button className="primary small" disabled={busy || !title || !body} onClick={() => void create()}>
+                {busy ? '发布中…' : '发布公告'}
+              </button>
+            </div>
+          </div>
+          <aside className="desk-preview">
+            <small>预览</small>
+            <strong>{title || '公告标题'}</strong>
+            <p>{body || '正文会显示在这里。'}</p>
+            <em>{pinOnCreate ? '置顶小通告 + 大厅 Banner' : '只进大厅 Banner'}</em>
+          </aside>
+        </div>
+      </section>
+      <div className="announcement-admin-grid">
+        {items.map((item) => (
+          <article className="panel" key={item.id}>
+            <header>
+              <Badge value={item.status} />
+              <time>{new Date(item.createdAt).toLocaleString('zh-MY')}</time>
+            </header>
+            <h3>{item.title}</h3>
+            <p>{item.body}</p>
+            <footer>
+              <label>
+                <input type="checkbox" checked={item.pinned} onChange={async (e) => { await patch(`/api/admin/announcements/${item.id}`, { pinned: e.target.checked }); await load(); }} />
+                置顶
+              </label>
+              <button onClick={async () => { await patch(`/api/admin/announcements/${item.id}`, { status: item.status === 'PUBLISHED' ? 'ARCHIVED' : 'PUBLISHED' }); await load(); }}>
+                {item.status === 'PUBLISHED' ? '下架' : '发布'}
+              </button>
+            </footer>
+          </article>
+        ))}
+      </div>
+      {items.length === 0 && <Empty text="暂无公告，发布后会展示在大厅 Banner" />}
+    </>
+  );
 }
 
 function SystemNoticesAdmin() {
@@ -3531,31 +4084,52 @@ function SystemNoticesAdmin() {
 
   const audienceLabel = (value: string) => badgeLabels[value] ?? value;
 
+  const audienceText =
+    audience === 'ALL' ? '全部用户' : audience === 'KYC_APPROVED' ? '已实名用户' : '指定 UID';
+
   return (
     <>
-      <section className="panel inline-form announcement-form" style={{ display: 'grid', gap: 10 }}>
-        <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="通知标题" />
-        <textarea value={body} onChange={(e) => setBody(e.target.value)} placeholder="通知正文（支持多行）" rows={4} style={{ resize: 'vertical', minHeight: 88 }} />
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, alignItems: 'center' }}>
-          <label>
-            受众{' '}
-            <select value={audience} onChange={(e) => setAudience(e.target.value as typeof audience)}>
-              <option value="ALL">全部用户</option>
-              <option value="KYC_APPROVED">已实名用户</option>
-              <option value="UIDS">指定 UID</option>
-            </select>
-          </label>
-          <label>
-            <input type="checkbox" checked={pushTelegram} onChange={(e) => setPushTelegram(e.target.checked)} /> 同步 Telegram 私聊
-          </label>
-          <button className="primary small" disabled={busy || !title || !body || (audience === 'UIDS' && !uidsText.trim())} onClick={() => void create()}>
-            {busy ? '发送中…' : '发布通知'}
-          </button>
+      <section className="panel">
+        <div className="panel-title">
+          <div>
+            <small>系统通知</small>
+            <h2>写一条站内通知</h2>
+          </div>
         </div>
-        {audience === 'UIDS' && (
-          <input value={uidsText} onChange={(e) => setUidsText(e.target.value)} placeholder="UID，逗号或空格分隔" />
-        )}
-        {message && <p className="muted">{message}</p>}
+        <p className="desk-copy">会出现在小程序系统通知里。勾选后可同时推 Telegram 私聊。</p>
+        <div className="desk-compose">
+          <div className="desk-form">
+            <label className="wide"><span>标题</span><input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="通知标题" /></label>
+            <label className="wide"><span>正文</span><textarea value={body} onChange={(e) => setBody(e.target.value)} placeholder="支持多行" /></label>
+            <label>
+              <span>受众</span>
+              <select value={audience} onChange={(e) => setAudience(e.target.value as typeof audience)}>
+                <option value="ALL">全部用户</option>
+                <option value="KYC_APPROVED">已实名用户</option>
+                <option value="UIDS">指定 UID</option>
+              </select>
+            </label>
+            {audience === 'UIDS' && (
+              <label><span>UID</span><input value={uidsText} onChange={(e) => setUidsText(e.target.value)} placeholder="逗号或空格分隔" /></label>
+            )}
+            <label className="desk-check wide">
+              <input type="checkbox" checked={pushTelegram} onChange={(e) => setPushTelegram(e.target.checked)} />
+              同步 Telegram 私聊
+            </label>
+            <div className="wide">
+              <button className="primary small" disabled={busy || !title || !body || (audience === 'UIDS' && !uidsText.trim())} onClick={() => void create()}>
+                {busy ? '发送中…' : '发布通知'}
+              </button>
+            </div>
+            {message ? <p className="desk-copy wide">{message}</p> : null}
+          </div>
+          <aside className="desk-preview">
+            <small>预览</small>
+            <strong>{title || '通知标题'}</strong>
+            <p>{body || '正文会显示在这里。'}</p>
+            <em>{audienceText}{pushTelegram ? ' · 同步 Telegram' : ' · 仅站内'}</em>
+          </aside>
+        </div>
       </section>
       <div className="announcement-admin-grid">
         {items.map((item) => (
@@ -3818,23 +4392,274 @@ function ConfigEditor() {
 }
 
 function Bots() {
-  const [items,setItems]=useState<Row[]>([]);const [form,setForm]=useState({name:'',username:'',token:'',isDefault:false});
-  const load=()=>request<{items:Row[]}>('/api/admin/bots').then(r=>setItems(r.items));
-  useEffect(()=>{void load();},[]);
-  async function add(){await post('/api/admin/bots',form);setForm({name:'',username:'',token:'',isDefault:false});await load();}
-  return <><section className="panel inline-form bot-form"><input placeholder="名称" value={form.name} onChange={e=>setForm({...form,name:e.target.value})}/><input placeholder="username（不含 @）" value={form.username} onChange={e=>setForm({...form,username:e.target.value})}/><input placeholder="Bot Token" value={form.token} onChange={e=>setForm({...form,token:e.target.value})}/><label><input type="checkbox" checked={form.isDefault} onChange={e=>setForm({...form,isDefault:e.target.checked})}/> 默认入口</label><button className="primary small" disabled={!form.name||!form.username||!form.token} onClick={()=>void add()}>添加 Bot</button></section><div className="bot-grid">{items.map(bot=><article className="panel" key={bot.id}><header><div className="bot-avatar">◆</div><div><strong>{bot.name}</strong><small>@{bot.username}</small></div><Badge value={bot.status}/></header><dl><div><dt>Token</dt><dd>{bot.tokenMasked}</dd></div><div><dt>默认入口</dt><dd>{bot.isDefault?'是':'否'}</dd></div></dl><footer><button onClick={async()=>{await patch(`/api/admin/bots/${bot.id}`,{status:bot.status==='ACTIVE'?'DISABLED':'ACTIVE'});await load();}}>{bot.status==='ACTIVE'?'停用':'启用'}</button>{!bot.isDefault&&<button className="success" onClick={async()=>{await patch(`/api/admin/bots/${bot.id}`,{isDefault:true});await load();}}>设为默认</button>}</footer></article>)}</div></>;
+  const [items, setItems] = useState<Row[]>([]);
+  const [form, setForm] = useState({ name: '', username: '', token: '', isDefault: false });
+  const [busy, setBusy] = useState(false);
+  const load = () => request<{ items: Row[] }>('/api/admin/bots').then((r) => setItems(r.items));
+  useEffect(() => { void load(); }, []);
+  async function add() {
+    setBusy(true);
+    try {
+      await post('/api/admin/bots', form);
+      setForm({ name: '', username: '', token: '', isDefault: false });
+      await load();
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <>
+      <section className="panel">
+        <div className="panel-title">
+          <div>
+            <small>Bot 管理</small>
+            <h2>添加 Telegram 机器人</h2>
+          </div>
+        </div>
+        <p className="desk-copy">默认入口会用于登录深链、推送和邀请。Token 只在添加时填写，之后只显示掩码。</p>
+        <div className="desk-form">
+          <label><span>名称</span><input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="例如 至尊牛牛" /></label>
+          <label><span>username</span><input value={form.username} onChange={(e) => setForm({ ...form, username: e.target.value })} placeholder="不含 @" /></label>
+          <label className="wide"><span>Bot Token</span><input value={form.token} onChange={(e) => setForm({ ...form, token: e.target.value })} placeholder="从 BotFather 复制" /></label>
+          <label className="desk-check wide">
+            <input type="checkbox" checked={form.isDefault} onChange={(e) => setForm({ ...form, isDefault: e.target.checked })} />
+            设为默认入口
+          </label>
+          <div className="wide">
+            <button className="primary small" disabled={busy || !form.name || !form.username || !form.token} onClick={() => void add()}>
+              添加 Bot
+            </button>
+          </div>
+        </div>
+      </section>
+      <div className="bot-grid">
+        {items.map((bot) => (
+          <article className="panel" key={bot.id}>
+            <header>
+              <div className="bot-avatar">◆</div>
+              <div>
+                <strong>{bot.name}</strong>
+                <small>@{bot.username}</small>
+              </div>
+              <Badge value={bot.status} />
+            </header>
+            <dl>
+              <div><dt>Token</dt><dd>{bot.tokenMasked}</dd></div>
+              <div><dt>默认入口</dt><dd>{bot.isDefault ? '是' : '否'}</dd></div>
+            </dl>
+            <footer>
+              <button onClick={async () => { await patch(`/api/admin/bots/${bot.id}`, { status: bot.status === 'ACTIVE' ? 'DISABLED' : 'ACTIVE' }); await load(); }}>
+                {bot.status === 'ACTIVE' ? '停用' : '启用'}
+              </button>
+              {!bot.isDefault && (
+                <button className="success" onClick={async () => { await patch(`/api/admin/bots/${bot.id}`, { isDefault: true }); await load(); }}>
+                  设为默认
+                </button>
+              )}
+            </footer>
+          </article>
+        ))}
+      </div>
+      {items.length === 0 && <Empty text="还没有 Bot，先添加一个默认入口" />}
+    </>
+  );
 }
 
 function Admins() {
-  const [items,setItems]=useState<Row[]>([]);const [error,setError]=useState('');const [form,setForm]=useState({username:'',password:'',role:'OPERATOR'});
-  const load=()=>request<{items:Row[]}>('/api/admin/admins').then(r=>setItems(r.items));
-  useEffect(()=>{void load();},[]);
-  async function add(){try{setError('');await post('/api/admin/admins',form);setForm({username:'',password:'',role:'OPERATOR'});await load();}catch(e){setError((e as Error).message);}}
-  async function update(id:string,data:Row){try{setError('');await patch(`/api/admin/admins/${id}`,data);await load();}catch(e){setError((e as Error).message);}}
-  return <><section className="panel inline-form"><input placeholder="登录账号" value={form.username} onChange={e=>setForm({...form,username:e.target.value})}/><input type="password" placeholder="初始密码（至少 8 位）" value={form.password} onChange={e=>setForm({...form,password:e.target.value})}/><select value={form.role} onChange={e=>setForm({...form,role:e.target.value})}><option value="OPERATOR">运营</option><option value="REVIEWER">审核</option><option value="FINANCE">财务</option><option value="SUPER">超级管理员</option></select><button className="primary small" disabled={form.username.length<3||form.password.length<8} onClick={()=>void add()}>创建账号</button></section><ErrorBox error={error}/><section className="panel"><div className="table-wrap"><table><thead><tr><th>账号</th><th>角色</th><th>状态</th><th>创建时间</th><th>操作</th></tr></thead><tbody>{items.map(item=><tr key={item.id}><td><strong>{item.username}</strong><small>{item.id.slice(-8)}</small></td><td><select value={item.role} onChange={e=>void update(item.id,{role:e.target.value})}><option value="SUPER">超级管理员</option><option value="OPERATOR">运营</option><option value="REVIEWER">审核</option><option value="FINANCE">财务</option></select></td><td><Badge value={item.status}/></td><td>{new Date(item.createdAt).toLocaleString('zh-MY')}</td><td className="actions"><button onClick={()=>{const password=prompt('输入新密码（至少 8 位）');if(password)void update(item.id,{password});}}>重置密码</button><button className={item.status==='ACTIVE'?'danger':'success'} onClick={()=>void update(item.id,{status:item.status==='ACTIVE'?'DISABLED':'ACTIVE'})}>{item.status==='ACTIVE'?'停用':'启用'}</button></td></tr>)}</tbody></table></div></section></>;
+  const [items, setItems] = useState<Row[]>([]);
+  const [error, setError] = useState('');
+  const [form, setForm] = useState({ username: '', password: '', role: 'OPERATOR' });
+  const [resetId, setResetId] = useState<string | null>(null);
+  const [password, setPassword] = useState('');
+  const load = () => request<{ items: Row[] }>('/api/admin/admins').then((r) => setItems(r.items));
+  useEffect(() => { void load(); }, []);
+  async function add() {
+    try {
+      setError('');
+      await post('/api/admin/admins', form);
+      setForm({ username: '', password: '', role: 'OPERATOR' });
+      await load();
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  }
+  async function update(id: string, data: Row) {
+    try {
+      setError('');
+      await patch(`/api/admin/admins/${id}`, data);
+      setResetId(null);
+      setPassword('');
+      await load();
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  }
+  return (
+    <>
+      <section className="panel">
+        <div className="panel-title">
+          <div>
+            <small>管理员</small>
+            <h2>创建后台账号</h2>
+          </div>
+        </div>
+        <p className="desk-copy">角色决定能进哪些菜单。超级管理员可改角色、停用账号和重置密码。</p>
+        <div className="desk-form">
+          <label><span>登录账号</span><input value={form.username} onChange={(e) => setForm({ ...form, username: e.target.value })} placeholder="至少 3 个字符" /></label>
+          <label><span>初始密码</span><input type="password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} placeholder="至少 8 位" /></label>
+          <label>
+            <span>角色</span>
+            <select value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })}>
+              <option value="OPERATOR">运营</option>
+              <option value="REVIEWER">审核</option>
+              <option value="FINANCE">财务</option>
+              <option value="SUPER">超级管理员</option>
+            </select>
+          </label>
+          <div>
+            <span />
+            <button className="primary small" disabled={form.username.length < 3 || form.password.length < 8} onClick={() => void add()}>创建账号</button>
+          </div>
+        </div>
+      </section>
+      <ErrorBox error={error} />
+      <section className="panel">
+        <div className="panel-title">
+          <div>
+            <small>账号名单</small>
+            <h2>{items.length} 个管理员</h2>
+          </div>
+        </div>
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>账号</th>
+                <th>角色</th>
+                <th>状态</th>
+                <th>创建时间</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              {items.map((item) => (
+                <tr key={item.id}>
+                  <td>
+                    <strong>{item.username}</strong>
+                    <small>{item.id.slice(-8)}</small>
+                  </td>
+                  <td>
+                    <select value={item.role} onChange={(e) => void update(item.id, { role: e.target.value })}>
+                      <option value="SUPER">超级管理员</option>
+                      <option value="OPERATOR">运营</option>
+                      <option value="REVIEWER">审核</option>
+                      <option value="FINANCE">财务</option>
+                    </select>
+                  </td>
+                  <td><Badge value={item.status} /></td>
+                  <td>{new Date(item.createdAt).toLocaleString('zh-MY')}</td>
+                  <td className="actions">
+                    <button onClick={() => { setResetId(item.id); setPassword(''); }}>重置密码</button>
+                    <button className={item.status === 'ACTIVE' ? 'danger' : 'success'} onClick={() => void update(item.id, { status: item.status === 'ACTIVE' ? 'DISABLED' : 'ACTIVE' })}>
+                      {item.status === 'ACTIVE' ? '停用' : '启用'}
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </section>
+      <AdminDialog
+        open={Boolean(resetId)}
+        title="重置登录密码"
+        copy="新密码至少 8 位。对方下次登录需使用新密码。"
+        confirmLabel="确认重置"
+        danger
+        disabled={password.length < 8}
+        onClose={() => { setResetId(null); setPassword(''); }}
+        onConfirm={() => { if (resetId) void update(resetId, { password }); }}
+      >
+        <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="新密码" />
+      </AdminDialog>
+    </>
+  );
+}
+
+const AUDIT_ACTION_LABELS: Record<string, string> = {
+  user_purge: '清理用户',
+  MEMBER_MUTE: '禁言成员',
+  MEMBER_UNMUTE: '解除禁言',
+  game_admin_create: '添加游戏管理员',
+  game_admin_reactivate: '恢复游戏管理员',
+  support_host_bind: '绑定客服小妹',
+  support_host_unbind: '解绑客服小妹',
+  game_budget_fund: '拨付游戏预算',
+  game_budget_reclaim: '收回游戏预算',
+  PROFIT_POOL_BATCH_GENERATED: '生成利润池批次',
+  PROFIT_POOL_BATCH_DISTRIBUTED: '发放利润池',
+  PROFIT_POOL_BATCH_VOIDED: '作废利润池',
+  PROFIT_POOL_BATCH_FORCE_VOIDED: '强制作废利润池',
+  PROFIT_POOL_BATCH_DELETED: '删除利润池批次',
+  vpay_deposit_chargeback: '充值退单',
+  device_self_rebind: '用户自助换绑设备',
+};
+
+function auditActionLabel(action: string) {
+  return AUDIT_ACTION_LABELS[action] ?? action.replace(/_/g, ' ');
+}
+
+function auditChangeText(value: unknown) {
+  if (value == null) return '—';
+  if (typeof value !== 'object') return String(value);
+  const entries = Object.entries(value as Record<string, unknown>).slice(0, 4);
+  if (entries.length === 0) return '—';
+  return entries
+    .map(([key, item]) => `${key} ${item && typeof item === 'object' ? '…' : String(item ?? '')}`)
+    .join(' · ');
 }
 
 function Audit() {
-  const [items,setItems]=useState<Row[]>([]);useEffect(()=>{request<{items:Row[]}>('/api/admin/audit-logs').then(r=>setItems(r.items));},[]);
-  return <section className="panel"><div className="table-wrap"><table><thead><tr><th>时间</th><th>管理员</th><th>动作</th><th>目标</th><th>变更内容</th><th>IP</th></tr></thead><tbody>{items.map(i=><tr key={i.id}><td>{new Date(i.createdAt).toLocaleString('zh-MY')}</td><td>{i.adminId.slice(-8)}</td><td><code>{i.action}</code></td><td>{i.target??'—'}</td><td className="truncate">{JSON.stringify(i.after??i.before??{})}</td><td>{i.ip??'—'}</td></tr>)}</tbody></table></div></section>;
+  const [items, setItems] = useState<Row[]>([]);
+  useEffect(() => {
+    request<{ items: Row[] }>('/api/admin/audit-logs').then((r) => setItems(r.items));
+  }, []);
+  return (
+    <section className="panel">
+      <div className="panel-title">
+        <div>
+          <small>审计日志</small>
+          <h2>最近 {items.length} 条高风险操作</h2>
+        </div>
+      </div>
+      <p className="desk-copy">只读。动作已转成中文；变更只摘要前几项，完整 JSON 仍可从接口核对。</p>
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>时间</th>
+              <th>管理员</th>
+              <th>动作</th>
+              <th>目标</th>
+              <th>变更</th>
+              <th>IP</th>
+            </tr>
+          </thead>
+          <tbody>
+            {items.map((i) => (
+              <tr key={i.id}>
+                <td>{new Date(i.createdAt).toLocaleString('zh-MY')}</td>
+                <td>{i.adminId.slice(-8)}</td>
+                <td>{auditActionLabel(i.action)}</td>
+                <td>{i.target ?? '—'}</td>
+                <td className="audit-change">{auditChangeText(i.after ?? i.before)}</td>
+                <td>{i.ip ?? '—'}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {items.length === 0 && <Empty text="尚无审计记录" />}
+      </div>
+    </section>
+  );
 }

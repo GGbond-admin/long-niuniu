@@ -54,7 +54,7 @@ function medalGlyph(item: RewardItem) {
   if (code.includes('weird') || title.includes('怪牌')) return '✦';
   if (code.includes('baozi') || title.includes('豹子')) return '豹';
   if (code.includes('manniu') || title.includes('满牛')) return '满';
-  if (code.includes('fanshun') || title.includes('反顺')) return '反';
+  if (code.includes('fanshun') || title.includes('反顺') || title.includes('倒顺')) return '倒';
   if (code.includes('shunzi') || title.includes('顺子')) return '顺';
   if (code.includes('instant') || title.includes('秒杀')) return '⚡';
   if (code.includes('banker') || title.includes('做庄')) return '庄';

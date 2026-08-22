@@ -12,7 +12,7 @@ const ACCOUNT_INFO: Record<string, [string, string]> = {
   USER_FREEZE_BET: ['用户投注冻结', '下注后冻结，结算时解冻'],
   USER_FREEZE_BANKER: ['用户上庄冻结', '上庄押金冻结，下庄时结余返还'],
   USER_FREEZE_WITHDRAW: ['用户提现冻结', '提现审核中冻结的资金'],
-  PLATFORM_RAKE: ['抽水收入', '闲家赢 3% + 庄家盈利 5%，只进不出'],
+  PLATFORM_RAKE: ['抽水收入', '闲家赢 + 庄家盈利，只进不出'],
   PLATFORM_FEES: ['庄家费用收入', '上庄费 + 服务费'],
   PLATFORM_RESERVE: ['红包备付金', '代包费 − 内部红包发放'],
   PLATFORM_REBATE: ['推广返水支出户', '累计已发返水佣金'],
@@ -29,6 +29,7 @@ const REF_LABELS: Record<string, string> = {
   withdraw_refund: '提现退回',
   withdraw_fee: '提现手续费',
   rebate: '推广返水',
+  rebate_revoke: '推广返水撤回',
   profit_share: '代理分成',
   reward: '活动奖励',
   leaderboard_reward: '排行榜奖励',
@@ -66,6 +67,38 @@ function cents(value: unknown) {
 
 function todayKL() {
   return new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Kuala_Lumpur' });
+}
+
+function shiftKL(day: string, delta: number) {
+  const next = new Date(new Date(`${day}T12:00:00+08:00`).getTime() + delta * 86_400_000);
+  return next.toLocaleDateString('sv-SE', { timeZone: 'Asia/Kuala_Lumpur' });
+}
+
+const RANGE_PRESETS = [
+  { id: 'today', label: '今天' },
+  { id: 'yesterday', label: '昨天' },
+  { id: '3', label: '3日' },
+  { id: '7', label: '7日' },
+  { id: '15', label: '15日' },
+] as const;
+
+type RangePresetId = (typeof RANGE_PRESETS)[number]['id'];
+
+function rangeForPreset(id: RangePresetId, today = todayKL()) {
+  if (id === 'today') return { from: today, to: today };
+  if (id === 'yesterday') {
+    const yesterday = shiftKL(today, -1);
+    return { from: yesterday, to: yesterday };
+  }
+  const days = Number(id);
+  return { from: shiftKL(today, -(days - 1)), to: today };
+}
+
+function matchRangePreset(from: string, to: string, today = todayKL()): RangePresetId | '' {
+  return RANGE_PRESETS.find(({ id }) => {
+    const range = rangeForPreset(id, today);
+    return range.from === from && range.to === to;
+  })?.id ?? '';
 }
 
 function money(value: unknown) {
@@ -243,11 +276,16 @@ function OrderBook({
         counts?: Record<StatusKey, number>;
         amounts?: Record<StatusKey, string>;
       }>(`/api/admin/finance/orders?${params}`);
-      setItems(result.items);
-      setTotal(result.total);
-      setPage(result.page);
+      setError('');
+      setItems(result.items ?? []);
+      setTotal(result.total ?? 0);
+      setPage(result.page ?? nextPage);
       if (result.counts) setCounts(result.counts);
       if (result.amounts) setAmounts(result.amounts);
+    } catch (reason) {
+      setItems([]);
+      setTotal(0);
+      setError((reason as Error).message || '订单列表加载失败');
     } finally {
       setBusy(false);
     }
@@ -504,11 +542,13 @@ export default function FinanceCenter({
   payees?: ReactNode;
 }) {
   const [tab, setTab] = useState<Tab>(initialTab && initialTab !== 'payees' ? initialTab : initialTab === 'payees' && payees ? 'payees' : 'overview');
-  const [reportDate, setReportDate] = useState(todayKL());
+  const [from, setFrom] = useState(() => rangeForPreset('today').from);
+  const [to, setTo] = useState(() => rangeForPreset('today').to);
   const [report, setReport] = useState<Row | null>(null);
   const [accounts, setAccounts] = useState<Row[]>([]);
+  const [rake, setRake] = useState({ playerPercent: '', bankerPercent: '' });
   const [trend, setTrend] = useState<Row[]>([]);
-  const [days, setDays] = useState(14);
+  const [trendError, setTrendError] = useState('');
   const [chartMode, setChartMode] = useState<ChartMode>('cash');
   const [pending, setPending] = useState({ deposits: 0, withdrawals: 0, depositCents: '0', withdrawalCents: '0' });
   const [ledger, setLedger] = useState<Row[]>([]);
@@ -523,14 +563,18 @@ export default function FinanceCenter({
       pendingWithdrawals: number;
       pendingDepositCents?: string;
       pendingWithdrawalCents?: string;
-    }>(`/api/admin/finance/trend?days=${days}`).then((result) => {
-      setTrend(result.items);
+    }>(`/api/admin/finance/trend?from=${from}&to=${to}`).then((result) => {
+      setTrend(result.items ?? []);
+      setTrendError('');
       setPending({
         deposits: result.pendingDeposits,
         withdrawals: result.pendingWithdrawals,
         depositCents: result.pendingDepositCents ?? '0',
         withdrawalCents: result.pendingWithdrawalCents ?? '0',
       });
+    }).catch((error) => {
+      setTrend([]);
+      setTrendError((error as Error).message || '收支趋势加载失败');
     });
   }
 
@@ -543,18 +587,30 @@ export default function FinanceCenter({
   }, [initialTab]);
 
   useEffect(() => {
-    void request<Row>('/api/admin/finance/accounts').then((result) => setAccounts(result.accounts ?? []));
+    void request<Row>('/api/admin/finance/accounts').then((result) => {
+      setAccounts(result.accounts ?? []);
+      if (result.rake?.playerPercent && result.rake?.bankerPercent) {
+        setRake({
+          playerPercent: String(result.rake.playerPercent),
+          bankerPercent: String(result.rake.bankerPercent),
+        });
+      }
+    });
   }, []);
 
   useEffect(() => {
     void loadTrend();
-  }, [days]);
+  }, [from, to]);
 
   useEffect(() => {
-    void request<Row>(`/api/admin/finance/daily-report?date=${reportDate}`)
+    if (from !== to) {
+      setReport(null);
+      return;
+    }
+    void request<Row>(`/api/admin/finance/daily-report?date=${from}`)
       .then(setReport)
       .catch(() => setReport(null));
-  }, [reportDate]);
+  }, [from, to]);
 
   useEffect(() => {
     if (tab !== 'ledger') return;
@@ -568,26 +624,48 @@ export default function FinanceCenter({
     BigInt(accountByType.get('PLATFORM_RAKE')?.balanceCents ?? 0) +
     BigInt(accountByType.get('PLATFORM_FEES')?.balanceCents ?? 0);
   const groups = [
+    { title: '玩家资金', hint: '真人钱包合计，不含虚拟玩家；冻结会在局结或提现完成后解冻', types: ['USER_AVAILABLE', 'USER_FREEZE_BET', 'USER_FREEZE_BANKER', 'USER_FREEZE_WITHDRAW'], tone: 'plain' },
     { title: '收入科目', hint: '平台赚到的钱，只进不出', types: ['PLATFORM_RAKE', 'PLATFORM_FEES'], tone: 'jade' },
     { title: '支出户', hint: '负数表示累计已发出，属正常', types: ['PLATFORM_REBATE', 'PLATFORM_REWARD', 'PLATFORM_PROFIT_POOL'], tone: 'plain' },
     { title: '备付与在途', hint: '与红包 / 充提勾稽，不计入净利', types: ['PLATFORM_RESERVE', 'TNG_TRANSIT', 'ADJUST_CLEARING'], tone: 'blue' },
   ];
+  const activePreset = matchRangePreset(from, to);
+  const singleDay = from === to;
+  const period = useMemo(() => {
+    const sum = (key: string) =>
+      trend.reduce((total, item) => total + BigInt(String(item[key] ?? 0)), 0n);
+    return {
+      net: sum('netProfitCents'),
+      rake: sum('rakeCents'),
+      deposits: sum('depositsCents'),
+      withdrawals: sum('withdrawalsCents'),
+    };
+  }, [trend]);
   const kpis = useMemo(() => {
-    if (!report) {
-      return [
-        ['待审充值', `${pending.deposits} 单 · ${money(pending.depositCents)}`],
-        ['待审提现', `${pending.withdrawals} 单 · ${money(pending.withdrawalCents)}`],
-      ];
-    }
     return [
-      ['当日净利', money(report.netProfitCents)],
-      ['抽水', money(report.rakeCents)],
-      ['充值到账', `${money(report.depositsCents)} · ${report.depositsCount} 单`],
-      ['提现出账', `${money(report.withdrawalsCents)} · ${report.withdrawalsCount} 单`],
+      [singleDay ? '当日净利' : '区间净利', money(period.net)],
+      ['抽水', money(period.rake)],
+      ['充值到账', singleDay && report ? `${money(report.depositsCents)} · ${report.depositsCount} 单` : money(period.deposits)],
+      ['提现出账', singleDay && report ? `${money(report.withdrawalsCents)} · ${report.withdrawalsCount} 单` : money(period.withdrawals)],
       ['待审充值', `${pending.deposits} 单 · ${money(pending.depositCents)}`],
       ['待审提现', `${pending.withdrawals} 单 · ${money(pending.withdrawalCents)}`],
     ];
-  }, [report, pending]);
+  }, [period, pending, report, singleDay]);
+
+  function applyRange(nextFrom: string, nextTo: string) {
+    const today = todayKL();
+    const start = nextFrom <= nextTo ? nextFrom : nextTo;
+    const end = nextFrom <= nextTo ? nextTo : nextFrom;
+    const cappedEnd = end > today ? today : end;
+    const cappedStart = start > cappedEnd ? cappedEnd : start;
+    const span = Math.floor(
+      (new Date(`${cappedEnd}T00:00:00+08:00`).getTime()
+        - new Date(`${cappedStart}T00:00:00+08:00`).getTime())
+        / 86_400_000,
+    ) + 1;
+    setFrom(span > 90 ? shiftKL(cappedEnd, -89) : cappedStart);
+    setTo(cappedEnd);
+  }
 
   return (
     <div className="fin-page">
@@ -612,21 +690,40 @@ export default function FinanceCenter({
           <section className="panel fin-hero">
             <div className="panel-title">
               <div>
-                <small>MALAYSIA DAY</small>
+                <small>{singleDay ? from : `${from} 至 ${to}`}</small>
                 <h2>资金总览</h2>
               </div>
               <div className="fin-hero-tools">
                 <div className="fin-status-pills">
-                  {([7, 14, 30] as const).map((value) => (
+                  {RANGE_PRESETS.map((preset) => (
                     <button
                       type="button"
-                      key={value}
-                      className={days === value ? 'active' : ''}
-                      onClick={() => setDays(value)}
+                      key={preset.id}
+                      className={activePreset === preset.id ? 'active' : ''}
+                      onClick={() => {
+                        const range = rangeForPreset(preset.id);
+                        applyRange(range.from, range.to);
+                      }}
                     >
-                      {value} 日
+                      {preset.label}
                     </button>
                   ))}
+                </div>
+                <div className="fin-range-pickers">
+                  <input
+                    type="date"
+                    value={from}
+                    max={to}
+                    onChange={(event) => applyRange(event.target.value, to)}
+                  />
+                  <span>至</span>
+                  <input
+                    type="date"
+                    value={to}
+                    min={from}
+                    max={todayKL()}
+                    onChange={(event) => applyRange(from, event.target.value)}
+                  />
                 </div>
                 <div className="fin-status-pills">
                   <button type="button" className={chartMode === 'cash' ? 'active' : ''} onClick={() => setChartMode('cash')}>
@@ -636,7 +733,6 @@ export default function FinanceCenter({
                     损益
                   </button>
                 </div>
-                <input type="date" value={reportDate} onChange={(event) => setReportDate(event.target.value)} />
               </div>
             </div>
             <div className="fin-kpis">
@@ -647,8 +743,12 @@ export default function FinanceCenter({
                 </article>
               ))}
             </div>
-            <FinanceChart items={trend} mode={chartMode} />
-            {trend.length > 0 && (
+            {trendError ? (
+              <p className="fin-quiet">{trendError}</p>
+            ) : (
+              <FinanceChart items={trend} mode={chartMode} />
+            )}
+            {trend.length > 1 && (
               <div className="table-wrap fin-trend-table">
                 <table>
                   <thead>
@@ -700,7 +800,11 @@ export default function FinanceCenter({
                     <article key={type} className={`pp-card tone-${group.tone}`}>
                       <small>{ACCOUNT_INFO[type]?.[0] ?? type}</small>
                       <strong>{money(account.balanceCents)}</strong>
-                      <em>{ACCOUNT_INFO[type]?.[1]}</em>
+                      <em>
+                        {type === 'PLATFORM_RAKE' && rake.playerPercent && rake.bankerPercent
+                          ? `闲家赢 ${rake.playerPercent}% + 庄家盈利 ${rake.bankerPercent}%，只进不出`
+                          : ACCOUNT_INFO[type]?.[1]}
+                      </em>
                     </article>
                   );
                 })}
@@ -720,7 +824,7 @@ export default function FinanceCenter({
               <div className="panel-title">
                 <div>
                   <small>日报明细</small>
-                  <h2>{reportDate} 收支拆解</h2>
+                  <h2>{from} 收支拆解</h2>
                 </div>
               </div>
               <div className="fin-report">
@@ -739,8 +843,8 @@ export default function FinanceCenter({
                     title: '收入',
                     rows: [
                       ['抽水合计', money(report.rakeCents)],
-                      ['闲家 3%', money(report.rakePlayerCents ?? 0)],
-                      ['庄家 5%', money(report.rakeBankerCents ?? 0)],
+                      [`闲家 ${rake.playerPercent || '—'}%`, money(report.rakePlayerCents ?? 0)],
+                      [`庄家 ${rake.bankerPercent || '—'}%`, money(report.rakeBankerCents ?? 0)],
                       ['上庄费', money(report.seatFeeCents)],
                       ['服务费', money(report.serviceFeeCents)],
                       ['代包费（不计净利）', money(report.packetFeeCents)],

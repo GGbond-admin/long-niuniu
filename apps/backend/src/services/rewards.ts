@@ -52,7 +52,7 @@ const DEFAULT_REWARDS: Array<{
   {
     tab: 'CHESS',
     code: 'fanshun_king',
-    title: '反顺王',
+    title: '倒顺王',
     conditions: { kind: 'hand_count', handType: 'FANSHUN', count: 3 },
     amountCents: 18_888n,
     dailyQuota: 3,
@@ -91,7 +91,7 @@ export async function ensureRewardDefaults() {
       await prisma.rewardConfig.upsert({
         where: { gameCode_code: { gameCode, code: reward.code } },
         create: { ...reward, gameCode },
-        update: {},
+        update: reward.code === 'fanshun_king' ? { title: reward.title } : {},
       });
     }
   }

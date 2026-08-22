@@ -38,7 +38,7 @@ const DEFAULT_WITHDRAW_CONFIG = {
 const LEDGER_CATEGORIES: Record<string, string[]> = {
   deposit: ['deposit'],
   withdraw: ['withdraw_freeze', 'withdraw_complete', 'withdraw_fee', 'withdraw_refund'],
-  rebate: ['rebate', 'profit_share'],
+  rebate: ['rebate', 'rebate_revoke', 'profit_share'],
   reward: ['reward', 'leaderboard_reward'],
   game: [
     'bet',

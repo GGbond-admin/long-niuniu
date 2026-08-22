@@ -264,8 +264,8 @@ const POOL_STATUS_LABEL: Record<string, string> = {
 /* ——— 指标卡 ——— */
 function PoolMetrics({ pool, status }: { pool: Row; status: string }) {
   const cards: Array<{ label: string; value: string; hint?: string; tone?: string }> = [
-    { label: '玩家赢抽水（3%）', value: rmSigned(pool.rakePlayerCents) },
-    { label: '庄家盈利抽水（5%）', value: rmSigned(pool.rakeBankerCents) },
+    { label: '玩家赢抽水', value: rmSigned(pool.rakePlayerCents) },
+    { label: '庄家盈利抽水', value: rmSigned(pool.rakeBankerCents) },
     { label: '抽水合计（毛利润）', value: rmSigned(pool.rakeTotalCents), tone: 'gold' },
     { label: '公司总流水', value: rmSigned(pool.turnoverCents) },
     {
@@ -505,7 +505,7 @@ function ConfigPanel({
         </button>
       </div>
       <p className="pp-hint">
-        抽水比例（闲家赢 3% / 庄家盈利 5%）在「游戏运营中心 → 游戏配置 → 费用与抽水」中调整；
+        抽水比例以「游戏运营中心 → 游戏配置 → 费用与抽水」当前设置为准；
         每一批支出比例仍须在生成向导中明确确认，默认值只用于预填；
         新利润池只按房间局号范围生成，不再自动生成日报；
         分配采用占成差额制：上级赚取与直属下级的占成差额，同一笔利润不重复分配。

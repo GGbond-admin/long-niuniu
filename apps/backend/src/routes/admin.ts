@@ -287,14 +287,50 @@ export async function adminRoutes(app: FastifyInstance) {
     '/api/admin/identity-review/summary',
     { preHandler: [app.authAdmin] },
     async () => {
-      const [pendingKyc, pendingWithdrawAccounts] = await Promise.all([
+      const [pendingKyc, pendingWithdrawAccounts, unsubmittedKyc] = await Promise.all([
         prisma.kyc.count({ where: { status: 'PENDING' } }),
         prisma.withdrawAccount.count({ where: { status: 'PENDING', source: 'user' } }),
+        prisma.user.count({
+          where: { kind: 'HUMAN', status: 'ACTIVE', kyc: null },
+        }),
       ]);
       return {
         pendingKyc,
         pendingWithdrawAccounts,
+        unsubmittedKyc,
         pendingTotal: pendingKyc + pendingWithdrawAccounts,
+      };
+    },
+  );
+
+  app.get(
+    '/api/admin/kyc/unsubmitted',
+    { preHandler: [app.authAdmin, app.requireAdminRoles('SUPER', 'OPERATOR', 'REVIEWER')] },
+    async () => {
+      const list = await prisma.user.findMany({
+        where: { kind: 'HUMAN', status: 'ACTIVE', kyc: null },
+        select: {
+          id: true,
+          uid: true,
+          nickname: true,
+          avatarUrl: true,
+          createdAt: true,
+          inviterId: true,
+          device: { select: { status: true } },
+        },
+        orderBy: { createdAt: 'desc' },
+        take: 100,
+      });
+      return {
+        items: list.map((user) => ({
+          id: user.id,
+          uid: user.uid,
+          nickname: user.nickname,
+          avatarUrl: user.avatarUrl,
+          createdAt: user.createdAt,
+          inviterBound: Boolean(user.inviterId),
+          deviceBound: user.device?.status === 'ACTIVE',
+        })),
       };
     },
   );

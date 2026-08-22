@@ -1,5 +1,5 @@
 import { AccountType, ClaimSource, MessageType, Prisma, RewardTab } from '@prisma/client';
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import {
   blindIndex,
@@ -19,7 +19,15 @@ import {
   leaderboardDashboard,
 } from '../services/leaderboards.js';
 import { pushService } from '../services/push.js';
-import { estimatedCommission, malaysiaDay, settleRebates } from '../services/rebates.js';
+import {
+  estimatedCommission,
+  malaysiaDay,
+  rebateOrderForDate,
+  RebateError,
+  revokeRebateOrder,
+  revokeRebateSettlement,
+  settleRebates,
+} from '../services/rebates.js';
 import { grantReward, rewardDashboard } from '../services/rewards.js';
 import {
   ensureSupportWelcome,
@@ -153,6 +161,21 @@ function revealOrderSnapshot(value: unknown): unknown {
     if (typeof snapshot[field] === 'string') snapshot[field] = safeDecryptSecret(snapshot[field]);
   }
   return snapshot;
+}
+
+function replyRebateError(reply: FastifyReply, error: unknown) {
+  if (!(error instanceof RebateError)) throw error;
+  const messages: Record<string, string> = {
+    REBATE_NOT_FOUND: '找不到这笔返水结算',
+    REBATE_NOT_PAID: '只有已发放的返水才能撤回',
+    REBATE_ORDER_EMPTY: '该业务日没有可撤回的日结单',
+    REBATE_REVOKE_INSUFFICIENT: '撤回失败：玩家可用余额不足，无法扣回已发放佣金',
+  };
+  return reply.code(error.code === 'REBATE_NOT_FOUND' ? 404 : 409).send({
+    error: error.code,
+    message: messages[error.code] ?? '返水撤回失败',
+    details: error.details,
+  });
 }
 
 export async function operationsRoutes(app: FastifyInstance) {
@@ -2094,20 +2117,37 @@ export async function adminOperationsRoutes(app: FastifyInstance) {
   app.post('/api/admin/rebates/settle', { preHandler: finance }, async (req, reply) => {
     const { settlementDate } = z.object({ settlementDate: date }).parse(req.body);
     if (settlementDate >= malaysiaDay()) {
-      return reply.code(409).send({ error: 'REBATE_PERIOD_NOT_CLOSED' });
+      return reply.code(409).send({
+        error: 'REBATE_PERIOD_NOT_CLOSED',
+        message: '该业务日尚未结束，日结只能跑已经过完的日子（昨天及更早）',
+      });
     }
-    return { ok: true, items: await settleRebates(settlementDate) };
+    return { ok: true, ...(await settleRebates(settlementDate, undefined, { repayRevoked: true })) };
   });
 
   app.get('/api/admin/rebates', { preHandler: finance }, async (req) => {
     const query = z.object({ date: date.optional() }).parse(req.query);
-    const items = await prisma.rebateSettlement.findMany({
-      where: { date: query.date },
-      include: { user: { select: { uid: true, nickname: true } } },
-      orderBy: { createdAt: 'desc' },
-      take: 1_000,
-    });
-    return { items };
+    return rebateOrderForDate(query.date ?? malaysiaDay());
+  });
+
+  app.post('/api/admin/rebates/:id/revoke', { preHandler: finance }, async (req, reply) => {
+    const { id } = z.object({ id: z.string().min(1) }).parse(req.params);
+    const adminId = (req.user as { sub: string }).sub;
+    try {
+      return { ok: true, ...(await revokeRebateSettlement(id, adminId)) };
+    } catch (error) {
+      return replyRebateError(reply, error);
+    }
+  });
+
+  app.post('/api/admin/rebates/revoke', { preHandler: finance }, async (req, reply) => {
+    const { settlementDate } = z.object({ settlementDate: date }).parse(req.body);
+    const adminId = (req.user as { sub: string }).sub;
+    try {
+      return { ok: true, ...(await revokeRebateOrder(settlementDate, adminId)) };
+    } catch (error) {
+      return replyRebateError(reply, error);
+    }
   });
 
   // ── 财务流水 / 人工调账 ──

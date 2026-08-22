@@ -553,6 +553,13 @@ export default function GameOperationsCenter({ admin }: { admin: Admin }) {
   const [assistantEnabled, setAssistantEnabled] = useState(true);
   const [botAutoStart, setBotAutoStart] = useState(false);
   const [busy, setBusy] = useState('');
+  const [roomControlsOpen, setRoomControlsOpen] = useState(() => {
+    try {
+      return localStorage.getItem('ops_room_controls_open') === '1';
+    } catch {
+      return false;
+    }
+  });
   const [error, setError] = useState('');
   const [scoreboard, setScoreboard] = useState<ScoreboardData | null>(null);
   const [scoreboardDraft, setScoreboardDraft] = useState<ScoreboardDraft | null>(null);
@@ -1773,9 +1780,58 @@ export default function GameOperationsCenter({ admin }: { admin: Admin }) {
         <aside className="ops-room-rail">
           <div className="ops-section-head">
             <div><small>本游戏互动群</small><strong>{selectedRoom?.title ?? '—'}</strong></div>
-            <button type="button" onClick={() => void loadRooms(selectedRoomId)} aria-label="刷新">刷新</button>
+            <div className="ops-section-actions">
+              {selectedRoom && canOperate && (
+                <button
+                  type="button"
+                  className="ops-fold-btn"
+                  aria-expanded={roomControlsOpen}
+                  onClick={() => {
+                    const next = !roomControlsOpen;
+                    setRoomControlsOpen(next);
+                    try {
+                      localStorage.setItem('ops_room_controls_open', next ? '1' : '0');
+                    } catch {
+                      // ignore
+                    }
+                  }}
+                >
+                  {roomControlsOpen ? '收起' : '展开'}
+                </button>
+              )}
+              <button type="button" onClick={() => void loadRooms(selectedRoomId)} aria-label="刷新">刷新</button>
+            </div>
           </div>
-          {selectedRoom && canOperate && (
+          {selectedRoom && canOperate && !roomControlsOpen && (
+            <button
+              type="button"
+              className="ops-room-summary"
+              onClick={() => {
+                setRoomControlsOpen(true);
+                try {
+                  localStorage.setItem('ops_room_controls_open', '1');
+                } catch {
+                  // ignore
+                }
+              }}
+            >
+              <span>入口 {selectedRoom.status === 'ACTIVE' ? '开' : '关'}</span>
+              <span>运行 {roomStartMode === 'AUTO' ? '自动连续' : roomStartMode === 'STOPPED' ? '已结束' : '手动单局'}</span>
+              <span>
+                群聊 {
+                  roomGloballyMuted
+                    ? '全群禁言'
+                    : preparingNextRound || selectedRoom?.chatPolicy?.stage === 'NEXT_ROUND'
+                      ? '准备下一局'
+                      : selectedRoom?.chatPolicy?.muted
+                        ? '阶段禁言'
+                        : '正常'
+                }
+              </span>
+              <span>发包 {internalPacketMode ? '系统红包' : 'TNG 链接'}</span>
+            </button>
+          )}
+          {selectedRoom && canOperate && roomControlsOpen && (
             <div className="ops-room-controls">
               <p className="ops-control-layer">① 游戏入口（玩家能否进群）</p>
               <button

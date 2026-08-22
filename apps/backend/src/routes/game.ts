@@ -37,7 +37,9 @@ import {
   setPacketChannel,
 } from '../services/gameSettings.js';
 import { processRoundRewards } from '../services/rewards.js';
+import { buildAdminDashboard } from '../services/adminDashboard.js';
 import { malaysiaDay } from '../services/rebates.js';
+import { getCurrentRakeRates, getFinanceOrders, getFinanceTrend, getPlayerFundAccounts } from '../services/financeReport.js';
 import { adminRoundsWhere, VALID_ROUND_PHASE_WHERE } from '../services/adminRounds.js';
 import {
   gameDefinition,
@@ -991,62 +993,8 @@ export async function adminGameRoutes(app: FastifyInstance) {
   app.get('/api/admin/dashboard', { preHandler: [app.authAdmin] }, async () => {
     const cached = readAdminDashboardCache();
     if (cached) return cached;
-    const dayStart = new Date(`${malaysiaDay()}T00:00:00+08:00`);
-    const [
-      pendingKyc,
-      pendingDeposits,
-      pendingWithdrawals,
-      pendingWithdrawAccounts,
-      activeRounds,
-      packetTransit,
-      todaySettlements,
-      todaySettleSum,
-      todayPushFailures,
-      reconcileAnomalies,
-    ] = await Promise.all([
-      prisma.kyc.count({ where: { status: 'PENDING' } }),
-      prisma.depositOrder.count({ where: { status: 'PENDING' } }),
-      prisma.withdrawOrder.count({ where: { status: 'PENDING' } }),
-      prisma.withdrawAccount.count({ where: { status: 'PENDING' } }),
-      prisma.round.count({
-        where: {
-          phase: {
-            in: [
-              'BANKER_BID',
-              'BETTING',
-              'SENDING_PACKET',
-              'CLAIMING',
-              'CLAIM_EXPIRED',
-              'SETTLING',
-            ],
-          },
-        },
-      }),
-      prisma.platformAccount.findUnique({ where: { accountType: 'TNG_TRANSIT' } }),
-      prisma.round.count({ where: { phase: 'FINISHED', settledAt: { gte: dayStart } } }),
-      prisma.settlement.aggregate({
-        where: { createdAt: { gte: dayStart } },
-        _sum: { betCents: true, rakeCents: true },
-      }),
-      prisma.pushLog.count({ where: { success: false, sentAt: { gte: dayStart } } }),
-      prisma.packet.count({
-        where: { status: 'EXPIRED', round: { phase: { in: ['FINISHED', 'CANCELLED'] } } },
-      }),
-    ]);
-    const payload = {
-      pendingKyc,
-      pendingDeposits,
-      pendingWithdrawals,
-      pendingWithdrawAccounts,
-      activeRounds,
-      packetTransitCents: String(packetTransit?.balanceCents ?? 0n),
-      todaySettlements,
-      todayBetsCents: String(todaySettleSum._sum.betCents ?? 0n),
-      todayRakeCents: String(todaySettleSum._sum.rakeCents ?? 0n),
-      todayPushFailures,
-      reconcileAnomalies,
-    };
-    writeAdminDashboardCache(payload);
+    const payload = await buildAdminDashboard();
+    writeAdminDashboardCache(payload as Record<string, unknown>);
     return payload;
   });
 
@@ -2198,15 +2146,51 @@ export async function adminGameRoutes(app: FastifyInstance) {
     '/api/admin/finance/accounts',
     { preHandler: [app.authAdmin, app.requireAdminRoles('SUPER', 'FINANCE')] },
     async () => {
-      const [accounts, recentLedger] = await Promise.all([
+      const [accounts, recentLedger, playerFunds, rake] = await Promise.all([
         prisma.platformAccount.findMany({ orderBy: { accountType: 'asc' } }),
         prisma.ledgerEntry.findMany({
           where: { userId: null },
           orderBy: { createdAt: 'desc' },
           take: 100,
         }),
+        getPlayerFundAccounts(),
+        getCurrentRakeRates(),
       ]);
-      return { accounts, recentLedger };
+      return { accounts: [...playerFunds, ...accounts], recentLedger, rake };
+    },
+  );
+
+  app.get(
+    '/api/admin/finance/trend',
+    { preHandler: [app.authAdmin, app.requireAdminRoles('SUPER', 'FINANCE')] },
+    async (req) => {
+      const query = z
+        .object({
+          days: z.coerce.number().int().min(1).max(90).optional(),
+          from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+          to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+        })
+        .parse(req.query);
+      return getFinanceTrend(query);
+    },
+  );
+
+  app.get(
+    '/api/admin/finance/orders',
+    { preHandler: [app.authAdmin, app.requireAdminRoles('SUPER', 'FINANCE')] },
+    async (req) => {
+      const query = z
+        .object({
+          kind: z.enum(['deposit', 'withdraw']),
+          status: z.enum(['ALL', 'PENDING', 'COMPLETED', 'REJECTED']).default('ALL'),
+          page: z.coerce.number().int().min(1).default(1),
+          pageSize: z.coerce.number().int().min(1).max(100).default(30),
+          q: z.string().max(64).optional(),
+          from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+          to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+        })
+        .parse(req.query);
+      return getFinanceOrders(query);
     },
   );
 

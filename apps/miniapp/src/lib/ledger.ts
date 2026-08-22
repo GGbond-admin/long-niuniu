@@ -4,6 +4,7 @@ export const LEDGER_LABELS: Record<string, string> = {
   withdraw_complete: '提现成功',
   withdraw_refund: '提现退回',
   rebate: '推广佣金',
+  rebate_revoke: '推广佣金撤回',
   profit_share: '代理分成',
   reward: '活动奖励',
   leaderboard_reward: '排行榜奖励',

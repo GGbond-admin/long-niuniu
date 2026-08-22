@@ -381,7 +381,7 @@ export default function GameDetail({ kycStatus }: { kycStatus: string }) {
             <span>顺子 ×3 — 188.88</span>
           </li>
           <li>
-            <b>反顺王</b>
+            <b>倒顺王</b>
             <span>反顺 ×3 — 188.88</span>
           </li>
         </ul>

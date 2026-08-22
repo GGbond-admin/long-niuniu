@@ -131,6 +131,12 @@ export function rakeRatioFor(side: RakeSide, config: FeeConfig = DEFAULT_FEE_CON
   return config.bankerRakeRatio ?? config.rakeRatio ?? DEFAULT_FEE_CONFIG.bankerRakeRatio;
 }
 
+export function formatRatioPercent(ratio: number): string {
+  const pct = ratio * 100;
+  if (!Number.isFinite(pct)) return '0';
+  return Number.isInteger(pct) ? String(pct) : pct.toFixed(2).replace(/\.?0+$/, '');
+}
+
 /** 抽水：只抽赢方盈利。闲家按该笔实付；庄家按本局对赌毛利，亏损不抽。 */
 export function rakeOf(
   profitCents: number,

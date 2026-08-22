@@ -3,6 +3,7 @@ import {
   DEFAULT_FEE_CONFIG,
   bankerBidFreezeCents,
   bankerBidReserveCents,
+  formatRatioPercent,
   maxAffordableBankerBidCents,
   packetReserveHeads,
   packetTotal,
@@ -47,5 +48,13 @@ describe('上庄可出金额', () => {
     expect(available - bankerBidFreezeCents(oldMax, DEFAULT_FEE_CONFIG)).toBeLessThan(
       packetTotal(heads, DEFAULT_FEE_CONFIG),
     );
+  });
+});
+
+describe('formatRatioPercent', () => {
+  it('把配置比例显示成百分比，不写死 3', () => {
+    expect(formatRatioPercent(0.05)).toBe('5');
+    expect(formatRatioPercent(0.03)).toBe('3');
+    expect(formatRatioPercent(0.025)).toBe('2.5');
   });
 });
