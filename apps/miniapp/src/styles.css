@@ -5588,62 +5588,61 @@ img.feed-chat-avatar {
   padding: 0 0 max(8px, env(safe-area-inset-bottom));
 }
 .tool-tabs {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 0;
-  margin: 0 12px 8px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+  display: flex;
+  justify-content: center;
+  gap: 4px;
+  margin: 6px 12px 6px;
+  padding: 3px;
+  border: 0;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.045);
 }
 .tool-tabs button {
   position: relative;
+  flex: 1;
   width: auto;
-  min-height: 44px;
+  min-height: 28px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 7px;
+  gap: 4px;
   padding: 0 8px;
   border: 0;
-  color: #858389;
+  border-radius: 999px;
+  color: #8b8680;
   background: transparent;
   touch-action: manipulation;
   transition: color 0.15s ease, background 0.15s ease;
 }
 .tool-tabs button::after {
-  content: '';
-  position: absolute;
-  bottom: -1px;
-  left: 50%;
-  width: 0;
-  height: 2px;
-  border-radius: 999px;
-  background: #c9a962;
-  transform: translateX(-50%);
-  transition: width 0.15s ease;
+  display: none;
 }
 .tool-tabs button svg {
-  width: 19px;
-  height: 19px;
+  width: 13px;
+  height: 13px;
   flex: 0 0 auto;
   fill: none;
   stroke: currentColor;
-  stroke-width: 1.65;
+  stroke-width: 1.7;
   stroke-linecap: round;
   stroke-linejoin: round;
 }
 .tool-tabs button span {
-  font-size: 12px;
-  font-weight: 600;
+  font-size: 11px;
+  font-weight: 650;
 }
 .tool-tabs button.active {
-  color: #dbc58f;
-  background: rgba(255, 255, 255, 0.018);
+  color: #1a1610;
+  background: #e4d09a;
 }
 .tool-tabs button.active::after {
-  width: 38px;
+  width: 0;
 }
 .tool-tabs button:active {
-  background: rgba(255, 255, 255, 0.045);
+  background: rgba(255, 255, 255, 0.08);
+}
+.tool-tabs button.active:active {
+  background: #d4be82;
 }
 .tool-tabs button:focus-visible,
 .expression-panel button:focus-visible {
@@ -5823,22 +5822,27 @@ img.feed-assistant-avatar {
   background: rgba(255, 255, 255, 0.07);
   transform: scale(0.94);
 }
+.game-room-footer .expression-panel.sticker-panel,
 .game-room-footer .sticker-panel {
-  grid-template-columns: repeat(4, 1fr);
-  gap: 6px;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 4px;
+  align-items: start;
 }
 .game-room-footer .sticker-panel button {
-  aspect-ratio: 1;
-  min-height: 58px;
-  overflow: hidden;
-  padding: 6px;
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.025);
-}
-.game-room-footer .sticker-panel img {
   width: 100%;
   aspect-ratio: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  padding: 3px;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+}
+.game-room-footer .sticker-panel img {
+  display: block;
+  width: 100%;
+  height: 100%;
   object-fit: contain;
   transition: transform 0.12s ease;
 }
@@ -5871,8 +5875,9 @@ img.feed-assistant-avatar {
     margin-inline: 10px;
   }
   .tool-tabs button {
-    gap: 5px;
-    padding-inline: 5px;
+    gap: 3px;
+    padding-inline: 6px;
+    min-height: 26px;
   }
   .tool-tabs button span {
     font-size: 10.5px;
@@ -5881,6 +5886,10 @@ img.feed-assistant-avatar {
     grid-template-columns: repeat(auto-fill, minmax(40px, 1fr));
     margin-inline: 10px;
     padding: 4px;
+  }
+  .game-room-footer .expression-panel.sticker-panel,
+  .game-room-footer .sticker-panel {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
   }
 }
 
@@ -8628,11 +8637,21 @@ img.feed-assistant-avatar {
   padding: 8px 10px 12px;
 }
 .chat-screen .sticker-panel {
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 4px;
 }
-.chat-screen .sticker-panel img {
+.chat-screen .sticker-panel button {
   width: 100%;
   aspect-ratio: 1;
+  min-width: 0;
+  min-height: 0;
+  padding: 3px;
+  overflow: hidden;
+}
+.chat-screen .sticker-panel img {
+  display: block;
+  width: 100%;
+  height: 100%;
   object-fit: contain;
 }
 .chat-screen .expression-panel button {
@@ -8645,10 +8664,11 @@ img.feed-assistant-avatar {
   padding: 5px 0;
 }
 .chat-screen .tool-tabs {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 6px;
-  padding: 8px 12px 6px;
+  display: flex;
+  justify-content: center;
+  gap: 4px;
+  margin: 6px 12px;
+  padding: 3px;
 }
 
 /* Support inbox toast — floating bubble */

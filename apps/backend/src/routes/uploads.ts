@@ -1,6 +1,6 @@
 import { createReadStream, createWriteStream } from 'node:fs';
 import { mkdir, open, stat, unlink, writeFile } from 'node:fs/promises';
-import { extname, resolve } from 'node:path';
+import { extname, resolve, sep } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { pipeline } from 'node:stream/promises';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
@@ -25,8 +25,16 @@ const RESPONSE_TYPES: Record<string, string> = {
   '.jpg': 'image/jpeg',
   '.png': 'image/png',
   '.webp': 'image/webp',
+  '.gif': 'image/gif',
   '.pdf': 'application/pdf',
 };
+const PUBLIC_STICKER_MIME: Record<string, string> = {
+  'image/jpeg': '.jpg',
+  'image/png': '.png',
+  'image/webp': '.webp',
+  'image/gif': '.gif',
+};
+const PUBLIC_STICKER_FILENAME = /^[0-9a-f-]{36}\.(?:gif|jpg|png|webp)$/;
 
 async function matchesDeclaredType(path: string, mimetype: string): Promise<boolean> {
   const handle = await open(path, 'r');
@@ -42,6 +50,10 @@ async function matchesDeclaredType(path: string, mimetype: string): Promise<bool
       return bytes.subarray(0, 4).toString() === 'RIFF' && bytes.subarray(8, 12).toString() === 'WEBP';
     }
     if (mimetype === 'application/pdf') return bytes.subarray(0, 5).toString() === '%PDF-';
+    if (mimetype === 'image/gif') {
+      const header = bytes.subarray(0, 6).toString('ascii');
+      return header === 'GIF87a' || header === 'GIF89a';
+    }
     return false;
   } finally {
     await handle.close();
@@ -148,6 +160,72 @@ export async function uploadRoutes(app: FastifyInstance) {
     },
     async (req, reply) => handlePublicAvatarUpload(req, reply),
   );
+
+  app.post(
+    '/api/admin/uploads/sticker',
+    {
+      preHandler: [app.authAdmin, app.requireAdminRoles('SUPER', 'OPERATOR')],
+      config: { rateLimit: { max: 40, timeWindow: '1 hour' } },
+    },
+    async (req, reply) => {
+      const file = await req.file();
+      if (!file) return reply.code(400).send({ error: 'FILE_REQUIRED', message: '请选择要上传的贴纸' });
+      const extension = PUBLIC_STICKER_MIME[file.mimetype];
+      if (!extension) {
+        file.file.resume();
+        return reply.code(400).send({
+          error: 'UNSUPPORTED_FILE_TYPE',
+          message: '仅支持 GIF、JPG、PNG 或 WEBP',
+        });
+      }
+      const filename = `${randomUUID()}${extension}`;
+      const folder = resolve(env.uploadDir, 'stickers');
+      const destination = resolve(folder, filename);
+      if (!destination.startsWith(`${folder}${sep}`)) {
+        file.file.resume();
+        return reply.code(400).send({ error: 'INVALID_STICKER_FILENAME', message: '文件名无效' });
+      }
+      await mkdir(folder, { recursive: true });
+      try {
+        await pipeline(file.file, createWriteStream(destination, { flags: 'wx' }));
+        if (file.file.truncated) {
+          await unlink(destination).catch(() => undefined);
+          return reply.code(413).send({ error: 'FILE_TOO_LARGE', message: '贴纸不能超过 5MB' });
+        }
+        if (!(await matchesDeclaredType(destination, file.mimetype))) {
+          await unlink(destination).catch(() => undefined);
+          return reply.code(400).send({
+            error: 'FILE_CONTENT_MISMATCH',
+            message: '贴纸文件已损坏或格式不符',
+          });
+        }
+      } catch (error) {
+        await unlink(destination).catch(() => undefined);
+        throw error;
+      }
+      return { url: `/api/public/stickers/${filename}` };
+    },
+  );
+
+  app.get('/api/public/stickers/:filename', async (req, reply) => {
+    const { filename } = z
+      .object({ filename: z.string().regex(PUBLIC_STICKER_FILENAME) })
+      .parse(req.params);
+    const folder = resolve(env.uploadDir, 'stickers');
+    const path = resolve(folder, filename);
+    if (!path.startsWith(`${folder}${sep}`)) return reply.code(404).send({ error: 'UPLOAD_NOT_FOUND' });
+    try {
+      const metadata = await stat(path);
+      if (!metadata.isFile()) throw new Error('NOT_FILE');
+    } catch {
+      return reply.code(404).send({ error: 'UPLOAD_NOT_FOUND' });
+    }
+    reply
+      .type(RESPONSE_TYPES[extname(filename)] ?? 'image/gif')
+      .header('Content-Disposition', `inline; filename="${filename}"`)
+      .header('Cache-Control', 'public, max-age=31536000, immutable');
+    return reply.send(createReadStream(path));
+  });
 
   app.get('/api/public/avatars/:filename', async (req, reply) => {
     const { filename } = z

@@ -7,6 +7,7 @@ import ProfitPoolCenter from './ProfitPoolCenter';
 import { GameLeaderboardsAdmin, GameRewardsAdmin } from './GameScopedOperations';
 import VirtualPlayers from './VirtualPlayers';
 import PurgeCustomerBox from './PurgeCustomerBox';
+import StickerManager from './StickerManager';
 
 const DEFAULT_GAME_CODE = 'SUPREME_NIUNIU';
 
@@ -32,7 +33,7 @@ const pageTitles: Record<Page, [string, string]> = {
   rewards: ['每日奖励', '棋牌、庄家与特别奖励配置'],
   rebates: ['推广返水', '三级有效流水与日结佣金'],
   leaderboards: ['排行榜', '积分、棋牌、打桩三榜快照'],
-  messaging: ['消息中心', '推送、公告与系统通知统一管理'],
+  messaging: ['消息中心', '推送、公告、系统通知与互动贴纸'],
   support: ['客服会话', '处理设备、资金与牌局咨询'],
   config: ['游戏配置', '倍数、费用、倒计时与动态范围'],
   bots: ['Bot 管理', '多机器人、默认入口与启停路由'],
@@ -480,11 +481,13 @@ function MessagingHub() {
         { id: 'push', label: '推送中心' },
         { id: 'announcements', label: '公告管理' },
         { id: 'notices', label: '系统通知' },
+        { id: 'stickers', label: '贴纸管理' },
       ]}
     >
       {(tab) => {
         if (tab === 'announcements') return <Announcements />;
         if (tab === 'notices') return <SystemNoticesAdmin />;
+        if (tab === 'stickers') return <StickerManager />;
         return <PushCenter />;
       }}
     </HubTabs>

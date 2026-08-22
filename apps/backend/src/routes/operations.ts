@@ -26,6 +26,13 @@ import {
   handleUserSupportMessage,
   resolveAvatarUrl,
 } from '../services/supportAutoReply.js';
+import {
+  isAllowedStickerUrl,
+  listActiveStickers,
+  listAdminStickers,
+  nextStickerSortOrder,
+  reorderStickers,
+} from '../services/stickerCatalog.js';
 import { transfer } from '../services/wallet.js';
 import { recordClaim } from '../services/game.js';
 import { gameBus } from '../services/gameBus.js';
@@ -171,10 +178,7 @@ export async function operationsRoutes(app: FastifyInstance) {
   });
 
   app.get('/api/chat/stickers', { preHandler: [app.authUser] }, async () => ({
-    items: await prisma.stickerAsset.findMany({
-      where: { status: 'ACTIVE' },
-      orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }],
-    }),
+    items: await listActiveStickers(),
   }));
 
   /** 消息中心预览：未读数 + 最新一条，不标记已读 */
@@ -1451,18 +1455,38 @@ export async function adminOperationsRoutes(app: FastifyInstance) {
   });
 
   app.get('/api/admin/stickers', { preHandler: support }, async () => ({
-    items: await prisma.stickerAsset.findMany({ orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }] }),
+    items: await listAdminStickers(),
   }));
 
   app.post('/api/admin/stickers', { preHandler: operators }, async (req) => {
     const body = z
       .object({
         name: z.string().min(1).max(100),
-        url: z.string().url(),
-        sortOrder: z.number().int().default(0),
+        url: z.string().trim().refine(isAllowedStickerUrl, 'STICKER_URL_INVALID'),
+        sortOrder: z.number().int().optional(),
       })
       .parse(req.body);
-    return { ok: true, item: await prisma.stickerAsset.create({ data: body }) };
+    const sortOrder =
+      body.sortOrder
+      ?? nextStickerSortOrder(
+        (
+          await prisma.stickerAsset.aggregate({ _max: { sortOrder: true } })
+        )._max.sortOrder,
+      );
+    return {
+      ok: true,
+      item: await prisma.stickerAsset.create({
+        data: { name: body.name.trim(), url: body.url.trim(), sortOrder },
+      }),
+    };
+  });
+
+  app.post('/api/admin/stickers/reorder', { preHandler: operators }, async (req) => {
+    const { ids } = z
+      .object({ ids: z.array(z.string().min(1)).min(1).max(200) })
+      .parse(req.body);
+    await reorderStickers(ids);
+    return { ok: true, items: await listAdminStickers() };
   });
 
   app.patch('/api/admin/stickers/:id', { preHandler: operators }, async (req) => {
@@ -1470,7 +1494,7 @@ export async function adminOperationsRoutes(app: FastifyInstance) {
     const body = z
       .object({
         name: z.string().min(1).max(100).optional(),
-        url: z.string().url().optional(),
+        url: z.string().trim().refine(isAllowedStickerUrl, 'STICKER_URL_INVALID').optional(),
         sortOrder: z.number().int().optional(),
         status: z.enum(['ACTIVE', 'DISABLED']).optional(),
       })

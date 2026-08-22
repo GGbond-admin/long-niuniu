@@ -87,7 +87,7 @@ export async function uploadAdminFile<T>(path: string, file: File, field = 'file
     const payload = await res.json().catch(() => ({}));
     const messages: Record<string, string> = {
       FILE_REQUIRED: '请选择要上传的图片',
-      UNSUPPORTED_FILE_TYPE: '仅支持 JPG、PNG 或 WEBP',
+      UNSUPPORTED_FILE_TYPE: '仅支持 GIF、JPG、PNG 或 WEBP',
       FILE_CONTENT_MISMATCH: '图片文件已损坏或类型不正确',
       FILE_TOO_LARGE: '图片不能超过 5MB',
     };

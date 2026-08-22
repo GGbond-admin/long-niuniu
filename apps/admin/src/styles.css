@@ -9114,3 +9114,52 @@ textarea::placeholder {
   .fx-orders li { grid-template-columns: 1fr auto; }
   .fx-orders li span, .fx-orders li time { grid-column: 1 / -1; }
 }
+
+.sticker-form { align-items: center; }
+.sticker-file {
+  display: inline-flex;
+  align-items: center;
+  min-height: 38px;
+  padding: 0 12px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 10px;
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+  background: var(--surface-3);
+}
+.sticker-file input { display: none; }
+.sticker-admin-msg {
+  margin: 0 0 12px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.sticker-admin-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(168px, 1fr));
+  gap: 12px;
+}
+.sticker-admin-grid article {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+}
+.sticker-admin-grid img {
+  width: 100%;
+  aspect-ratio: 1;
+  object-fit: contain;
+  border-radius: 12px;
+  background: #111318;
+}
+.sticker-admin-grid strong { font-size: 14px; }
+.sticker-admin-grid small { color: var(--dim); font-size: 11px; }
+.sticker-admin-grid footer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.sticker-admin-grid footer button {
+  min-width: 0;
+  padding: 6px 8px;
+  font-size: 12px;
+}

@@ -11,6 +11,10 @@ export default defineConfig({
         changeOrigin: true,
         ws: true,
       },
+      '/stickers': {
+        target: 'http://localhost:5173',
+        changeOrigin: true,
+      },
     },
   },
 });
