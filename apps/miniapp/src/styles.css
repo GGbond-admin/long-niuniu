@@ -7688,10 +7688,37 @@ img.feed-assistant-avatar {
   font-weight: 700;
   color: #ffe6b0;
 }
-.wx-rp-result-sender span {
+.wx-rp-result-sender-name {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.wx-rp-result-sender-suffix {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+.wx-rp-banker-tag,
+.wx-rp-me-tag {
+  display: inline-grid;
+  place-items: center;
+  width: 15px;
+  height: 15px;
+  flex: 0 0 auto;
+  border-radius: 3px;
+  font-family: 'Noto Serif SC', 'Songti SC', serif;
+  font-size: 10px;
+  font-weight: 700;
+  font-style: normal;
+  line-height: 1;
+  letter-spacing: 0;
+}
+.wx-rp-banker-tag {
+  background: #e54d42;
+  color: #fff;
+}
+.wx-rp-me-tag {
+  background: #c9a35a;
+  color: #1c1912;
 }
 .wx-rp-result-greet {
   margin: 16px 0 0;
@@ -7791,8 +7818,8 @@ img.feed-assistant-avatar {
 }
 .wx-rp-result-row-name {
   display: flex;
-  align-items: baseline;
-  gap: 6px;
+  align-items: center;
+  gap: 5px;
   min-width: 0;
 }
 .wx-rp-result-row-main strong {

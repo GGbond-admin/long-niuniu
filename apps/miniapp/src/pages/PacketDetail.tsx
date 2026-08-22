@@ -181,7 +181,13 @@ export default function PacketDetail({ overlay = false }: { overlay?: boolean } 
             ) : (
               <em>{(sender.name || '?').slice(0, 1)}</em>
             )}
-            <span>{sender.name} 发出的红包</span>
+            <span className="wx-rp-result-sender-name">{sender.name}</span>
+            {kind === 'game' ? (
+              <i className="wx-rp-banker-tag" aria-label="庄家">
+                庄
+              </i>
+            ) : null}
+            <span className="wx-rp-result-sender-suffix">发出的红包</span>
           </div>
           <p className="wx-rp-result-greet">{greeting}</p>
           {gone && !amountCents ? (
@@ -228,9 +234,6 @@ export default function PacketDetail({ overlay = false }: { overlay?: boolean } 
             const name = claim.nickname || '玩家';
             const isLucky = claim.uid === luckyUid;
             const isMine = claim.uid === myUid;
-            const roles = [claim.isBanker ? '庄' : '', claim.isTail ? '认尾' : '']
-              .filter(Boolean)
-              .join(' · ');
             return (
               <div
                 className={`wx-rp-result-row${isMine ? ' mine' : ''}`}
@@ -244,7 +247,17 @@ export default function PacketDetail({ overlay = false }: { overlay?: boolean } 
                 <div className="wx-rp-result-row-main">
                   <div className="wx-rp-result-row-name">
                     <strong>{name}</strong>
-                    {roles && <span className="wx-rp-result-role">{roles}</span>}
+                    {claim.isBanker ? (
+                      <i className="wx-rp-banker-tag" aria-label="庄家">
+                        庄
+                      </i>
+                    ) : null}
+                    {isMine ? (
+                      <i className="wx-rp-me-tag" aria-label="我">
+                        我
+                      </i>
+                    ) : null}
+                    {claim.isTail ? <span className="wx-rp-result-role">认尾</span> : null}
                   </div>
                   <small>{formatClaimTime(claim.at)}</small>
                 </div>
